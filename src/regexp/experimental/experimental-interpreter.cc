@@ -147,8 +147,8 @@ class NfaInterpreter {
         input_object_(input),
         input_(ToCharacterVector<Character>(input, no_gc_)),
         input_index_(input_index),
-        pc_last_input_index_(zone->AllocateArray<int>(bytecode->length()),
-                             bytecode->length()),
+        pc_last_input_index_(zone->AllocateArray<int>(2 * bytecode->length()),
+                             2 * bytecode->length()),
         active_threads_(0, zone),
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
@@ -218,6 +218,11 @@ class NfaInterpreter {
     // `register_count_per_match_`.  Should be deallocated with
     // `register_array_allocator_`.
     int* register_array_begin;
+    // Whether this thread is allowed to exit a loop, i.e. go through an
+    // `END_LOOP` instructions. This allows to discard threads which went
+    // through a whole loop without consuming from the string, fixing
+    // (lmermod,v8:14098)
+    bool exit_allowed;
   };
 
   // Handles pending interrupts if there are any.  Returns
@@ -329,8 +334,11 @@ class NfaInterpreter {
     }
 
     // All threads start at bytecode 0.
+    // The initial value of exit_allowed is irrelevant before entering the first
+    // quantifier
     active_threads_.Add(
-        InterpreterThread{0, NewRegisterArray(kUndefinedRegisterValue)}, zone_);
+        InterpreterThread{0, NewRegisterArray(kUndefinedRegisterValue), true},
+        zone_);
     // Run the initial thread, potentially forking new threads, until every
     // thread is blocked without further input.
     RunActiveThreads();
@@ -372,8 +380,8 @@ class NfaInterpreter {
   //   the current input index. All remaining `active_threads_` are discarded.
   void RunActiveThread(InterpreterThread t) {
     while (true) {
-      if (IsPcProcessed(t.pc)) return;
-      MarkPcProcessed(t.pc);
+      if (IsPcProcessed(t.pc, t.exit_allowed)) return;
+      MarkPcProcessed(t.pc, t.exit_allowed);
 
       RegExpInstruction inst = bytecode_[t.pc];
       switch (inst.opcode) {
@@ -390,8 +398,8 @@ class NfaInterpreter {
           ++t.pc;
           break;
         case RegExpInstruction::FORK: {
-          InterpreterThread fork{inst.payload.pc,
-                                 NewRegisterArrayUninitialized()};
+          InterpreterThread fork{
+              inst.payload.pc, NewRegisterArrayUninitialized(), t.exit_allowed};
           base::Vector<int> fork_registers = GetRegisterArray(fork);
           base::Vector<int> t_registers = GetRegisterArray(t);
           DCHECK_EQ(fork_registers.length(), t_registers.length());
@@ -425,6 +433,17 @@ class NfaInterpreter {
               kUndefinedRegisterValue;
           ++t.pc;
           break;
+        case RegExpInstruction::BEGIN_LOOP:
+          t.exit_allowed = false;
+          ++t.pc;
+          break;
+        case RegExpInstruction::END_LOOP:
+          if (!t.exit_allowed) {
+            DestroyThread(t);
+            return;
+          }
+          ++t.pc;
+          break;
       }
     }
   }
@@ -452,6 +471,7 @@ class NfaInterpreter {
       RegExpInstruction::Uc16Range range = inst.payload.consume_range;
       if (input_char >= range.min && input_char <= range.max) {
         ++t.pc;
+        t.exit_allowed = true;
         active_threads_.Add(t, zone_);
       } else {
         DestroyThread(t);
@@ -486,28 +506,30 @@ class NfaInterpreter {
     FreeRegisterArray(t.register_array_begin);
   }
 
-  // It is redundant to have two threads t, t0 execute at the same PC value,
-  // because one of t, t0 matches iff the other does.  We can thus discard
-  // the one with lower priority.  We check whether a thread executed at some
-  // PC value by recording for every possible value of PC what the value of
-  // input_index_ was the last time a thread executed at PC. If a thread
-  // tries to continue execution at a PC value that we have seen before at
-  // the current input index, we abort it. (We execute threads with higher
+  // It is redundant to have two threads t, t0 execute at the same PC and
+  // exit_allowed values, because one of t, t0 matches iff the other does.  We
+  // can thus discard the one with lower priority.  We check whether a thread
+  // executed at some PC value by recording for every possible value of PC what
+  // the value of input_index_ was the last time a thread executed at PC. If a
+  // thread tries to continue execution at a PC value that we have seen before
+  // at the current input index, we abort it. (We execute threads with higher
   // priority first, so the second thread is guaranteed to have lower
   // priority.)
   //
-  // Check whether we've seen an active thread with a given pc value since the
-  // last increment of `input_index_`.
-  bool IsPcProcessed(int pc) {
-    DCHECK_LE(pc_last_input_index_[pc], input_index_);
-    return pc_last_input_index_[pc] == input_index_;
+  // Check whether we've seen an active thread with a given pc and exit_allowed
+  // value since the last increment of `input_index_`.
+  bool IsPcProcessed(int pc, bool exit_allowed) {
+    const int idx = 2 * pc + exit_allowed;
+    DCHECK_LE(pc_last_input_index_[idx], input_index_);
+    return pc_last_input_index_[idx] == input_index_;
   }
 
   // Mark a pc as having been processed since the last increment of
   // `input_index_`.
-  void MarkPcProcessed(int pc) {
-    DCHECK_LE(pc_last_input_index_[pc], input_index_);
-    pc_last_input_index_[pc] = input_index_;
+  void MarkPcProcessed(int pc, bool exit_allowed) {
+    const int idx = 2 * pc + exit_allowed;
+    DCHECK_LE(pc_last_input_index_[idx], input_index_);
+    pc_last_input_index_[idx] = input_index_;
   }
 
   Isolate* const isolate_;
@@ -526,10 +548,12 @@ class NfaInterpreter {
   base::Vector<const Character> input_;
   int input_index_;
 
-  // pc_last_input_index_[k] records the value of input_index_ the last
-  // time a thread t such that t.pc == k was activated, i.e. put on
-  // active_threads_.  Thus pc_last_input_index.size() == bytecode.size().  See
-  // also `RunActiveThread`.
+  // pc_last_input_index_[2*k] records the value of input_index_ the last
+  // time a thread t such that t.pc == k was activated with exit_allowed ==
+  // false i.e. put on active_threads_. Similarly, pc_last_input_index_[2*k+1]
+  // records the value when t.pc == k and exit_allowed == true.
+  // Thus pc_last_input_index.size() == 2 * bytecode.size(). See also
+  // `RunActiveThread`.
   base::Vector<int> pc_last_input_index_;
 
   // Active threads can potentially (but not necessarily) continue without

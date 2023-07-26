@@ -260,6 +260,10 @@ class BytecodeAssembler {
     code_.Add(RegExpInstruction::SetRegisterToCp(register_index), zone_);
   }
 
+  void BeginLoop() { code_.Add(RegExpInstruction::BeginLoop(), zone_); }
+
+  void EndLoop() { code_.Add(RegExpInstruction::EndLoop(), zone_); }
+
   void Bind(Label& target) {
     DCHECK_EQ(target.state_, Label::UNBOUND);
 
@@ -472,7 +476,9 @@ class CompileVisitor : private RegExpVisitor {
     //
     //   begin:
     //     FORK end
+    //     BEGIN_LOOP
     //     <body>
+    //     END_LOOP
     //     JMP begin
     //   end:
     //     ...
@@ -484,7 +490,9 @@ class CompileVisitor : private RegExpVisitor {
 
     assembler_.Bind(begin);
     assembler_.Fork(end);
+    assembler_.BeginLoop();
     emit_body();
+    assembler_.EndLoop();
     assembler_.Jmp(begin);
 
     assembler_.Bind(end);
@@ -498,7 +506,9 @@ class CompileVisitor : private RegExpVisitor {
     //     FORK body
     //     JMP end
     //   body:
+    //     BEGIN_LOOP
     //     <body>
+    //     END_LOOP
     //     FORK body
     //   end:
     //     ...
@@ -510,7 +520,9 @@ class CompileVisitor : private RegExpVisitor {
     assembler_.Jmp(end);
 
     assembler_.Bind(body);
+    assembler_.BeginLoop();
     emit_body();
+    assembler_.EndLoop();
     assembler_.Fork(body);
 
     assembler_.Bind(end);
