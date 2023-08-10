@@ -148,7 +148,7 @@ class NfaInterpreter {
         input_(ToCharacterVector<Character>(input, no_gc_)),
         input_index_(input_index),
         pc_last_input_index_(
-            zone->AllocateArray<ProcessedInstruction>(bytecode->length()),
+            zone->AllocateArray<PCLastInputIndex>(bytecode->length()),
             bytecode->length()),
         active_threads_(0, zone),
         blocked_threads_(0, zone),
@@ -159,7 +159,7 @@ class NfaInterpreter {
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    const ProcessedInstruction default_pi = {-1, -1};
+    const PCLastInputIndex default_pi = {-1, -1};
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               default_pi);
   }
@@ -326,7 +326,7 @@ class NfaInterpreter {
     //
     // for all k > 0 hold I think everything should be fine.  Maybe we can do
     // something about this in `SetInputIndex`.
-    const ProcessedInstruction default_pi = {-1, -1};
+    const PCLastInputIndex default_pi = {-1, -1};
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               default_pi);
 
@@ -350,7 +350,8 @@ class NfaInterpreter {
     // The initial value of consumed_since_last_quantifier is irrelevant before
     // entering the first quantifier.
     active_threads_.Add(
-        InterpreterThread(0, NewRegisterArray(kUndefinedRegisterValue), InterpreterThread::ConsumedCharacter::DidConsume),
+        InterpreterThread(0, NewRegisterArray(kUndefinedRegisterValue),
+                          InterpreterThread::ConsumedCharacter::DidConsume),
         zone_);
     // Run the initial thread, potentially forking new threads, until every
     // thread is blocked without further input.
@@ -448,11 +449,15 @@ class NfaInterpreter {
           ++t.pc;
           break;
         case RegExpInstruction::BEGIN_LOOP:
-          t.consumed_since_last_quantifier = InterpreterThread::ConsumedCharacter::DidNotConsume;
+          t.consumed_since_last_quantifier =
+              InterpreterThread::ConsumedCharacter::DidNotConsume;
           ++t.pc;
           break;
         case RegExpInstruction::END_LOOP:
-          if (t.consumed_since_last_quantifier == InterpreterThread::ConsumedCharacter::DidNotConsume) {
+          // If the thread did not consume any character during a whole
+          // quantifier iteration,then it must be destroyed, since it will go back to its preceding, already processed state
+          if (t.consumed_since_last_quantifier ==
+              InterpreterThread::ConsumedCharacter::DidNotConsume) {
             DestroyThread(t);
             return;
           }
@@ -485,7 +490,8 @@ class NfaInterpreter {
       RegExpInstruction::Uc16Range range = inst.payload.consume_range;
       if (input_char >= range.min && input_char <= range.max) {
         ++t.pc;
-        t.consumed_since_last_quantifier = InterpreterThread::ConsumedCharacter::DidConsume;
+        t.consumed_since_last_quantifier =
+            InterpreterThread::ConsumedCharacter::DidConsume;
         active_threads_.Add(t, zone_);
       } else {
         DestroyThread(t);
@@ -533,7 +539,9 @@ class NfaInterpreter {
   // Check whether we've seen an active thread with a given pc and
   // consumed_since_last_quantifier value since the last increment of
   // `input_index_`.
-  bool IsPcProcessed(int pc, InterpreterThread::ConsumedCharacter consumed_since_last_quantifier) {
+  bool IsPcProcessed(
+      int pc,
+      InterpreterThread::ConsumedCharacter consumed_since_last_quantifier) {
     DCHECK_LE(pc_last_input_index_[pc], input_index_);
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
@@ -547,8 +555,9 @@ class NfaInterpreter {
 
   // Mark a pc as having been processed since the last increment of
   // `input_index_`.
-  void MarkPcProcessed(int pc,
-                       InterpreterThread::ConsumedCharacter consumed_since_last_quantifier) {
+  void MarkPcProcessed(
+      int pc,
+      InterpreterThread::ConsumedCharacter consumed_since_last_quantifier) {
     DCHECK_LE(pc_last_input_index_[idx], input_index_);
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
@@ -576,7 +585,7 @@ class NfaInterpreter {
   base::Vector<const Character> input_;
   int input_index_;
 
-  struct ProcessedInstruction {
+  struct PCLastInputIndex {
     int having_consumed_character;
     int not_having_consumed_character;
   };
@@ -585,7 +594,7 @@ class NfaInterpreter {
   // time a thread t such that t.pc == k was activated for both values of
   // consumed_since_last_quantifier. Thus pc_last_input_index.size() ==
   // bytecode.size(). See also `RunActiveThread`.
-  base::Vector<ProcessedInstruction> pc_last_input_index_;
+  base::Vector<PCLastInputIndex> pc_last_input_index_;
 
   // Active threads can potentially (but not necessarily) continue without
   // input.  Sorted from low to high priority.
