@@ -148,7 +148,7 @@ class NfaInterpreter {
         input_(ToCharacterVector<Character>(input, no_gc_)),
         input_index_(input_index),
         pc_last_input_index_(
-            zone->AllocateArray<PCLastInputIndex>(bytecode->length()),
+            zone->AllocateArray<LastInputIndex>(bytecode->length()),
             bytecode->length()),
         active_threads_(0, zone),
         blocked_threads_(0, zone),
@@ -159,7 +159,7 @@ class NfaInterpreter {
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    const PCLastInputIndex default_pi = {-1, -1};
+    const LastInputIndex default_pi = {-1, -1};
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               default_pi);
   }
@@ -326,7 +326,7 @@ class NfaInterpreter {
     //
     // for all k > 0 hold I think everything should be fine.  Maybe we can do
     // something about this in `SetInputIndex`.
-    const PCLastInputIndex default_pi = {-1, -1};
+    const LastInputIndex default_pi = {-1, -1};
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               default_pi);
 
@@ -585,7 +585,10 @@ class NfaInterpreter {
   base::Vector<const Character> input_;
   int input_index_;
 
-  struct PCLastInputIndex {
+  // Stores the last input index at which a thread was activated for a given pc.
+  // Two values are stored, depending on the value
+  // consumed_since_last_quantifier of the thread
+  struct LastInputIndex {
     int having_consumed_character;
     int not_having_consumed_character;
   };
@@ -594,7 +597,7 @@ class NfaInterpreter {
   // time a thread t such that t.pc == k was activated for both values of
   // consumed_since_last_quantifier. Thus pc_last_input_index.size() ==
   // bytecode.size(). See also `RunActiveThread`.
-  base::Vector<PCLastInputIndex> pc_last_input_index_;
+  base::Vector<LastInputIndex> pc_last_input_index_;
 
   // Active threads can potentially (but not necessarily) continue without
   // input.  Sorted from low to high priority.
