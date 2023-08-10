@@ -84,7 +84,9 @@ class CanBeHandledVisitor final : private RegExpVisitor {
     return nullptr;
   }
 
-  void* VisitAtom(RegExpAtom* node, void*) override { return nullptr; }
+  void* VisitAtom(RegExpAtom* node, void*) override {
+    return nullptr;
+  }
 
   void* VisitText(RegExpText* node, void*) override {
     for (TextElement& el : *node->elements()) {
@@ -258,9 +260,13 @@ class BytecodeAssembler {
     code_.Add(RegExpInstruction::SetRegisterToCp(register_index), zone_);
   }
 
-  void BeginLoop() { code_.Add(RegExpInstruction::BeginLoop(), zone_); }
+  void BeginLoop() {
+    code_.Add(RegExpInstruction::BeginLoop(), zone_);
+  }
 
-  void EndLoop() { code_.Add(RegExpInstruction::EndLoop(), zone_); }
+  void EndLoop() {
+    code_.Add(RegExpInstruction::EndLoop(), zone_);
+  }
 
   void Bind(Label& target) {
     DCHECK_EQ(target.state_, Label::UNBOUND);
