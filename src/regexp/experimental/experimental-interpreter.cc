@@ -159,9 +159,9 @@ class NfaInterpreter {
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    const LastInputIndex default_pi = {-1, -1};
+    const LastInputIndex default_last_input_index = {-1, -1};
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
-              default_pi);
+              default_last_input_index);
   }
 
   // Finds matches and writes their concatenated capture registers to
@@ -326,9 +326,9 @@ class NfaInterpreter {
     //
     // for all k > 0 hold I think everything should be fine.  Maybe we can do
     // something about this in `SetInputIndex`.
-    const LastInputIndex default_pi = {-1, -1};
+    const LastInputIndex default_last_input_index = {-1, -1};
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
-              default_pi);
+              default_last_input_index);
 
     // Clean up left-over data from a previous call to FindNextMatch.
     for (InterpreterThread t : blocked_threads_) {
@@ -455,7 +455,8 @@ class NfaInterpreter {
           break;
         case RegExpInstruction::END_LOOP:
           // If the thread did not consume any character during a whole
-          // quantifier iteration,then it must be destroyed, since it will go back to its preceding, already processed state
+          // quantifier iteration,then it must be destroyed, since quantifier
+          // repetitions are not allowed to match the empty string
           if (t.consumed_since_last_quantifier ==
               InterpreterThread::ConsumedCharacter::DidNotConsume) {
             DestroyThread(t);
