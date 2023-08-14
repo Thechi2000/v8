@@ -598,7 +598,7 @@ class CompileVisitor : private RegExpVisitor {
       assembler_.Bind(body);
       assembler_.BeginLoop();
       emit_body();
-      assembler_.EndLoop()
+      assembler_.EndLoop();
     }
     assembler_.Bind(end);
   }
