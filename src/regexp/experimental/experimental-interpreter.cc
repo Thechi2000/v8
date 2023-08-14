@@ -230,9 +230,11 @@ class NfaInterpreter {
     // `register_count_per_match_`.  Should be deallocated with
     // `register_array_allocator_`.
     int* register_array_begin;
-    // Whether this thread is allowed to exit a loop, i.e. go through an
-    // `END_LOOP` instructions. This prevents the discard of threads with
-    // different threads, some having consumed characters, others not.
+    // Describe whether the thread consumed a character since it last entered a
+    // quantifier. Since quantifier iterations that match the empty string are
+    // not allowed, we need to distinguish threads that are allowed to exit a
+    // quantifier iteration from those that are not
+
     ConsumedCharacter consumed_since_last_quantifier;
   };
 
