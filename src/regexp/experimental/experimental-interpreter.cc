@@ -233,7 +233,7 @@ class NfaInterpreter {
     // Describe whether the thread consumed a character since it last entered a
     // quantifier. Since quantifier iterations that match the empty string are
     // not allowed, we need to distinguish threads that are allowed to exit a
-    // quantifier iteration from those that are not
+    // quantifier iteration from those that are not.
 
     ConsumedCharacter consumed_since_last_quantifier;
   };
@@ -458,7 +458,7 @@ class NfaInterpreter {
         case RegExpInstruction::END_LOOP:
           // If the thread did not consume any character during a whole
           // quantifier iteration,then it must be destroyed, since quantifier
-          // repetitions are not allowed to match the empty string
+          // repetitions are not allowed to match the empty string.
           if (t.consumed_since_last_quantifier ==
               InterpreterThread::ConsumedCharacter::DidNotConsume) {
             DestroyThread(t);
