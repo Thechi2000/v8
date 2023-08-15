@@ -675,7 +675,8 @@ class CompileVisitor : private RegExpVisitor {
     // infinity and body is non nullable, the last mandatory repetition can be
     // handled along with the optional ones.
     bool can_be_reduced_to_non_nullable_plus =
-        node->min() > 0 && node->max() == RegExpTree::kInfinity;
+        node->min() > 0 && node->max() == RegExpTree::kInfinity &&
+        node->body()->min_match() > 0;
 
     // Compile the mandatory repetitions. If the expression can be expressed
     // with a non nullable plus (i.e. the quantifiers has bounds {n, infinity},
@@ -692,7 +693,7 @@ class CompileVisitor : private RegExpVisitor {
         UNREACHABLE();
       case RegExpQuantifier::GREEDY: {
         if (node->max() == RegExpTree::kInfinity) {
-          if (node->min() > 0 && node->min_match() > 0) {
+          if (can_be_reduced_to_non_nullable_plus) {
             // Compile both last mandatory repetition and optional ones.
             CompileNonNullableGreedyPlus(emit_body);
           } else {
@@ -706,7 +707,7 @@ class CompileVisitor : private RegExpVisitor {
       }
       case RegExpQuantifier::NON_GREEDY: {
         if (node->max() == RegExpTree::kInfinity) {
-          if (node->min() > 0 && node->min_match() > 0) {
+          if (can_be_reduced_to_non_nullable_plus) {
             // Compile both last mandatory repetition and optional ones.
             CompileNonNullableNonGreedyPlus(emit_body);
           } else {
