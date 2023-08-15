@@ -84,7 +84,9 @@ class CanBeHandledVisitor final : private RegExpVisitor {
     return nullptr;
   }
 
-  void* VisitAtom(RegExpAtom* node, void*) override { return nullptr; }
+  void* VisitAtom(RegExpAtom* node, void*) override {
+    return nullptr;
+  }
 
   void* VisitText(RegExpText* node, void*) override {
     for (TextElement& el : *node->elements()) {
@@ -547,7 +549,7 @@ class CompileVisitor : private RegExpVisitor {
     //     ...
     //
     // We add `BEGIN_LOOP` and `END_LOOP` instructions because these optional
-    // repetitions of the body cannot match the empty string
+    // repetitions of the body cannot match the empty string.
 
     Label end;
     for (int i = 0; i != max_repetition_num; ++i) {
@@ -587,7 +589,7 @@ class CompileVisitor : private RegExpVisitor {
     //     ...
     //
     // We add `BEGIN_LOOP` and `END_LOOP` instructions because these optional
-    // repetitions of the body cannot match the empty string
+    // repetitions of the body cannot match the empty string.
 
     Label end;
     for (int i = 0; i != max_repetition_num; ++i) {
