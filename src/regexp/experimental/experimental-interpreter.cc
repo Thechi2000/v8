@@ -543,12 +543,15 @@ class NfaInterpreter {
   bool IsPcProcessed(
       int pc,
       InterpreterThread::ConsumedCharacter consumed_since_last_quantifier) {
-    DCHECK_LE(pc_last_input_index_[pc], input_index_);
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
+        DCHECK_LE(pc_last_input_index_[pc].having_consumed_character,
+                  input_index_);
         return pc_last_input_index_[pc].having_consumed_character ==
                input_index_;
       case InterpreterThread::ConsumedCharacter::DidNotConsume:
+        DCHECK_LE(pc_last_input_index_[pc].not_having_consumed_character,
+                  input_index_);
         return pc_last_input_index_[pc].not_having_consumed_character ==
                input_index_;
     }
