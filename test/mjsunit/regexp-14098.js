@@ -12,6 +12,7 @@
 var str = "ab";
 
 // executed by the Experimental engine (l flag)
+var exp_repetitions = /(?:a?b??){0,2}/l;
 var exp_empty_star = /(?:a?b??)*/l;
 
 // executed by the backtracking engine
@@ -25,4 +26,5 @@ var bt_empty_star = /(?:a?b??)*/;
 // a non-empty repetition of the star.
 
 assertEquals(["ab"], bt_empty_star.exec(str));
-assertEquals(["ab"], exp_empty_star.exec(str));
+assertEquals(['ab'], exp_empty_star.exec(str));
+assertEquals(['ab'], exp_repetitions.exec(str));

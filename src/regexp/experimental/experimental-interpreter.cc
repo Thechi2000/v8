@@ -159,9 +159,8 @@ class NfaInterpreter {
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    const LastInputIndex default_last_input_index = {-1, -1};
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
-              default_last_input_index);
+              LastInputIndex());
   }
 
   // Finds matches and writes their concatenated capture registers to
@@ -328,9 +327,8 @@ class NfaInterpreter {
     //
     // for all k > 0 hold I think everything should be fine.  Maybe we can do
     // something about this in `SetInputIndex`.
-    const LastInputIndex default_last_input_index = {-1, -1};
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
-              default_last_input_index);
+              LastInputIndex());
 
     // Clean up left-over data from a previous call to FindNextMatch.
     for (InterpreterThread t : blocked_threads_) {
@@ -561,12 +559,15 @@ class NfaInterpreter {
   void MarkPcProcessed(
       int pc,
       InterpreterThread::ConsumedCharacter consumed_since_last_quantifier) {
-    DCHECK_LE(pc_last_input_index_[idx], input_index_);
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
+        DCHECK_LE(pc_last_input_index_[pc].having_consumed_character,
+                  input_index_);
         pc_last_input_index_[pc].having_consumed_character = input_index_;
         break;
       case InterpreterThread::ConsumedCharacter::DidNotConsume:
+        DCHECK_LE(pc_last_input_index_[pc].not_having_consumed_character,
+                  input_index_);
         pc_last_input_index_[pc].not_having_consumed_character = input_index_;
         break;
     }
@@ -590,8 +591,15 @@ class NfaInterpreter {
 
   // Stores the last input index at which a thread was activated for a given pc.
   // Two values are stored, depending on the value
-  // consumed_since_last_quantifier of the thread
-  struct LastInputIndex {
+  // consumed_since_last_quantifier of the thread.
+  class LastInputIndex {
+   public:
+    LastInputIndex() : LastInputIndex(-1, -1) {}
+    LastInputIndex(int having_consumed_character,
+                   int not_having_consumed_character)
+        : having_consumed_character(having_consumed_character),
+          not_having_consumed_character(not_having_consumed_character) {}
+
     int having_consumed_character;
     int not_having_consumed_character;
   };
