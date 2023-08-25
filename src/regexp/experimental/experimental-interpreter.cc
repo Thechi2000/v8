@@ -540,9 +540,8 @@ class NfaInterpreter {
   // Check whether we've seen an active thread with a given pc and
   // consumed_since_last_quantifier value since the last increment of
   // `input_index_`.
-  bool IsPcProcessed(
-      int pc,
-      InterpreterThread::ConsumedCharacter consumed_since_last_quantifier) {
+  bool IsPcProcessed(int pc, typename InterpreterThread::ConsumedCharacter
+                                 consumed_since_last_quantifier) {
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
         DCHECK_LE(pc_last_input_index_[pc].having_consumed_character,
@@ -559,9 +558,8 @@ class NfaInterpreter {
 
   // Mark a pc as having been processed since the last increment of
   // `input_index_`.
-  void MarkPcProcessed(
-      int pc,
-      InterpreterThread::ConsumedCharacter consumed_since_last_quantifier) {
+  void MarkPcProcessed(int pc, typename InterpreterThread::ConsumedCharacter
+                                   consumed_since_last_quantifier) {
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
         DCHECK_LE(pc_last_input_index_[pc].having_consumed_character,
