@@ -122,7 +122,12 @@ class CanBeHandledVisitor final : private RegExpVisitor {
 
     int local_replication;
     if (node->max() == RegExpTree::kInfinity) {
-      local_replication = std::max(node->min(), 1);
+      if (node->min() > 0 && node->min_match() > 0) {
+        // Quantifier can be reduced to a non nullable plus
+        local_replication = std::max(node->min(), 1);
+      } else {
+        local_replication = node->min();
+      }
     } else {
       local_replication = node->max();
     }
@@ -604,55 +609,57 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   // In the general case, the first repetition of <body>+ is different
-  // from the following ones as it is allowed to match the empty string. But
-  // in the particular case where <body> cannot match the empty string,
-  // the plus can be compiled without duplicating the bytecode of <body>
-  // as follows:
+  // from the following ones as it is allowed to match the empty string. This is
+  // compiled by repeating <body>, but it can result in a bytecode that grows
+  // quadratically with the size of the regex when nesting pluses or repetition
+  // upper-bounded with infinity.
   //
-  // Emit bytecode corresponding to /<body>+/, with <body> not
-  // nullable (lmermod,v8:14100). Receives the label placed before the last
-  // iteration of the body. The function expects to be called after this last
-  // iteration
+  // In the particular case where <body> cannot match the empty string, the
+  // plus can be compiled without duplicating the bytecode of <body>.
+  //
+  // E.g. `/(.)+/` will be compiled by repeating `/./ once, while `/(.?)+/` will
+  // be compiled as `/(.).*/`, resulting in two repetitions of the body.
+
+  // Emit bytecode corresponding to /<emit_body>+/, with <emit_body> not
+  // nullable.
   template <class F>
   void CompileNonNullableGreedyPlus(F&& emit_body) {
     // This is compiled into
     //
-    //   body:
+    //   begin:
     //     <body>
     //
     //     FORK end
-    //     JMP body
+    //     JMP begin
     //   end:
     //     ...
+    Label begin, end;
 
-    Label body, end;
-
-    assembler_.Bind(body);
+    assembler_.Bind(begin);
     emit_body();
 
     assembler_.Fork(end);
-    assembler_.Jmp(body);
+    assembler_.Jmp(begin);
     assembler_.Bind(end);
   }
 
-  // Emit bytecode corresponding to /<body>+?/, with <body> not
-  // nullable (lmermod,v8:14100). Receives the label placed before the last
-  // iteration of the body.
+  // Emit bytecode corresponding to /<emit_body>+?/, with <emit_body> not
+  // nullable.
   template <class F>
   void CompileNonNullableNonGreedyPlus(F&& emit_body) {
     // This is compiled into
     //
-    //   body:
+    //   begin:
     //     <body>
     //
-    //     FORK body
+    //     FORK begin
     //     ...
-    Label body;
+    Label begin;
 
-    assembler_.Bind(body);
+    assembler_.Bind(begin);
     emit_body();
 
-    assembler_.Fork(body);
+    assembler_.Fork(begin);
   }
 
   void* VisitQuantifier(RegExpQuantifier* node, void*) override {
@@ -670,10 +677,6 @@ class CompileVisitor : private RegExpVisitor {
       node->body()->Accept(this, nullptr);
     };
 
-    // In the general case, we first compile `min()` mandatory repetitions and
-    // then handle the optional ones. In the special case where min > 0, max =
-    // infinity and body is non nullable, the last mandatory repetition can be
-    // handled along with the optional ones.
     bool can_be_reduced_to_non_nullable_plus =
         node->min() > 0 && node->max() == RegExpTree::kInfinity &&
         node->body()->min_match() > 0;
@@ -697,11 +700,10 @@ class CompileVisitor : private RegExpVisitor {
             // Compile both last mandatory repetition and optional ones.
             CompileNonNullableGreedyPlus(emit_body);
           } else {
-            CompileGreedyStar(emit_body);
+            DCHECK_NE(node->max(), RegExpTree::kInfinity);
+            CompileGreedyRepetition(emit_body, node->max() - node->min());
           }
-        } else {
-          DCHECK_NE(node->max(), RegExpTree::kInfinity);
-          CompileGreedyRepetition(emit_body, node->max() - node->min());
+          break;
         }
         break;
       }
@@ -711,14 +713,44 @@ class CompileVisitor : private RegExpVisitor {
             // Compile both last mandatory repetition and optional ones.
             CompileNonNullableNonGreedyPlus(emit_body);
           } else {
-            CompileNonGreedyStar(emit_body);
+            DCHECK_NE(node->max(), RegExpTree::kInfinity);
+            CompileNonGreedyRepetition(emit_body, node->max() - node->min());
           }
-        } else {
-          DCHECK_NE(node->max(), RegExpTree::kInfinity);
-          CompileNonGreedyRepetition(emit_body, node->max() - node->min());
+        }
+      }
+    } else {
+      // Compile <body>+ into <body><body>*, and <body>{n,}, with n != 0, into
+      // <body>{n}<body>*.
+
+      // Compile the first `min()` repetitions.
+      for (int i = 0; i < node->min(); ++i) {
+        emit_body();
+      }
+
+      // Compile the optional repetitions, using stars or repetitions.
+      switch (node->quantifier_type()) {
+        case RegExpQuantifier::POSSESSIVE:
+          UNREACHABLE();
+        case RegExpQuantifier::GREEDY: {
+          if (node->max() == RegExpTree::kInfinity) {
+            CompileGreedyStar(emit_body);
+          } else {
+            DCHECK_NE(node->max(), RegExpTree::kInfinity);
+            CompileGreedyRepetition(emit_body, node->max() - node->min());
+          }
+          break;
+        }
+        case RegExpQuantifier::NON_GREEDY: {
+          if (node->max() == RegExpTree::kInfinity) {
+            CompileNonGreedyStar(emit_body);
+          } else {
+            DCHECK_NE(node->max(), RegExpTree::kInfinity);
+            CompileNonGreedyRepetition(emit_body, node->max() - node->min());
+          }
         }
       }
     }
+
     return nullptr;
   }
 
