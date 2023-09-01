@@ -611,14 +611,16 @@ class CompileVisitor : private RegExpVisitor {
   // In the general case, the first repetition of <body>+ is different
   // from the following ones as it is allowed to match the empty string. This is
   // compiled by repeating <body>, but it can result in a bytecode that grows
-  // quadratically with the size of the regex when nesting pluses or repetition
+  // quadratically with the size of the regex when nested pluses or repetition
   // upper-bounded with infinity.
   //
   // In the particular case where <body> cannot match the empty string, the
-  // plus can be compiled without duplicating the bytecode of <body>.
+  // plus can be compiled without duplicating the bytecode of <body>, resulting
+  // in a bytecode linear in the size of the regex in case of nested
+  // non-nullable pluses.
   //
-  // E.g. `/(.)+/` will be compiled by repeating `/./ once, while `/(.?)+/` will
-  // be compiled as `/(.).*/`, resulting in two repetitions of the body.
+  // E.g. `/.+/` will be compiled by repeating `/./` once, while `/(?:.?)+/`
+  // will be compiled as `/..*/`, resulting in two repetitions of the body.
 
   // Emit bytecode corresponding to /<emit_body>+/, with <emit_body> not
   // nullable.
