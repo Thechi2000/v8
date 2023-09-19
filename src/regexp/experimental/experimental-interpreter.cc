@@ -60,7 +60,7 @@ base::Vector<RegExpInstruction> ToInstructionVector(
   RegExpInstruction* inst_begin =
       reinterpret_cast<RegExpInstruction*>(raw_bytes->GetDataStartAddress());
   int inst_num = raw_bytes->length() / sizeof(RegExpInstruction);
-  DCHECK_EQ(sizeof(RegExpInstruction) * inst_num, raw_bytes->length());
+  DCHECK_EQ(sizeof(RegExpInstruction) * inst_num, raw_bytes.length());
   return base::Vector<RegExpInstruction>(inst_begin, inst_num);
 }
 
@@ -649,7 +649,7 @@ int ExperimentalRegExpInterpreter::FindMatches(
                                         start_index, zone);
     return interpreter.FindMatches(output_registers, output_register_count);
   } else {
-    DCHECK(input->GetFlatContent(no_gc).IsTwoByte());
+    DCHECK(input.GetFlatContent(no_gc).IsTwoByte());
     NfaInterpreter<base::uc16> interpreter(isolate, call_origin, bytecode,
                                            register_count_per_match, input,
                                            start_index, zone);
