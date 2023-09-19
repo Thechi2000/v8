@@ -681,24 +681,27 @@ class CompileVisitor : private RegExpVisitor {
 
     bool can_be_reduced_to_non_nullable_plus =
         node->min() > 0 && node->max() == RegExpTree::kInfinity &&
-        node->body()->min_match() > 0;
+        node->min_match() > 0;
 
-    // Compile the mandatory repetitions. If the expression can be expressed
-    // with a non nullable plus (i.e. the quantifiers has bounds {n, infinity},
-    // n > 0), we repeat `min() - 1` times, such that the last repetition can be
-    // reused in a loop.
-    for (int i = 0; i < (can_be_reduced_to_non_nullable_plus ? node->min() - 1
-                                                             : node->min());
-         ++i)
-      emit_body();
+    if (can_be_reduced_to_non_nullable_plus) {
+      // Compile <body>+ with an optimization allowing linear sized bytecode in
+      // the case of nested pluses. Repetitions with infinite upperbound like
+      // <body>{n,}, with n != 0, are compiled into <body>{n-1}<body+>, avoiding
+      // one repetition, compared to <body>{n}<body>*.
 
-    // Compile the optional repetitions.
-    switch (node->quantifier_type()) {
-      case RegExpQuantifier::POSSESSIVE:
-        UNREACHABLE();
-      case RegExpQuantifier::GREEDY: {
-        if (node->max() == RegExpTree::kInfinity) {
-          if (can_be_reduced_to_non_nullable_plus) {
+      // Compile the mandatory repetitions. We repeat `min() - 1` times, such
+      // that the last repetition, compiled later, can be reused in a loop.
+      for (int i = 0; i < node->min() - 1; ++i) {
+        emit_body();
+      }
+
+      // Compile the optional repetitions, using an optimized plus when
+      // possible.
+      switch (node->quantifier_type()) {
+        case RegExpQuantifier::POSSESSIVE:
+          UNREACHABLE();
+        case RegExpQuantifier::GREEDY: {
+          if (node->max() == RegExpTree::kInfinity) {
             // Compile both last mandatory repetition and optional ones.
             CompileNonNullableGreedyPlus(emit_body);
           } else {
@@ -707,11 +710,8 @@ class CompileVisitor : private RegExpVisitor {
           }
           break;
         }
-        break;
-      }
-      case RegExpQuantifier::NON_GREEDY: {
-        if (node->max() == RegExpTree::kInfinity) {
-          if (can_be_reduced_to_non_nullable_plus) {
+        case RegExpQuantifier::NON_GREEDY: {
+          if (node->max() == RegExpTree::kInfinity) {
             // Compile both last mandatory repetition and optional ones.
             CompileNonNullableNonGreedyPlus(emit_body);
           } else {
@@ -721,8 +721,8 @@ class CompileVisitor : private RegExpVisitor {
         }
       }
     } else {
-      // When body is nullable, compile <body>+ into <body><body>*, and
-      // <body>{n,}, with n != 0, into <body>{n}<body>*.
+      // Compile <body>+ into <body><body>*, and <body>{n,}, with n != 0, into
+      // <body>{n}<body>*.
 
       // Compile the first `min()` repetitions.
       for (int i = 0; i < node->min(); ++i) {
