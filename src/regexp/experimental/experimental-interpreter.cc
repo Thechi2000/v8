@@ -153,6 +153,9 @@ class NfaInterpreter {
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
         best_match_registers_(base::nullopt),
+        clock(0),
+        quantifiers_clock(zone->AllocateArray<int>(bytecode.length()),
+                          bytecode.length()),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
@@ -218,6 +221,10 @@ class NfaInterpreter {
     // `register_count_per_match_`.  Should be deallocated with
     // `register_array_allocator_`.
     int* register_array_begin;
+    // Pointer to an array containing the clock when the register was last
+    // saved, which is always size `register_count_per_match_`.  Should be
+    // deallocated with `register_array_allocator_`.
+    int* quantifiers_clock_array_begin;
   };
 
   // Handles pending interrupts if there are any.  Returns
@@ -330,7 +337,9 @@ class NfaInterpreter {
 
     // All threads start at bytecode 0.
     active_threads_.Add(
-        InterpreterThread{0, NewRegisterArray(kUndefinedRegisterValue)}, zone_);
+        InterpreterThread{0, NewRegisterArray(kUndefinedRegisterValue),
+                          NewRegisterArray(0)},
+        zone_);
     // Run the initial thread, potentially forking new threads, until every
     // thread is blocked without further input.
     RunActiveThreads();
@@ -371,6 +380,8 @@ class NfaInterpreter {
   // - If `t` executes ACCEPT, set `best_match` according to `t.match_begin` and
   //   the current input index. All remaining `active_threads_` are discarded.
   void RunActiveThread(InterpreterThread t) {
+    ++clock;
+
     while (true) {
       if (IsPcProcessed(t.pc)) return;
       MarkPcProcessed(t.pc);
@@ -390,13 +401,26 @@ class NfaInterpreter {
           ++t.pc;
           break;
         case RegExpInstruction::FORK: {
-          InterpreterThread fork{inst.payload.pc,
-                                 NewRegisterArrayUninitialized()};
+          InterpreterThread fork{
+              inst.payload.pc, NewRegisterArrayUninitialized(),
+              NewRegisterArrayUninitialized()};
+
           base::Vector<int> fork_registers = GetRegisterArray(fork);
           base::Vector<int> t_registers = GetRegisterArray(t);
           DCHECK_EQ(fork_registers.length(), t_registers.length());
           std::copy(t_registers.begin(), t_registers.end(),
                     fork_registers.begin());
+
+          base::Vector<int> fork_quantifier_clocks =
+              GetQuantifierClockArray(fork);
+          base::Vector<int> t_fork_quantifier_clocks =
+              GetQuantifierClockArray(t);
+          DCHECK_EQ(fork_quantifier_clocks.length(),
+                    t_fork_quantifier_clocks.length());
+          std::copy(t_fork_quantifier_clocks.begin(),
+                    t_fork_quantifier_clocks.end(),
+                    fork_quantifier_clocks.begin());
+
           active_threads_.Add(fork, zone_);
 
           ++t.pc;
@@ -466,6 +490,11 @@ class NfaInterpreter {
     return base::Vector<int>(t.register_array_begin, register_count_per_match_);
   }
 
+  base::Vector<int> GetQuantifierClockArray(InterpreterThread t) {
+    return base::Vector<int>(t.quantifiers_clock_array_begin,
+                             register_count_per_match_);
+  }
+
   int* NewRegisterArrayUninitialized() {
     return register_array_allocator_.allocate(register_count_per_match_);
   }
@@ -525,6 +554,11 @@ class NfaInterpreter {
   String input_object_;
   base::Vector<const Character> input_;
   int input_index_;
+
+  // Global clock counting the total of executed instructions
+  int clock;
+  // Stores the global clock value at the last time we went into each quantifier
+  base::Vector<int> quantifiers_clock;
 
   // pc_last_input_index_[k] records the value of input_index_ the last
   // time a thread t such that t.pc == k was activated, i.e. put on
