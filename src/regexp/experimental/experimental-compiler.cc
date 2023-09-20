@@ -123,10 +123,10 @@ class CanBeHandledVisitor final : private RegExpVisitor {
     int local_replication;
     if (node->max() == RegExpTree::kInfinity) {
       if (node->min() > 0 && node->min_match() > 0) {
-        // Quantifier can be reduced to a non nullable plus
+        // Quantifier can be reduced to a non nullable plus.
         local_replication = std::max(node->min(), 1);
       } else {
-        local_replication = node->min();
+        local_replication = node->min() + 1;
       }
     } else {
       local_replication = node->max();
