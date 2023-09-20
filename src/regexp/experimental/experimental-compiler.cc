@@ -260,6 +260,10 @@ class BytecodeAssembler {
     code_.Add(RegExpInstruction::SetRegisterToCp(register_index), zone_);
   }
 
+  void SetQuantToClock(int32_t quantifier_id) {
+    code_.Add(RegExpInstruction::SetQuantToClock(quantifier_id), zone_);
+  }
+
   void Bind(Label& target) {
     DCHECK_EQ(target.state_, Label::UNBOUND);
 

@@ -100,6 +100,7 @@ struct RegExpInstruction {
     FORK,
     JMP,
     SET_REGISTER_TO_CP,
+    SET_QUANT_TO_CLOCK,
   };
 
   struct Uc16Range {
@@ -165,6 +166,13 @@ struct RegExpInstruction {
     return result;
   }
 
+  static RegExpInstruction SetQuantToClock(int32_t quantifier_id) {
+    RegExpInstruction result;
+    result.opcode = SET_QUANT_TO_CLOCK;
+    result.payload.quantifier_id = quantifier_id;
+    return result;
+  }
+
   Opcode opcode;
   union {
     // Payload of CONSUME_RANGE:
@@ -175,6 +183,8 @@ struct RegExpInstruction {
     int32_t register_index;
     // Payload of ASSERTION:
     RegExpAssertion::Type assertion_type;
+    // Payload of SET_QUANT_TO_CLOCK
+    int32_t quantifier_id;
   } payload;
   static_assert(sizeof(payload) == 4);
 };
