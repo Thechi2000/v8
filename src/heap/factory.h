@@ -893,12 +893,13 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // irregexp regexp and stores it in the regexp.
   void SetRegExpIrregexpData(Handle<JSRegExp> regexp, Handle<String> source,
                              JSRegExp::Flags flags, int capture_count,
-                             uint32_t backtrack_limit);
+                             int quantifier_count, uint32_t backtrack_limit);
 
   // Creates a new FixedArray that holds the data associated with the
   // experimental regexp and stores it in the regexp.
   void SetRegExpExperimentalData(Handle<JSRegExp> regexp, Handle<String> source,
-                                 JSRegExp::Flags flags, int capture_count);
+                                 JSRegExp::Flags flags, int capture_count,
+                                 int quantifier_count);
 
   // Returns the value for a known global constant (a property of the global
   // object which is neither configurable nor writable) like 'undefined'.

@@ -137,25 +137,27 @@ class NfaInterpreter {
   // ACCEPTing thread with highest priority.
  public:
   NfaInterpreter(Isolate* isolate, RegExp::CallOrigin call_origin,
-                 ByteArray bytecode, int register_count_per_match, String input,
-                 int32_t input_index, Zone* zone)
+                 ByteArray bytecode, int register_count_per_match,
+                 int quantifier_count, String input, int32_t input_index,
+                 Zone* zone)
       : isolate_(isolate),
         call_origin_(call_origin),
         bytecode_object_(bytecode),
         bytecode_(ToInstructionVector(bytecode, no_gc_)),
         register_count_per_match_(register_count_per_match),
+        quantifiers_count_(quantifier_count),
         input_object_(input),
         input_(ToCharacterVector<Character>(input, no_gc_)),
         input_index_(input_index),
-        pc_last_input_index_(zone->AllocateArray<int>(bytecode->length()),
-                             bytecode->length()),
+        clock(0),
+        quantifiers_clock(zone->AllocateArray<int>(bytecode.length()),
+                          bytecode.length()),
+        pc_last_input_index_(zone->AllocateArray<int>(bytecode.length()),
+                             bytecode.length()),
         active_threads_(0, zone),
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
         best_match_registers_(base::nullopt),
-        clock(0),
-        quantifiers_clock(zone->AllocateArray<int>(bytecode.length()),
-                          bytecode.length()),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
@@ -401,9 +403,9 @@ class NfaInterpreter {
           ++t.pc;
           break;
         case RegExpInstruction::FORK: {
-          InterpreterThread fork{
-              inst.payload.pc, NewRegisterArrayUninitialized(),
-              NewRegisterArrayUninitialized()};
+          InterpreterThread fork{inst.payload.pc,
+                                 NewRegisterArrayUninitialized(),
+                                 NewRegisterArrayUninitialized()};
 
           base::Vector<int> fork_registers = GetRegisterArray(fork);
           base::Vector<int> t_registers = GetRegisterArray(t);
@@ -447,6 +449,10 @@ class NfaInterpreter {
         case RegExpInstruction::CLEAR_REGISTER:
           GetRegisterArray(t)[inst.payload.register_index] =
               kUndefinedRegisterValue;
+          ++t.pc;
+          break;
+        case RegExpInstruction::SET_QUANT_TO_CLOCK:
+          GetQuantifierClockArray(t)[inst.payload.quantifier_id] = clock;
           ++t.pc;
           break;
       }
@@ -551,6 +557,9 @@ class NfaInterpreter {
   // Number of registers used per thread.
   const int register_count_per_match_;
 
+  // Number of quantifiers in the regexp.
+  const int quantifiers_count_;
+
   String input_object_;
   base::Vector<const Character> input_;
   int input_index_;
@@ -592,21 +601,22 @@ class NfaInterpreter {
 
 int ExperimentalRegExpInterpreter::FindMatches(
     Isolate* isolate, RegExp::CallOrigin call_origin, ByteArray bytecode,
-    int register_count_per_match, String input, int start_index,
-    int32_t* output_registers, int output_register_count, Zone* zone) {
-  DCHECK(input->IsFlat());
+    int register_count_per_match, int quantifier_count, String input,
+    int start_index, int32_t* output_registers, int output_register_count,
+    Zone* zone) {
+  DCHECK(input.IsFlat());
   DisallowGarbageCollection no_gc;
 
-  if (input->GetFlatContent(no_gc).IsOneByte()) {
-    NfaInterpreter<uint8_t> interpreter(isolate, call_origin, bytecode,
-                                        register_count_per_match, input,
-                                        start_index, zone);
+  if (input.GetFlatContent(no_gc).IsOneByte()) {
+    NfaInterpreter<uint8_t> interpreter(
+        isolate, call_origin, bytecode, register_count_per_match,
+        quantifier_count, input, start_index, zone);
     return interpreter.FindMatches(output_registers, output_register_count);
   } else {
-    DCHECK(input->GetFlatContent(no_gc).IsTwoByte());
-    NfaInterpreter<base::uc16> interpreter(isolate, call_origin, bytecode,
-                                           register_count_per_match, input,
-                                           start_index, zone);
+    DCHECK(input.GetFlatContent(no_gc).IsTwoByte());
+    NfaInterpreter<base::uc16> interpreter(
+        isolate, call_origin, bytecode, register_count_per_match,
+        quantifier_count, input, start_index, zone);
     return interpreter.FindMatches(output_registers, output_register_count);
   }
 }

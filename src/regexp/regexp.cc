@@ -38,7 +38,8 @@ class RegExpImpl final : public AllStatic {
   // Prepares a JSRegExp object with Irregexp-specific data.
   static void IrregexpInitialize(Isolate* isolate, Handle<JSRegExp> re,
                                  Handle<String> pattern, RegExpFlags flags,
-                                 int capture_count, uint32_t backtrack_limit);
+                                 int capture_count, int quantifier_count,
+                                 uint32_t backtrack_limit);
 
   // Prepare a RegExp for being executed one or more times (using
   // IrregexpExecOnce) on the subject.
@@ -233,7 +234,8 @@ MaybeHandle<Object> RegExp::Compile(Isolate* isolate, Handle<JSRegExp> re,
                                        parse_result.capture_count)) {
     DCHECK(v8_flags.enable_experimental_regexp_engine);
     ExperimentalRegExp::Initialize(isolate, re, pattern, flags,
-                                   parse_result.capture_count);
+                                   parse_result.capture_count,
+                                   parse_result.quantifier_count);
     has_been_compiled = true;
   } else if (flags & JSRegExp::kLinear) {
     DCHECK(v8_flags.enable_experimental_regexp_engine);
@@ -245,7 +247,8 @@ MaybeHandle<Object> RegExp::Compile(Isolate* isolate, Handle<JSRegExp> re,
                                           RegExpError::kNotLinear);
     }
     ExperimentalRegExp::Initialize(isolate, re, pattern, flags,
-                                   parse_result.capture_count);
+                                   parse_result.capture_count,
+                                   parse_result.quantifier_count);
     has_been_compiled = true;
   } else if (parse_result.simple && !IsIgnoreCase(flags) && !IsSticky(flags) &&
              !HasFewDifferentCharacters(pattern)) {
@@ -268,8 +271,9 @@ MaybeHandle<Object> RegExp::Compile(Isolate* isolate, Handle<JSRegExp> re,
     }
   }
   if (!has_been_compiled) {
-    RegExpImpl::IrregexpInitialize(isolate, re, pattern, flags,
-                                   parse_result.capture_count, backtrack_limit);
+    RegExpImpl::IrregexpInitialize(
+        isolate, re, pattern, flags, parse_result.capture_count,
+        parse_result.quantifier_count, backtrack_limit);
   }
   DCHECK(re->data().IsFixedArray());
   // Compilation succeeded so the data is set on the regexp
@@ -639,12 +643,12 @@ Code RegExpImpl::IrregexpNativeCode(FixedArray re, bool is_one_byte) {
 
 void RegExpImpl::IrregexpInitialize(Isolate* isolate, Handle<JSRegExp> re,
                                     Handle<String> pattern, RegExpFlags flags,
-                                    int capture_count,
+                                    int capture_count, int quantifier_count,
                                     uint32_t backtrack_limit) {
   // Initialize compiled code entries to null.
-  isolate->factory()->SetRegExpIrregexpData(re, pattern,
-                                            JSRegExp::AsJSRegExpFlags(flags),
-                                            capture_count, backtrack_limit);
+  isolate->factory()->SetRegExpIrregexpData(
+      re, pattern, JSRegExp::AsJSRegExpFlags(flags), capture_count,
+      quantifier_count, backtrack_limit);
 }
 
 // static

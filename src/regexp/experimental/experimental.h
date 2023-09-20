@@ -24,7 +24,7 @@ class ExperimentalRegExp final : public AllStatic {
                            int capture_count);
   static void Initialize(Isolate* isolate, Handle<JSRegExp> re,
                          Handle<String> pattern, RegExpFlags flags,
-                         int capture_count);
+                         int capture_count, int quantifier_count);
   static bool IsCompiled(Handle<JSRegExp> re, Isolate* isolate);
   V8_WARN_UNUSED_RESULT
   static bool Compile(Isolate* isolate, Handle<JSRegExp> re);

@@ -78,6 +78,8 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   inline int max_register_count() const;
   // Number of captures (without the match itself).
   inline int capture_count() const;
+  // Number of quantifiers TODO including `?` ?
+  inline int quantifier_count() const;
   inline Object capture_name_map();
   inline void set_capture_name_map(Handle<FixedArray> capture_name_map);
   uint32_t backtrack_limit() const;
@@ -192,10 +194,13 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   // Number of captures in the compiled regexp.
   static constexpr int kIrregexpCaptureCountIndex =
       kIrregexpMaxRegisterCountIndex + 1;
+  // Number of quantifiers in the compiled regexp.
+  static constexpr int kIrregexpQuantifierCountIndex =
+      kIrregexpCaptureCountIndex + 1;
   // Maps names of named capture groups (at indices 2i) to their corresponding
   // (1-based) capture group indices (at indices 2i + 1).
   static constexpr int kIrregexpCaptureNameMapIndex =
-      kIrregexpCaptureCountIndex + 1;
+      kIrregexpQuantifierCountIndex + 1;
   // Tier-up ticks are set to the value of the tier-up ticks flag. The value is
   // decremented on each execution of the bytecode, so that the tier-up
   // happens once the ticks reach zero.

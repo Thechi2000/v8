@@ -3725,6 +3725,7 @@ void Factory::SetRegExpAtomData(Handle<JSRegExp> regexp, Handle<String> source,
 void Factory::SetRegExpIrregexpData(Handle<JSRegExp> regexp,
                                     Handle<String> source,
                                     JSRegExp::Flags flags, int capture_count,
+                                    int quantifier_count,
                                     uint32_t backtrack_limit) {
   DCHECK(Smi::IsValid(backtrack_limit));
   Tagged<FixedArray> store =
@@ -3743,6 +3744,8 @@ void Factory::SetRegExpIrregexpData(Handle<JSRegExp> regexp,
   store->set(JSRegExp::kIrregexpUC16BytecodeIndex, uninitialized);
   store->set(JSRegExp::kIrregexpMaxRegisterCountIndex, Smi::zero());
   store->set(JSRegExp::kIrregexpCaptureCountIndex, Smi::FromInt(capture_count));
+  store->set(JSRegExp::kIrregexpQuantifierCountIndex,
+             Smi::FromInt(quantifier_count));
   store->set(JSRegExp::kIrregexpCaptureNameMapIndex, uninitialized);
   store->set(JSRegExp::kIrregexpTicksUntilTierUpIndex, ticks_until_tier_up);
   store->set(JSRegExp::kIrregexpBacktrackLimit, Smi::FromInt(backtrack_limit));
@@ -3752,7 +3755,8 @@ void Factory::SetRegExpIrregexpData(Handle<JSRegExp> regexp,
 void Factory::SetRegExpExperimentalData(Handle<JSRegExp> regexp,
                                         Handle<String> source,
                                         JSRegExp::Flags flags,
-                                        int capture_count) {
+                                        int capture_count,
+                                        int quantifier_count) {
   Tagged<FixedArray> store =
       *NewFixedArray(JSRegExp::kExperimentalDataSize, AllocationType::kYoung);
   DisallowGarbageCollection no_gc;
@@ -3767,6 +3771,8 @@ void Factory::SetRegExpExperimentalData(Handle<JSRegExp> regexp,
   store->set(JSRegExp::kIrregexpUC16BytecodeIndex, uninitialized);
   store->set(JSRegExp::kIrregexpMaxRegisterCountIndex, uninitialized);
   store->set(JSRegExp::kIrregexpCaptureCountIndex, Smi::FromInt(capture_count));
+  store->set(JSRegExp::kIrregexpQuantifierCountIndex,
+             Smi::FromInt(quantifier_count));
   store->set(JSRegExp::kIrregexpCaptureNameMapIndex, uninitialized);
   store->set(JSRegExp::kIrregexpTicksUntilTierUpIndex, uninitialized);
   store->set(JSRegExp::kIrregexpBacktrackLimit, uninitialized);

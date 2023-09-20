@@ -509,6 +509,7 @@ class RegExpParserImpl final {
   bool contains_anchor() const { return contains_anchor_; }
   void set_contains_anchor() { contains_anchor_ = true; }
   int captures_started() const { return captures_started_; }
+  int quantifiers() const { return quantifiers_; }
   int position() const { return next_pos_ - 1; }
   bool failed() const { return failed_; }
   RegExpFlags flags() const { return top_level_flags_; }
@@ -610,6 +611,7 @@ class RegExpParserImpl final {
   int next_pos_;
   int captures_started_;
   int capture_count_;  // Only valid after we have scanned for captures.
+  int quantifiers_;
   bool has_more_;
   bool simple_;
   bool contains_anchor_;
@@ -636,6 +638,7 @@ RegExpParserImpl<CharT>::RegExpParserImpl(
       next_pos_(0),
       captures_started_(0),
       capture_count_(0),
+      quantifiers_(0),
       has_more_(true),
       simple_(false),
       contains_anchor_(false),
@@ -1232,6 +1235,7 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
         continue;
     }
     RegExpQuantifier::QuantifierType quantifier_type = RegExpQuantifier::GREEDY;
+    ++quantifiers_;
     if (current() == '?') {
       quantifier_type = RegExpQuantifier::NON_GREEDY;
       Advance();

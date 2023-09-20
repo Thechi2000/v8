@@ -46,6 +46,18 @@ int JSRegExp::capture_count() const {
   }
 }
 
+int JSRegExp::quantifier_count() const {
+  switch (type_tag()) {
+    case ATOM:
+      return 0;
+    case EXPERIMENTAL:
+    case IRREGEXP:
+      return Smi::ToInt(DataAt(kIrregexpQuantifierCountIndex));
+    default:
+      UNREACHABLE();
+  }
+}
+
 int JSRegExp::max_register_count() const {
   CHECK_EQ(type_tag(), IRREGEXP);
   return Smi::ToInt(DataAt(kIrregexpMaxRegisterCountIndex));

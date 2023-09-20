@@ -61,6 +61,9 @@ struct RegExpCompileData {
   // The number of registers used by the generated code.
   int register_count = 0;
 
+  // The number of quantifiers TODO including `?` ?
+  int quantifier_count = 0;
+
   // The compilation target (bytecode or native code).
   RegExpCompilationTarget compilation_target;
 };
