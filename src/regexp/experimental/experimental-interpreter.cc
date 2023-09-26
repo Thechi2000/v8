@@ -19,6 +19,111 @@ namespace internal {
 
 namespace {
 
+class FilterGroupsVisitor final : private RegExpVisitor {
+ public:
+  static void Filter(Zone* zone, RegExpTree* tree, base::Vector<int>& groups,
+                     base::Vector<int>& groups_clocks,
+                     base::Vector<int>& quantifier_clocks) {
+    base::Vector<int> filtered_groups = zone->AllocateVector<int>(groups.size());
+    FilterGroupsVisitor visitor(groups.data(), groups_clocks.data(),
+                                filtered_groups.data(),
+                                quantifier_clocks.data());
+
+    int clock = 0;
+    tree->Accept(&visitor, &clock);
+
+    std::copy(filtered_groups.begin(), filtered_groups.end(), groups.begin());
+  }
+
+ private:
+  FilterGroupsVisitor(int* groups, int* groups_clocks, int* filtered_groups,
+                      int* quantifier_clocks)
+      : groups_(groups),
+        groups_clocks_(groups_clocks),
+        filtered_groups_(filtered_groups),
+        quantifier_clocks_(quantifier_clocks) {}
+
+  void* VisitDisjunction(RegExpDisjunction* node, void* max_clock) override {
+    for (RegExpTree* alt : *node->alternatives()) {
+      alt->Accept(this, max_clock);
+    }
+    return nullptr;
+  }
+
+  void* VisitAlternative(RegExpAlternative* node, void* max_clock) override {
+    for (RegExpTree* alt : *node->nodes()) {
+      alt->Accept(this, max_clock);
+    }
+    return nullptr;
+  }
+
+  void* VisitClassRanges(RegExpClassRanges* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitClassSetOperand(RegExpClassSetOperand* node,
+                             void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitClassSetExpression(RegExpClassSetExpression* node,
+                                void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitAssertion(RegExpAssertion* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitAtom(RegExpAtom* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitText(RegExpText* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitQuantifier(RegExpQuantifier* node, void* max_clock) override {
+    auto clock = *((int*)max_clock);
+    auto quant_clock = quantifier_clocks_[node->index()];
+    if (quant_clock >= clock) {
+      node->body()->Accept(this, &quant_clock);
+    }
+    return nullptr;
+  }
+
+  void* VisitCapture(RegExpCapture* node, void* max_clock) override {
+    auto clock = *((int*)max_clock);
+    if (groups_clocks_[node->index()] >= clock) {
+      filtered_groups_[node->index()] = groups_[node->index()];
+    }
+    return nullptr;
+  }
+
+  void* VisitGroup(RegExpGroup* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitLookaround(RegExpLookaround* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitBackReference(RegExpBackReference* node,
+                           void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitEmpty(RegExpEmpty* node, void* max_clock) override {
+    return nullptr;
+  }
+
+ private:
+  int* groups_;
+  int* groups_clocks_;
+  int* filtered_groups_;
+  int* quantifier_clocks_;
+};
+
 constexpr int kUndefinedRegisterValue = -1;
 
 template <class Character>
@@ -137,9 +242,9 @@ class NfaInterpreter {
   // ACCEPTing thread with highest priority.
  public:
   NfaInterpreter(Isolate* isolate, RegExp::CallOrigin call_origin,
-                 ByteArray bytecode, int register_count_per_match,
-                 int quantifier_count, String input, int32_t input_index,
-                 Zone* zone)
+                 RegExpTree* tree, ByteArray bytecode,
+                 int register_count_per_match, int quantifier_count,
+                 String input, int32_t input_index, Zone* zone)
       : isolate_(isolate),
         call_origin_(call_origin),
         bytecode_object_(bytecode),
@@ -158,6 +263,7 @@ class NfaInterpreter {
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
         best_match_registers_(base::nullopt),
+        tree_(tree),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
@@ -370,6 +476,11 @@ class NfaInterpreter {
 
       // Run all threads until they block or accept.
       RunActiveThreads();
+    }
+
+    if (best_match_registers_.has_value()) {
+      FilterGroupsVisitor::Filter(zone_, tree_, *best_match_registers_,
+                                  NULL /* TODO */, quantifiers_clock);
     }
 
     return RegExp::kInternalRegExpSuccess;
@@ -594,28 +705,30 @@ class NfaInterpreter {
   // `register_array_allocator_`.
   base::Optional<base::Vector<int>> best_match_registers_;
 
+  RegExpTree* tree_;
+
   Zone* zone_;
 };
 
 }  // namespace
 
 int ExperimentalRegExpInterpreter::FindMatches(
-    Isolate* isolate, RegExp::CallOrigin call_origin, ByteArray bytecode,
-    int register_count_per_match, int quantifier_count, String input,
-    int start_index, int32_t* output_registers, int output_register_count,
-    Zone* zone) {
+    Isolate* isolate, RegExp::CallOrigin call_origin, RegExpTree* tree,
+    ByteArray bytecode, int register_count_per_match, int quantifier_count,
+    String input, int start_index, int32_t* output_registers,
+    int output_register_count, Zone* zone) {
   DCHECK(input.IsFlat());
   DisallowGarbageCollection no_gc;
 
   if (input.GetFlatContent(no_gc).IsOneByte()) {
     NfaInterpreter<uint8_t> interpreter(
-        isolate, call_origin, bytecode, register_count_per_match,
+        isolate, call_origin, tree, bytecode, register_count_per_match,
         quantifier_count, input, start_index, zone);
     return interpreter.FindMatches(output_registers, output_register_count);
   } else {
     DCHECK(input.GetFlatContent(no_gc).IsTwoByte());
     NfaInterpreter<base::uc16> interpreter(
-        isolate, call_origin, bytecode, register_count_per_match,
+        isolate, call_origin, tree, bytecode, register_count_per_match,
         quantifier_count, input, start_index, zone);
     return interpreter.FindMatches(output_registers, output_register_count);
   }

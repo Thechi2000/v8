@@ -585,9 +585,8 @@ class CompileVisitor : private RegExpVisitor {
     // clear registers in the first node->min() repetitions.
     // Later, and if node->min() == 0, we don't have to clear registers before
     // the first optional repetition.
-    Interval body_registers = node->body()->CaptureRegisters();
     auto emit_body = [&]() {
-      ClearRegisters(body_registers);
+      assembler_.SetQuantToClock(node->index());
       node->body()->Accept(this, nullptr);
     };
 

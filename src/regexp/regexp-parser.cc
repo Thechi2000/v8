@@ -20,7 +20,7 @@
 #include "unicode/unistr.h"
 #include "unicode/usetiter.h"
 #include "unicode/utf16.h"  // For U16_NEXT
-#endif  // V8_INTL_SUPPORT
+#endif                      // V8_INTL_SUPPORT
 
 namespace v8 {
 namespace internal {
@@ -308,7 +308,7 @@ class RegExpBuilder {
   void AddTerm(RegExpTree* tree);
   void AddAssertion(RegExpTree* tree);
   void NewAlternative();  // '|'
-  bool AddQuantifierToAtom(int min, int max,
+  bool AddQuantifierToAtom(int min, int max, int index,
                            RegExpQuantifier::QuantifierType type);
   void FlushText();
   RegExpTree* ToRegExp();
@@ -509,7 +509,7 @@ class RegExpParserImpl final {
   bool contains_anchor() const { return contains_anchor_; }
   void set_contains_anchor() { contains_anchor_ = true; }
   int captures_started() const { return captures_started_; }
-  int quantifiers() const { return quantifiers_; }
+  int quantifiers() const { return quantifier_count_; }
   int position() const { return next_pos_ - 1; }
   bool failed() const { return failed_; }
   RegExpFlags flags() const { return top_level_flags_; }
@@ -611,7 +611,7 @@ class RegExpParserImpl final {
   int next_pos_;
   int captures_started_;
   int capture_count_;  // Only valid after we have scanned for captures.
-  int quantifiers_;
+  int quantifier_count_;
   bool has_more_;
   bool simple_;
   bool contains_anchor_;
@@ -638,7 +638,7 @@ RegExpParserImpl<CharT>::RegExpParserImpl(
       next_pos_(0),
       captures_started_(0),
       capture_count_(0),
-      quantifiers_(0),
+      quantifier_count_(0),
       has_more_(true),
       simple_(false),
       contains_anchor_(false),
@@ -1235,7 +1235,7 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
         continue;
     }
     RegExpQuantifier::QuantifierType quantifier_type = RegExpQuantifier::GREEDY;
-    ++quantifiers_;
+    ++quantifier_count_;
     if (current() == '?') {
       quantifier_type = RegExpQuantifier::NON_GREEDY;
       Advance();
@@ -1244,7 +1244,8 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
       quantifier_type = RegExpQuantifier::POSSESSIVE;
       Advance();
     }
-    if (!builder->AddQuantifierToAtom(min, max, quantifier_type)) {
+    if (!builder->AddQuantifierToAtom(min, max, quantifier_count_,
+                                      quantifier_type)) {
       return ReportError(RegExpError::kInvalidQuantifier);
     }
   }
@@ -3050,7 +3051,8 @@ RegExpTree* RegExpBuilder::ToRegExp() {
 }
 
 bool RegExpBuilder::AddQuantifierToAtom(
-    int min, int max, RegExpQuantifier::QuantifierType quantifier_type) {
+    int min, int max, int index,
+    RegExpQuantifier::QuantifierType quantifier_type) {
   if (pending_empty_) {
     pending_empty_ = false;
     return true;
@@ -3082,7 +3084,7 @@ bool RegExpBuilder::AddQuantifierToAtom(
     UNREACHABLE();
   }
   terms_.emplace_back(
-      zone()->New<RegExpQuantifier>(min, max, quantifier_type, atom));
+      zone()->New<RegExpQuantifier>(min, max, quantifier_type, index, atom));
   return true;
 }
 
