@@ -77,6 +77,12 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
     case RegExpInstruction::END_LOOP:
       os << "END_LOOP";
       break;
+    case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
+      os << "WRITE_LOOK_TABLE " << inst.payload.looktable_index;
+      break;
+    case RegExpInstruction::READ_LOOKBEHIND_TABLE:
+      os << "READ_LOOK_TABLE " << inst.payload.looktable_index;
+      break;
   }
   return os;
 }

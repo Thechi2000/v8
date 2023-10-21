@@ -4,6 +4,8 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
+#include <iostream>
+
 #include "src/base/optional.h"
 #include "src/base/strings.h"
 #include "src/common/assert-scope.h"
@@ -154,10 +156,22 @@ class NfaInterpreter {
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
         best_match_registers_(base::nullopt),
+        lookbehind_pc_(0, zone),
+        lookbehind_table_(0, zone),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
+
+    for (int i = 0; i < bytecode_.length(); ++i) {
+      if ((bytecode_[i].opcode == RegExpInstruction::Opcode::ACCEPT ||
+           bytecode_[i].opcode ==
+               RegExpInstruction::Opcode::WRITE_LOOKBEHIND_TABLE) &&
+          i + 1 < bytecode_.length()) {
+        lookbehind_pc_.Add(i + 1, zone_);
+        lookbehind_table_.Add(false, zone_);
+      }
+    }
 
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
@@ -370,6 +384,8 @@ class NfaInterpreter {
       base::uc16 input_char = input_[input_index_];
       ++input_index_;
 
+      std::fill(lookbehind_table_.begin(), lookbehind_table_.end(), false);
+
       static constexpr int kTicksBetweenInterruptHandling = 64;
       if (input_index_ % kTicksBetweenInterruptHandling == 0) {
         int err_code = HandleInterrupts();
@@ -463,6 +479,14 @@ class NfaInterpreter {
             return;
           }
           ++t.pc;
+          break;
+        case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
+          lookbehind_table_[inst.payload.looktable_index] = true;
+          break;
+        case RegExpInstruction::READ_LOOKBEHIND_TABLE:
+          if (!lookbehind_table_[inst.payload.looktable_index]) {
+            DestroyThread(t);
+          }
           break;
       }
     }
@@ -629,6 +653,9 @@ class NfaInterpreter {
   // of the accepting thread with highest priority.  Should be deallocated with
   // `register_array_allocator_`.
   base::Optional<base::Vector<int>> best_match_registers_;
+
+  ZoneList<int> lookbehind_pc_;
+  ZoneList<bool> lookbehind_table_;
 
   Zone* zone_;
 };

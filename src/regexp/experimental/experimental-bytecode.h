@@ -102,6 +102,8 @@ struct RegExpInstruction {
     SET_REGISTER_TO_CP,
     BEGIN_LOOP,
     END_LOOP,
+    WRITE_LOOKBEHIND_TABLE,
+    READ_LOOKBEHIND_TABLE,
   };
 
   struct Uc16Range {
@@ -179,6 +181,20 @@ struct RegExpInstruction {
     return result;
   }
 
+  static RegExpInstruction WriteLookTable(int32_t index) {
+    RegExpInstruction result;
+    result.opcode = WRITE_LOOKBEHIND_TABLE;
+    result.payload.looktable_index = index;
+    return result;
+  }
+
+  static RegExpInstruction ReadLookTable(int32_t index) {
+    RegExpInstruction result;
+    result.opcode = READ_LOOKBEHIND_TABLE;
+    result.payload.looktable_index = index;
+    return result;
+  }
+
   Opcode opcode;
   union {
     // Payload of CONSUME_RANGE:
@@ -189,6 +205,8 @@ struct RegExpInstruction {
     int32_t register_index;
     // Payload of ASSERTION:
     RegExpAssertion::Type assertion_type;
+    // Payload of WRITE_LOOKBEHIND_TABLE and READ_LOOKBEHIND_TABLE:
+    int32_t looktable_index;
   } payload;
   static_assert(sizeof(payload) == 4);
 };

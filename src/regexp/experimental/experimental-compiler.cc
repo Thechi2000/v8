@@ -155,7 +155,11 @@ class CanBeHandledVisitor final : private RegExpVisitor {
   }
 
   void* VisitCapture(RegExpCapture* node, void*) override {
-    node->body()->Accept(this, nullptr);
+    if (inside_lookaround_) {
+      result_ = false;
+    } else {
+      node->body()->Accept(this, nullptr);
+    }
     return nullptr;
   }
 
@@ -167,7 +171,17 @@ class CanBeHandledVisitor final : private RegExpVisitor {
   void* VisitLookaround(RegExpLookaround* node, void*) override {
     // TODO(mbid, v8:10765): This will be hard to support, but not impossible I
     // think.  See product automata.
-    result_ = false;
+    auto temp = inside_lookaround_;
+    inside_lookaround_ = true;
+
+    if (node->type() == RegExpLookaround::Type::LOOKAHEAD) {
+      result_ = false;
+    } else {
+      node->body()->Accept(this, nullptr);
+    }
+
+    inside_lookaround_ = temp;
+
     return nullptr;
   }
 
@@ -182,6 +196,7 @@ class CanBeHandledVisitor final : private RegExpVisitor {
  private:
   // See comment in `VisitQuantifier`:
   int replication_factor_ = 1;
+  bool inside_lookaround_ = false;
 
   bool result_ = true;
 };
@@ -229,9 +244,16 @@ class BytecodeAssembler {
  public:
   // TODO(mbid,v8:10765): Use some upper bound for code_ capacity computed from
   // the `tree` size we're going to compile?
-  explicit BytecodeAssembler(Zone* zone) : zone_(zone), code_(0, zone) {}
+  explicit BytecodeAssembler(Zone* zone)
+      : zone_(zone), code_(0, zone), code_stack_(zone), lookbehinds_(zone_) {}
 
-  ZoneList<RegExpInstruction> IntoCode() && { return std::move(code_); }
+  ZoneList<RegExpInstruction> IntoCode() && {
+    auto code(std::move(code_));
+    for (auto it = lookbehinds_.begin(); it != lookbehinds_.end(); ++it) {
+      code.AddAll(*it, zone_);
+    }
+    return code;
+  }
 
   void Accept() { code_.Add(RegExpInstruction::Accept(), zone_); }
 
@@ -287,6 +309,22 @@ class BytecodeAssembler {
 
   void Fail() { code_.Add(RegExpInstruction::Fail(), zone_); }
 
+  void StartLookBehind() {
+    code_stack_.push_front(std::move(code_));
+    code_.DropAndClear();
+  }
+
+  void EndLookBehind(int32_t index) {
+    code_.Add(RegExpInstruction::WriteLookTable(index), zone_);
+    lookbehinds_.push_back(std::move(code_));
+    code_.DropAndClear();
+
+    code_.AddAll(code_stack_.front(), zone_);
+    code_stack_.pop_front();
+
+    code_.Add(RegExpInstruction::ReadLookTable(index), zone_);
+  }
+
  private:
   void LabelledInstrImpl(RegExpInstruction::Opcode op, Label& target) {
     RegExpInstruction result;
@@ -309,6 +347,8 @@ class BytecodeAssembler {
 
   Zone* zone_;
   ZoneList<RegExpInstruction> code_;
+  ZoneLinkedList<ZoneList<RegExpInstruction>> code_stack_;
+  ZoneLinkedList<ZoneList<RegExpInstruction>> lookbehinds_;
 };
 
 class CompileVisitor : private RegExpVisitor {
@@ -765,7 +805,15 @@ class CompileVisitor : private RegExpVisitor {
 
   void* VisitLookaround(RegExpLookaround* node, void*) override {
     // TODO(mbid,v8:10765): Support this case.
-    UNREACHABLE();
+    if (node->type() == RegExpLookaround::Type::LOOKBEHIND) {
+      assembler_.StartLookBehind();
+      node->body()->Accept(this, nullptr);
+      assembler_.EndLookBehind(node->index());
+    } else {
+      UNREACHABLE();
+    }
+
+    return nullptr;
   }
 
   void* VisitBackReference(RegExpBackReference* node, void*) override {
