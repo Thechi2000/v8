@@ -87,6 +87,7 @@ base::Vector<const base::uc16> ToCharacterVector<base::uc16>(
   DCHECK(content.IsTwoByte());
   return content.ToUC16Vector();
 }
+#include <iostream>
 
 template <class Character>
 class NfaInterpreter {
@@ -171,6 +172,8 @@ class NfaInterpreter {
         lookbehind_pc_.Add(i + 1, zone_);
         lookbehind_table_.Add(false, zone_);
       }
+
+      std::cout << bytecode_[i] << std::endl;
     }
 
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
@@ -343,6 +346,7 @@ class NfaInterpreter {
     // something about this in `SetInputIndex`.
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
+    std::fill(lookbehind_table_.begin(), lookbehind_table_.end(), false);
 
     // Clean up left-over data from a previous call to FindNextMatch.
     for (InterpreterThread t : blocked_threads_) {
@@ -367,6 +371,14 @@ class NfaInterpreter {
         InterpreterThread(0, NewRegisterArray(kUndefinedRegisterValue),
                           InterpreterThread::ConsumedCharacter::DidConsume),
         zone_);
+
+    for (auto it : lookbehind_pc_) {
+      active_threads_.Add(
+          InterpreterThread(it,
+                            NewRegisterArray(kUndefinedRegisterValue),
+                            InterpreterThread::ConsumedCharacter::DidConsume),
+          zone_);
+    }
     // Run the initial thread, potentially forking new threads, until every
     // thread is blocked without further input.
     RunActiveThreads();
@@ -482,6 +494,7 @@ class NfaInterpreter {
           break;
         case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
           lookbehind_table_[inst.payload.looktable_index] = true;
+          DestroyThread(t);
           break;
         case RegExpInstruction::READ_LOOKBEHIND_TABLE:
           if (!lookbehind_table_[inst.payload.looktable_index]) {

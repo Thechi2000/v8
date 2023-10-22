@@ -4,9 +4,15 @@
 
 #include "src/regexp/experimental/experimental-compiler.h"
 
+#include <optional>
+#include <variant>
+
+#include "src/base/logging.h"
 #include "src/base/strings.h"
+#include "src/regexp/experimental/experimental-bytecode.h"
 #include "src/regexp/experimental/experimental.h"
 #include "src/zone/zone-list-inl.h"
+#include "src/zone/zone-list.h"
 
 namespace v8 {
 namespace internal {
@@ -211,67 +217,99 @@ bool ExperimentalRegExpCompiler::CanBeHandled(RegExpTree* tree,
 
 namespace {
 
+class BytecodeAssembler;
+
 // A label in bytecode which starts with no known address. The address *must*
 // be bound with `Bind` before the label goes out of scope.
 // Implemented as a linked list through the `payload.pc` of FORK and JMP
 // instructions.
 struct Label {
  public:
-  Label() = default;
-  ~Label() {
-    DCHECK_EQ(state_, BOUND);
-    DCHECK_GE(bound_index_, 0);
-  }
-
-  // Don't copy, don't move.  Moving could be implemented, but it's not
-  // needed anywhere.
-  Label(const Label&) = delete;
-  Label& operator=(const Label&) = delete;
+  explicit Label(BytecodeAssembler& assembler);
+  ~Label() = default;
 
  private:
   friend class BytecodeAssembler;
 
-  // UNBOUND implies unbound_patch_list_begin_.
-  // BOUND implies bound_index_.
-  enum { UNBOUND, BOUND } state_ = UNBOUND;
-  union {
-    int unbound_patch_list_begin_ = -1;
-    int bound_index_;
-  };
+  int id_;
 };
 
 class BytecodeAssembler {
+ private:
+  struct Inst {
+    RegExpInstruction inst;
+    std::optional<Label> label;
+  };
+  typedef std::variant<Label, Inst> Instruction;
+
  public:
   // TODO(mbid,v8:10765): Use some upper bound for code_ capacity computed from
   // the `tree` size we're going to compile?
   explicit BytecodeAssembler(Zone* zone)
-      : zone_(zone), code_(0, zone), code_stack_(zone), lookbehinds_(zone_) {}
+      : zone_(zone),
+        code_(0, zone),
+        code_stack_(zone),
+        lookbehinds_(zone_),
+        label_fresh_id_(0) {}
 
   ZoneList<RegExpInstruction> IntoCode() && {
+    ZoneList<int> label_positions(label_fresh_id_, zone_);
+    for (int i = 0; i < label_fresh_id_; ++i) {
+      label_positions.Add(-1, zone_);
+    }
+
     auto code(std::move(code_));
     for (auto it = lookbehinds_.begin(); it != lookbehinds_.end(); ++it) {
       code.AddAll(*it, zone_);
     }
-    return code;
+
+    int instruction_count = 0;
+    for (auto it : code) {
+      if (it.index() == 0) {
+        Label& label = std::get<Label>(it);
+        DCHECK_LT(label.id_, label_fresh_id_);
+        DCHECK_EQ(label_positions[label.id_], -1);
+
+        label_positions[label.id_] = instruction_count + 1;
+      } else {
+        ++instruction_count;
+      }
+    }
+
+    ZoneList<RegExpInstruction> out(0, zone_);
+    for (auto it : code) {
+      if (it.index() == 1) {
+        Inst& inst = std::get<Inst>(it);
+        RegExpInstruction instruction(inst.inst);
+
+        if (inst.label.has_value()) {
+          instruction.payload.pc = label_positions[inst.label->id_];
+        }
+
+        out.Add(instruction, zone_);
+      }
+    }
+
+    return out;
   }
 
-  void Accept() { code_.Add(RegExpInstruction::Accept(), zone_); }
+  int getLabelFreshId() { return label_fresh_id_++; }
+
+  void Accept() { Add(RegExpInstruction::Accept()); }
 
   void Assertion(RegExpAssertion::Type t) {
-    code_.Add(RegExpInstruction::Assertion(t), zone_);
+    Add(RegExpInstruction::Assertion(t));
   }
 
   void ClearRegister(int32_t register_index) {
-    code_.Add(RegExpInstruction::ClearRegister(register_index), zone_);
+    Add(RegExpInstruction::ClearRegister(register_index));
   }
 
   void ConsumeRange(base::uc16 from, base::uc16 to) {
-    code_.Add(RegExpInstruction::ConsumeRange(from, to), zone_);
+    Add(RegExpInstruction::ConsumeRange(from, to));
   }
 
-  void ConsumeAnyChar() {
-    code_.Add(RegExpInstruction::ConsumeAnyChar(), zone_);
-  }
+  void ConsumeAnyChar() { Add(RegExpInstruction::ConsumeAnyChar()); }
 
   void Fork(Label& target) {
     LabelledInstrImpl(RegExpInstruction::Opcode::FORK, target);
@@ -282,74 +320,61 @@ class BytecodeAssembler {
   }
 
   void SetRegisterToCp(int32_t register_index) {
-    code_.Add(RegExpInstruction::SetRegisterToCp(register_index), zone_);
+    Add(RegExpInstruction::SetRegisterToCp(register_index));
   }
 
-  void BeginLoop() { code_.Add(RegExpInstruction::BeginLoop(), zone_); }
+  void BeginLoop() { Add(RegExpInstruction::BeginLoop()); }
 
-  void EndLoop() { code_.Add(RegExpInstruction::EndLoop(), zone_); }
+  void EndLoop() { Add(RegExpInstruction::EndLoop()); }
 
-  void Bind(Label& target) {
-    DCHECK_EQ(target.state_, Label::UNBOUND);
+  void Bind(Label target) { code_.Add(target, zone_); }
 
-    int index = code_.length();
-
-    while (target.unbound_patch_list_begin_ != -1) {
-      RegExpInstruction& inst = code_[target.unbound_patch_list_begin_];
-      DCHECK(inst.opcode == RegExpInstruction::FORK ||
-             inst.opcode == RegExpInstruction::JMP);
-
-      target.unbound_patch_list_begin_ = inst.payload.pc;
-      inst.payload.pc = index;
-    }
-
-    target.state_ = Label::BOUND;
-    target.bound_index_ = index;
-  }
-
-  void Fail() { code_.Add(RegExpInstruction::Fail(), zone_); }
+  void Fail() { Add(RegExpInstruction::Fail()); }
 
   void StartLookBehind() {
     code_stack_.push_front(std::move(code_));
     code_.DropAndClear();
+
+    Label begin(*this);
+    Bind(begin);
+    ConsumeAnyChar();
+    Fork(begin);
   }
 
   void EndLookBehind(int32_t index) {
-    code_.Add(RegExpInstruction::WriteLookTable(index), zone_);
+    Add(RegExpInstruction::WriteLookTable(index));
     lookbehinds_.push_back(std::move(code_));
     code_.DropAndClear();
 
     code_.AddAll(code_stack_.front(), zone_);
     code_stack_.pop_front();
 
-    code_.Add(RegExpInstruction::ReadLookTable(index), zone_);
+    Add(RegExpInstruction::ReadLookTable(index));
   }
 
  private:
+  void Add(RegExpInstruction inst) {
+    code_.Add(Inst{.inst = inst, .label = std::optional<Label>()}, zone_);
+  }
+
   void LabelledInstrImpl(RegExpInstruction::Opcode op, Label& target) {
-    RegExpInstruction result;
-    result.opcode = op;
-
-    if (target.state_ == Label::BOUND) {
-      result.payload.pc = target.bound_index_;
-    } else {
-      DCHECK_EQ(target.state_, Label::UNBOUND);
-      int new_list_begin = code_.length();
-      DCHECK_GE(new_list_begin, 0);
-
-      result.payload.pc = target.unbound_patch_list_begin_;
-
-      target.unbound_patch_list_begin_ = new_list_begin;
-    }
-
-    code_.Add(result, zone_);
+    code_.Add(Inst{.inst =
+                       RegExpInstruction{
+                           .opcode = op,
+                           .payload = {.pc = -1},
+                       },
+                   .label = std::optional<Label>(target)},
+              zone_);
   }
 
   Zone* zone_;
-  ZoneList<RegExpInstruction> code_;
-  ZoneLinkedList<ZoneList<RegExpInstruction>> code_stack_;
-  ZoneLinkedList<ZoneList<RegExpInstruction>> lookbehinds_;
+  ZoneList<Instruction> code_;
+  ZoneLinkedList<ZoneList<Instruction>> code_stack_;
+  ZoneLinkedList<ZoneList<Instruction>> lookbehinds_;
+  int label_fresh_id_;
 };
+
+Label::Label(BytecodeAssembler& assembler) : id_(assembler.getLabelFreshId()) {}
 
 class CompileVisitor : private RegExpVisitor {
  public:
@@ -409,10 +434,10 @@ class CompileVisitor : private RegExpVisitor {
       return;
     }
 
-    Label end;
+    Label end(assembler_);
 
     for (int i = 0; i != alt_num - 1; ++i) {
-      Label tail;
+      Label tail(assembler_);
       assembler_.Fork(tail);
       gen_alt(i);
       assembler_.Jmp(end);
@@ -528,8 +553,8 @@ class CompileVisitor : private RegExpVisitor {
     //
     // This is greedy because a forked thread has lower priority than the
     // thread that spawned it.
-    Label begin;
-    Label end;
+    Label begin(assembler_);
+    Label end(assembler_);
 
     assembler_.Bind(begin);
     assembler_.Fork(end);
@@ -556,8 +581,8 @@ class CompileVisitor : private RegExpVisitor {
     //   end:
     //     ...
 
-    Label body;
-    Label end;
+    Label body(assembler_);
+    Label end(assembler_);
 
     assembler_.Fork(body);
     assembler_.Jmp(end);
@@ -594,7 +619,7 @@ class CompileVisitor : private RegExpVisitor {
     // We add `BEGIN_LOOP` and `END_LOOP` instructions because these optional
     // repetitions of the body cannot match the empty string.
 
-    Label end;
+    Label end(assembler_);
     for (int i = 0; i != max_repetition_num; ++i) {
       assembler_.Fork(end);
       assembler_.BeginLoop();
@@ -634,9 +659,9 @@ class CompileVisitor : private RegExpVisitor {
     // We add `BEGIN_LOOP` and `END_LOOP` instructions because these optional
     // repetitions of the body cannot match the empty string.
 
-    Label end;
+    Label end(assembler_);
     for (int i = 0; i != max_repetition_num; ++i) {
-      Label body;
+      Label body(assembler_);
       assembler_.Fork(body);
       assembler_.Jmp(end);
 
@@ -675,7 +700,7 @@ class CompileVisitor : private RegExpVisitor {
     //     JMP begin
     //   end:
     //     ...
-    Label begin, end;
+    Label begin(assembler_), end(assembler_);
 
     assembler_.Bind(begin);
     emit_body();
@@ -696,7 +721,7 @@ class CompileVisitor : private RegExpVisitor {
     //
     //     FORK begin
     //     ...
-    Label begin;
+    Label begin(assembler_);
 
     assembler_.Bind(begin);
     emit_body();
