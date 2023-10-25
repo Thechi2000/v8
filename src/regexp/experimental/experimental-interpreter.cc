@@ -172,8 +172,6 @@ class NfaInterpreter {
         lookbehind_pc_.Add(i + 1, zone_);
         lookbehind_table_.Add(false, zone_);
       }
-
-      std::cout << bytecode_[i] << std::endl;
     }
 
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
@@ -364,18 +362,14 @@ class NfaInterpreter {
       best_match_registers_ = base::nullopt;
     }
 
-    // All threads start at bytecode 0.
-    // The initial value of consumed_since_last_quantifier is irrelevant before
-    // entering the first quantifier.
     active_threads_.Add(
         InterpreterThread(0, NewRegisterArray(kUndefinedRegisterValue),
                           InterpreterThread::ConsumedCharacter::DidConsume),
         zone_);
 
-    for (auto it : lookbehind_pc_) {
+    for (auto i : lookbehind_pc_) {
       active_threads_.Add(
-          InterpreterThread(it,
-                            NewRegisterArray(kUndefinedRegisterValue),
+          InterpreterThread(i, NewRegisterArray(kUndefinedRegisterValue),
                             InterpreterThread::ConsumedCharacter::DidConsume),
           zone_);
     }
@@ -499,6 +493,8 @@ class NfaInterpreter {
         case RegExpInstruction::READ_LOOKBEHIND_TABLE:
           if (!lookbehind_table_[inst.payload.looktable_index]) {
             DestroyThread(t);
+          } else {
+            ++t.pc;
           }
           break;
       }

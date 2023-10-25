@@ -270,7 +270,7 @@ class BytecodeAssembler {
         DCHECK_LT(label.id_, label_fresh_id_);
         DCHECK_EQ(label_positions[label.id_], -1);
 
-        label_positions[label.id_] = instruction_count + 1;
+        label_positions[label.id_] = instruction_count;
       } else {
         ++instruction_count;
       }
@@ -334,16 +334,11 @@ class BytecodeAssembler {
   void StartLookBehind() {
     code_stack_.push_front(std::move(code_));
     code_.DropAndClear();
-
-    Label begin(*this);
-    Bind(begin);
-    ConsumeAnyChar();
-    Fork(begin);
   }
 
   void EndLookBehind(int32_t index) {
     Add(RegExpInstruction::WriteLookTable(index));
-    lookbehinds_.push_back(std::move(code_));
+    lookbehinds_.push_front(std::move(code_));
     code_.DropAndClear();
 
     code_.AddAll(code_stack_.front(), zone_);
@@ -832,6 +827,10 @@ class CompileVisitor : private RegExpVisitor {
     // TODO(mbid,v8:10765): Support this case.
     if (node->type() == RegExpLookaround::Type::LOOKBEHIND) {
       assembler_.StartLookBehind();
+
+      auto emit_body = [&]() { assembler_.ConsumeAnyChar(); };
+      CompileNonGreedyStar(emit_body);
+
       node->body()->Accept(this, nullptr);
       assembler_.EndLookBehind(node->index());
     } else {
