@@ -225,17 +225,23 @@ class BytecodeAssembler;
 // instructions.
 struct Label {
  public:
-  explicit Label(BytecodeAssembler& assembler);
   ~Label() = default;
 
  private:
+  explicit Label(int id) : id_(id){};
   friend class BytecodeAssembler;
 
+  // Unique identifier of the label within the bytecode. Later used by
+  // `BytecodeAssembler` to assign the PCs.
   int id_;
 };
 
+// This class is used combine the instructions of the regexp.
 class BytecodeAssembler {
  private:
+  // A temporary instruction can either be a `Label` or a `RegExpInstruction`.
+  // For the latter, it may require a pc as payload, in which case we also give
+  // it a Label.
   struct Inst {
     RegExpInstruction inst;
     std::optional<Label> label;
@@ -258,6 +264,7 @@ class BytecodeAssembler {
       label_positions.Add(-1, zone_);
     }
 
+    // Appends all the bytecodes into a single list.
     auto code(std::move(code_));
     for (auto it = lookbehinds_.begin(); it != lookbehinds_.end(); ++it) {
       code.AddAll(*it, zone_);
@@ -293,7 +300,7 @@ class BytecodeAssembler {
     return out;
   }
 
-  int getLabelFreshId() { return label_fresh_id_++; }
+  Label getFreshLabel() { return Label(label_fresh_id_++); }
 
   void Accept() { Add(RegExpInstruction::Accept()); }
 
@@ -363,13 +370,26 @@ class BytecodeAssembler {
   }
 
   Zone* zone_;
+
+  // Instructions that are being written.
   ZoneList<Instruction> code_;
+
+  // The lookbehinds are inside a tree, which is travelled up to down, left to
+  // right. When a lookbehind is found, `code_` is pushed onto the stack, and
+  // cleared for the newly found lookbehind to be compiled. Once it is
+  // completely compiled, it is added to the `lookbehinds_` list and the
+  // instructions pushed on the stack are popped to resume the lookbehind's
+  // parent compilation.
   ZoneLinkedList<ZoneList<Instruction>> code_stack_;
+
+  // Completed bytecode of the lookbehinds. The order of compilation (see
+  // `code_stack_`) ensures that for all lookbehinds in `lookbehinds_`, their
+  // children lookbehind are strictly before them in the list.
   ZoneLinkedList<ZoneList<Instruction>> lookbehinds_;
+
+  // Increment for the id of the generated labels.
   int label_fresh_id_;
 };
-
-Label::Label(BytecodeAssembler& assembler) : id_(assembler.getLabelFreshId()) {}
 
 class CompileVisitor : private RegExpVisitor {
  public:
@@ -429,10 +449,10 @@ class CompileVisitor : private RegExpVisitor {
       return;
     }
 
-    Label end(assembler_);
+    Label end = assembler_.getFreshLabel();
 
     for (int i = 0; i != alt_num - 1; ++i) {
-      Label tail(assembler_);
+      Label tail = assembler_.getFreshLabel();
       assembler_.Fork(tail);
       gen_alt(i);
       assembler_.Jmp(end);
@@ -548,8 +568,8 @@ class CompileVisitor : private RegExpVisitor {
     //
     // This is greedy because a forked thread has lower priority than the
     // thread that spawned it.
-    Label begin(assembler_);
-    Label end(assembler_);
+    Label begin = assembler_.getFreshLabel();
+    Label end = assembler_.getFreshLabel();
 
     assembler_.Bind(begin);
     assembler_.Fork(end);
@@ -576,8 +596,8 @@ class CompileVisitor : private RegExpVisitor {
     //   end:
     //     ...
 
-    Label body(assembler_);
-    Label end(assembler_);
+    Label body = assembler_.getFreshLabel();
+    Label end = assembler_.getFreshLabel();
 
     assembler_.Fork(body);
     assembler_.Jmp(end);
@@ -614,7 +634,7 @@ class CompileVisitor : private RegExpVisitor {
     // We add `BEGIN_LOOP` and `END_LOOP` instructions because these optional
     // repetitions of the body cannot match the empty string.
 
-    Label end(assembler_);
+    Label end = assembler_.getFreshLabel();
     for (int i = 0; i != max_repetition_num; ++i) {
       assembler_.Fork(end);
       assembler_.BeginLoop();
@@ -654,9 +674,9 @@ class CompileVisitor : private RegExpVisitor {
     // We add `BEGIN_LOOP` and `END_LOOP` instructions because these optional
     // repetitions of the body cannot match the empty string.
 
-    Label end(assembler_);
+    Label end = assembler_.getFreshLabel();
     for (int i = 0; i != max_repetition_num; ++i) {
-      Label body(assembler_);
+      Label body = assembler_.getFreshLabel();
       assembler_.Fork(body);
       assembler_.Jmp(end);
 
@@ -695,7 +715,7 @@ class CompileVisitor : private RegExpVisitor {
     //     JMP begin
     //   end:
     //     ...
-    Label begin(assembler_), end(assembler_);
+    Label begin = assembler_.getFreshLabel(), end = assembler_.getFreshLabel();
 
     assembler_.Bind(begin);
     emit_body();
@@ -716,7 +736,7 @@ class CompileVisitor : private RegExpVisitor {
     //
     //     FORK begin
     //     ...
-    Label begin(assembler_);
+    Label begin = assembler_.getFreshLabel();
 
     assembler_.Bind(begin);
     emit_body();

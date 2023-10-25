@@ -164,6 +164,9 @@ class NfaInterpreter {
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
+    // Finds the starting PC of every lookbehind. Since they are listed one
+    // after the other, they start after each `ACCEPT` and
+    // `WRITE_LOOKBEHIND_TABLE` instructions (except the last one).
     for (int i = 0; i < bytecode_.length(); ++i) {
       if ((bytecode_[i].opcode == RegExpInstruction::Opcode::ACCEPT ||
            bytecode_[i].opcode ==
@@ -488,9 +491,15 @@ class NfaInterpreter {
           break;
         case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
           lookbehind_table_[inst.payload.looktable_index] = true;
+          // Reaching this instruction means that the current lookbehind thread
+          // has completed and needs to be destroyed.
           DestroyThread(t);
           break;
         case RegExpInstruction::READ_LOOKBEHIND_TABLE:
+          // Destroy the thread if the corresponding lookbehind did not complete
+          // a match at the current position. The thread's priority ensures that
+          // all the threads of the lookbehind have already been run to this
+          // position.
           if (!lookbehind_table_[inst.payload.looktable_index]) {
             DestroyThread(t);
           } else {
