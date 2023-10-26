@@ -498,7 +498,7 @@ class NfaInterpreter {
         case RegExpInstruction::READ_LOOKBEHIND_TABLE:
           // Destroy the thread if the corresponding lookbehind did not complete
           // a match at the current position. The thread's priority ensures that
-          // all the threads of the lookbehind have already been run to this
+          // all the threads of the lookbehind have already been run at this
           // position.
           if (!lookbehind_table_[inst.payload.looktable_index]) {
             DestroyThread(t);
@@ -672,7 +672,12 @@ class NfaInterpreter {
   // `register_array_allocator_`.
   base::Optional<base::Vector<int>> best_match_registers_;
 
+  // Starting PC of each of the lookbehinds in the bytecode. Computed during the
+  // NFA instanciation (see the constructor).
   ZoneList<int> lookbehind_pc_;
+
+  // Truth table for the lookbehinds. lookbehind_table_[k] indicates whether the
+  // lookbehind of index k did complete a match on the current position.
   ZoneList<bool> lookbehind_table_;
 
   Zone* zone_;

@@ -270,6 +270,7 @@ class BytecodeAssembler {
       code.AddAll(*it, zone_);
     }
 
+    // Count the number of instructions and maps label ids to pcs
     int instruction_count = 0;
     for (auto it : code) {
       if (it.index() == 0) {
@@ -283,6 +284,8 @@ class BytecodeAssembler {
       }
     }
 
+    // Rewrite all Instructions to RegExpInstructions by removing the labels and
+    // setting the payload for the JUMP and FORK instructions
     ZoneList<RegExpInstruction> out(0, zone_);
     for (auto it : code) {
       if (it.index() == 1) {
@@ -300,6 +303,7 @@ class BytecodeAssembler {
     return out;
   }
 
+  // Returns a Label with a new unique ID
   Label getFreshLabel() { return Label(label_fresh_id_++); }
 
   void Accept() { Add(RegExpInstruction::Accept()); }
@@ -339,18 +343,26 @@ class BytecodeAssembler {
   void Fail() { Add(RegExpInstruction::Fail()); }
 
   void StartLookBehind() {
+    // The bytecode being created is pushed on the stack and we compile the
+    // lookbehind on a new list. See `EndLookBehind`.
     code_stack_.push_front(std::move(code_));
     code_.DropAndClear();
   }
 
   void EndLookBehind(int32_t index) {
+    // Complete the lookbehind by adding the WRITE_LOOK_TABLE instruction, and
+    // add the its whole bytecode to the list of completed lookbehinds.
     Add(RegExpInstruction::WriteLookTable(index));
     lookbehinds_.push_front(std::move(code_));
     code_.DropAndClear();
 
+    // Pops the bytecode to resume the compilation of the parent expression
+    // (either a parent lookbehind or the main expression).
     code_.AddAll(code_stack_.front(), zone_);
     code_stack_.pop_front();
 
+    // The parent expression requires that the lookbehind has completed a match
+    // at this position.
     Add(RegExpInstruction::ReadLookTable(index));
   }
 
@@ -829,13 +841,20 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   void* VisitCapture(RegExpCapture* node, void*) override {
-    int index = node->index();
-    int start_register = RegExpCapture::StartRegister(index);
-    int end_register = RegExpCapture::EndRegister(index);
-    assembler_.SetRegisterToCp(start_register);
-    node->body()->Accept(this, nullptr);
-    assembler_.SetRegisterToCp(end_register);
-    return nullptr;
+    // Only negative lookbehinds contains captures (enforced by the
+    // `CanBeHandled` visitor), which cannot capture the string.
+    if (inside_lookaround_) {
+      node->body()->Accept(this, nullptr);
+      return;
+    } else {
+      int index = node->index();
+      int start_register = RegExpCapture::StartRegister(index);
+      int end_register = RegExpCapture::EndRegister(index);
+      assembler_.SetRegisterToCp(start_register);
+      node->body()->Accept(this, nullptr);
+      assembler_.SetRegisterToCp(end_register);
+      return nullptr;
+    }
   }
 
   void* VisitGroup(RegExpGroup* node, void*) override {
@@ -876,6 +895,7 @@ class CompileVisitor : private RegExpVisitor {
  private:
   Zone* zone_;
   BytecodeAssembler assembler_;
+  bool inside_lookaround_;
 };
 
 }  // namespace
