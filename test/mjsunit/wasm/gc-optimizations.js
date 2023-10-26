@@ -452,7 +452,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   let addToLocal = [kExprLocalGet, 1, kExprI32Add, kExprLocalSet, 1];
 
   builder.addFunction(
-      "main", makeSig([wasmRefNullType(super_struct)], [kWasmI32]))
+      "pathBasedTypes", makeSig([wasmRefNullType(super_struct)], [kWasmI32]))
     .addLocals(kWasmI32, 1)
     .addBody([
       kExprLocalGet, 0,
@@ -486,13 +486,15 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
         kExprEnd,
         kExprDrop,
       kExprElse,
-        // This (always trapping) cast should be preserved.
+        // This (always trapping) cast should be optimized away.
+        // (If the ref.test in the start block returns 0 the cast to sub_struct
+        // in that block will already fail.)
         kExprLocalGet, 0,
         kGCPrefix, kExprRefCast, sub_struct,
         kGCPrefix, kExprStructGet, sub_struct, 1,
         ...addToLocal,
       kExprEnd,
-      // This cast should be preserved.
+      // This cast should be optimized away.
       kExprLocalGet, 0,
       kGCPrefix, kExprRefCast, sub_struct,
       kGCPrefix, kExprStructGet, sub_struct, 1,
@@ -500,7 +502,8 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
     ])
     .exportFunc();
 
-  builder.instantiate();
+  let wasm = builder.instantiate().exports;
+  assertTraps(kTrapIllegalCast, () => wasm.pathBasedTypes(null));
 })();
 
 (function IndependentCastNullRefType() {
@@ -859,4 +862,182 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
   assertEquals(0, wasm.typePhi(0));
   assertEquals(0, wasm.typePhi(1));
+})();
+
+(function TypePropagationLoopPhiOptimizable() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+
+  let struct_base = builder.addStruct([makeField(kWasmI32, true)]);
+  let struct_sub = builder.addStruct([makeField(kWasmI32, true)], struct_base);
+
+  // This function counts all the structs stored in local[1] which are of type
+  // struct_sub (which in this case are all the values).
+  builder.addFunction('loopPhiOptimizable',
+      makeSig([kWasmI32], [kWasmI32]))
+    .addLocals(kWasmAnyRef, 1) // local with changing type
+    .addLocals(kWasmI32, 1)    // result
+    .addBody([
+      kGCPrefix, kExprStructNewDefault, struct_sub,
+      kExprLocalSet, 1,
+      kExprLoop, kWasmVoid,
+        // result += ref.test (local.get 1)
+        kExprLocalGet, 1,
+        kGCPrefix, kExprRefTest, struct_sub,
+        kExprLocalGet, 2,
+        kExprI32Add,
+        kExprLocalSet, 2,
+        // local[1] = new struct_sub
+        kGCPrefix, kExprStructNewDefault, struct_sub,
+        kExprLocalSet, 1, // This will cause a loop phi.
+        // if (--(local.get 0)) continue;
+        kExprLocalGet, 0,
+        kExprI32Const, 1,
+        kExprI32Sub,
+        kExprLocalTee, 0,
+        kExprBrIf, 0,
+      kExprEnd,
+      kExprLocalGet, 2,
+    ])
+    .exportFunc();
+
+  let instance = builder.instantiate({});
+  let wasm = instance.exports;
+
+  assertEquals(1, wasm.loopPhiOptimizable(1));
+  assertEquals(2, wasm.loopPhiOptimizable(2));
+})();
+
+(function TypePropagationLoopPhiCheckRequired() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+
+  let struct_base = builder.addStruct([makeField(kWasmI32, true)]);
+  let struct_sub = builder.addStruct([makeField(kWasmI32, true)], struct_base);
+
+  // This function counts all the structs stored in local[1] which are of type
+  // struct_sub (which in this case is only the first).
+  builder.addFunction('loopPhiCheckRequired',
+      makeSig([kWasmI32], [kWasmI32]))
+    .addLocals(kWasmAnyRef, 1) // local with changing type
+    .addLocals(kWasmI32, 1)    // result
+    .addBody([
+      kGCPrefix, kExprStructNewDefault, struct_sub,
+      kExprLocalSet, 1,
+      kExprLoop, kWasmVoid,
+        // result += ref.test (local.get 1)
+        kExprLocalGet, 1,
+        kGCPrefix, kExprRefTest, struct_sub,
+        kExprLocalGet, 2,
+        kExprI32Add,
+        kExprLocalSet, 2,
+        // local[1] = new struct_base
+        kGCPrefix, kExprStructNewDefault, struct_base,
+        kExprLocalSet, 1, // This will cause a loop phi.
+        // if (--(local.get 0)) continue;
+        kExprLocalGet, 0,
+        kExprI32Const, 1,
+        kExprI32Sub,
+        kExprLocalTee, 0,
+        kExprBrIf, 0,
+      kExprEnd,
+      kExprLocalGet, 2,
+    ])
+    .exportFunc();
+
+  let instance = builder.instantiate({});
+  let wasm = instance.exports;
+
+  assertEquals(1, wasm.loopPhiCheckRequired(1));
+  assertEquals(1, wasm.loopPhiCheckRequired(2));
+})();
+
+(function TypePropagationLoopPhiCheckRequiredUnrelated() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+
+  // Differently to the test above, here the two types merged in the loop phi
+  // are not in a subtype hierarchy, meaning that the loop phi needs to merge
+  // them to a more generic ref struct.
+  let struct_a = builder.addStruct([makeField(kWasmI32, true)]);
+  let struct_b = builder.addStruct([makeField(kWasmI64, true)]);
+
+  // This function counts all the structs stored in local[1] which are of type
+  // struct_a (which in this case is only the first).
+  builder.addFunction('loopPhiCheckRequiredUnrelated',
+      makeSig([kWasmI32], [kWasmI32]))
+    .addLocals(kWasmAnyRef, 1) // local with changing type
+    .addLocals(kWasmI32, 1)    // result
+    .addBody([
+      kGCPrefix, kExprStructNewDefault, struct_a,
+      kExprLocalSet, 1,
+      kExprLoop, kWasmVoid,
+        // result += ref.test (local.get 1)
+        kExprLocalGet, 1,
+        kGCPrefix, kExprRefTest, struct_a,
+        kExprLocalGet, 2,
+        kExprI32Add,
+        kExprLocalSet, 2,
+        // local[1] = new struct_base
+        kGCPrefix, kExprStructNewDefault, struct_b,
+        kExprLocalSet, 1, // This will cause a loop phi.
+        // if (--(local.get 0)) continue;
+        kExprLocalGet, 0,
+        kExprI32Const, 1,
+        kExprI32Sub,
+        kExprLocalTee, 0,
+        kExprBrIf, 0,
+      kExprEnd,
+      kExprLocalGet, 2,
+    ])
+    .exportFunc();
+
+  let instance = builder.instantiate({});
+  let wasm = instance.exports;
+
+  assertEquals(1, wasm.loopPhiCheckRequiredUnrelated(1));
+  assertEquals(1, wasm.loopPhiCheckRequiredUnrelated(2));
+})();
+
+(function TypePropagationCallRef() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+
+  let struct = builder.addStruct([makeField(kWasmI32, true)]);
+  let sig = builder.addType(makeSig([kWasmI32], [wasmRefNullType(struct)]));
+
+  builder.addFunction('callee', sig)
+  .addBody([
+    // local.get[0] ? null : new struct();
+    kExprLocalGet, 0,
+    kExprIf, kWasmVoid,
+      kExprRefNull, struct,
+      kExprReturn,
+    kExprEnd,
+    kGCPrefix, kExprStructNewDefault, struct,
+  ])
+  .exportFunc();
+
+  builder.addFunction('callTypedWasm',
+      makeSig([kWasmI32, wasmRefType(sig)], []))
+    .addLocals(kWasmAnyRef, 1)
+    .addBody([
+      kExprLocalGet, 0,
+      kExprLocalGet, 1,
+      kExprCallRef, sig,
+      kExprLocalSet, 2,
+      kExprLocalGet, 2,
+      // Can be optimized away based on the signature of the callee.
+      kGCPrefix, kExprRefCastNull, kStructRefCode,
+      // Can be converted into a check for not null.
+      kGCPrefix, kExprRefCast, struct,
+      kExprDrop,
+    ])
+    .exportFunc();
+
+  let instance = builder.instantiate({});
+  let wasm = instance.exports;
+
+  wasm.callTypedWasm(0, wasm.callee);
+  assertTraps(kTrapIllegalCast, () => wasm.callTypedWasm(1, wasm.callee));
 })();

@@ -300,7 +300,6 @@ class TypeInferenceAnalysis {
         case Opcode::kMaybeGrowFastElements:
         case Opcode::kTransitionElementsKind:
         case Opcode::kFindOrderedHashEntry:
-        case Opcode::kComment:
 #if V8_ENABLE_WEBASSEMBLY
         // TODO(14108): Implement.
         case Opcode::kGlobalGet:
@@ -312,6 +311,7 @@ class TypeInferenceAnalysis {
         case Opcode::kWasmTypeCast:
         case Opcode::kAnyConvertExtern:
         case Opcode::kExternConvertAny:
+        case Opcode::kWasmTypeAnnotation:
         case Opcode::kStructGet:
         case Opcode::kStructSet:
         case Opcode::kArrayGet:

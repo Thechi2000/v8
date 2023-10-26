@@ -467,8 +467,7 @@ class ByteArray::BodyDescriptor final : public BodyDescriptorBase {
                                  int object_size, ObjectVisitor* v) {}
 
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> obj) {
-    return ByteArray::SizeFor(
-        ByteArray::unchecked_cast(obj)->length(kAcquireLoad));
+    return ByteArray::unchecked_cast(obj)->AllocatedSize();
   }
 };
 
@@ -534,8 +533,7 @@ class FixedDoubleArray::BodyDescriptor final : public BodyDescriptorBase {
                                  int object_size, ObjectVisitor* v) {}
 
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> obj) {
-    return FixedDoubleArray::SizeFor(
-        FixedDoubleArray::unchecked_cast(obj)->length(kAcquireLoad));
+    return FixedDoubleArray::unchecked_cast(obj)->AllocatedSize();
   }
 };
 
@@ -581,6 +579,26 @@ class SharedFunctionInfo::BodyDescriptor final : public BodyDescriptorBase {
 
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> raw_object) {
     return kSize;
+  }
+};
+
+class DebugInfo::BodyDescriptor final : public BodyDescriptorBase {
+ public:
+  template <typename ObjectVisitor>
+  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
+                                 int object_size, ObjectVisitor* v) {
+    IteratePointers(obj, kStartOfStrongFieldsOffset, kEndOfStrongFieldsOffset,
+                    v);
+    IterateTrustedPointer(obj, kDebugBytecodeArrayOffset, v,
+                          IndirectPointerMode::kStrong,
+                          kBytecodeArrayIndirectPointerTag);
+    IterateTrustedPointer(obj, kOriginalBytecodeArrayOffset, v,
+                          IndirectPointerMode::kStrong,
+                          kBytecodeArrayIndirectPointerTag);
+  }
+
+  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> obj) {
+    return obj->SizeFromMap(map);
   }
 };
 
@@ -1470,6 +1488,14 @@ class ScriptContextTable::BodyDescriptor final
  public:
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> raw_object) {
     return ScriptContextTable::unchecked_cast(raw_object)->AllocatedSize();
+  }
+};
+
+class WeakFixedArray::BodyDescriptor final
+    : public SuffixRangeWeakBodyDescriptor<HeapObject::kHeaderSize> {
+ public:
+  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> raw_object) {
+    return WeakFixedArray::unchecked_cast(raw_object)->AllocatedSize();
   }
 };
 

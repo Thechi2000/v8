@@ -364,8 +364,6 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_ACCESSORS(well_known_imports, Tagged<FixedArray>)
   DECL_SANDBOXED_POINTER_ACCESSORS(memory0_start, uint8_t*)
   DECL_PRIMITIVE_ACCESSORS(memory0_size, size_t)
-  DECL_PRIMITIVE_ACCESSORS(stack_limit_address, Address)
-  DECL_PRIMITIVE_ACCESSORS(real_stack_limit_address, Address)
   DECL_PRIMITIVE_ACCESSORS(new_allocation_limit_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(new_allocation_top_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(old_allocation_limit_address, Address*)
@@ -409,7 +407,6 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kOptionalPaddingOffset, POINTER_SIZE_PADDING(kOptionalPaddingOffset)) \
   V(kMemory0StartOffset, kSystemPointerSize)                              \
   V(kMemory0SizeOffset, kSizetSize)                                       \
-  V(kStackLimitAddressOffset, kSystemPointerSize)                         \
   V(kIsorecursiveCanonicalTypesOffset, kSystemPointerSize)                \
   V(kGlobalsStartOffset, kSystemPointerSize)                              \
   V(kJumpTableStartOffset, kSystemPointerSize)                            \
@@ -419,7 +416,6 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kNewAllocationTopAddressOffset, kSystemPointerSize)                   \
   V(kOldAllocationLimitAddressOffset, kSystemPointerSize)                 \
   V(kOldAllocationTopAddressOffset, kSystemPointerSize)                   \
-  V(kRealStackLimitAddressOffset, kSystemPointerSize)                     \
   V(kHookOnFunctionCallAddressOffset, kSystemPointerSize)                 \
   V(kTieringBudgetArrayOffset, kSystemPointerSize)                        \
   /* Less than system pointer size aligned fields are below. */           \
@@ -996,11 +992,6 @@ class WasmTypeInfo
 };
 
 class WasmObject : public TorqueGeneratedWasmObject<WasmObject, JSReceiver> {
- public:
-  // Prepares given value for being stored into a field of given Wasm type.
-  V8_WARN_UNUSED_RESULT static inline MaybeHandle<Object> ToWasmValue(
-      Isolate* isolate, wasm::ValueType type, Handle<Object> value);
-
  protected:
   // Returns boxed value of the object's field/element with given type and
   // offset.
@@ -1008,11 +999,6 @@ class WasmObject : public TorqueGeneratedWasmObject<WasmObject, JSReceiver> {
                                            Handle<HeapObject> obj,
                                            wasm::ValueType type,
                                            uint32_t offset);
-
-  static inline void WriteValueAt(Isolate* isolate, Handle<HeapObject> obj,
-                                  wasm::ValueType type, uint32_t offset,
-                                  Handle<Object> value);
-
  private:
   template <typename ElementType>
   static ElementType FromNumber(Tagged<Object> value);
@@ -1038,11 +1024,6 @@ class WasmStruct : public TorqueGeneratedWasmStruct<WasmStruct, WasmObject> {
   inline ObjectSlot RawField(int raw_offset);
 
   wasm::WasmValue GetFieldValue(uint32_t field_index);
-
-  // Returns boxed value of the object's field.
-  static inline Handle<Object> GetField(Isolate* isolate,
-                                        Handle<WasmStruct> obj,
-                                        uint32_t field_index);
 
   static inline void SetField(Isolate* isolate, Handle<WasmStruct> obj,
                               uint32_t field_index, Handle<Object> value);

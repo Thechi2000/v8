@@ -551,7 +551,7 @@ RUNTIME_FUNCTION(Runtime_OptimizeMaglevOnNextCall) {
 }
 #else
 RUNTIME_FUNCTION(Runtime_OptimizeMaglevOnNextCall) {
-  PrintF("Maglev is not enabled.\n");
+  if (!v8_flags.fuzzing) PrintF("Maglev is not enabled.\n");
   return ReadOnlyRoots(isolate).undefined_value();
 }
 #endif  // V8_ENABLE_MAGLEV
@@ -1456,7 +1456,10 @@ RUNTIME_FUNCTION(Runtime_SetForceSlowPath) {
   if (IsTrue(arg, isolate)) {
     isolate->set_force_slow_path(true);
   } else {
-    DCHECK(IsFalse(arg, isolate));
+    // This function is fuzzer exposed and as such we might not always have an
+    // input that IsTrue or IsFalse. In these cases we assume that if !IsTrue
+    // then it IsFalse when fuzzing.
+    DCHECK(IsFalse(arg, isolate) || v8_flags.fuzzing);
     isolate->set_force_slow_path(false);
   }
   return ReadOnlyRoots(isolate).undefined_value();

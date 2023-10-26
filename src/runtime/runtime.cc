@@ -206,10 +206,12 @@ bool Runtime::IsAllowListedForFuzzing(FunctionId id) {
     case Runtime::kGetUndetectable:
     case Runtime::kNeverOptimizeFunction:
     case Runtime::kOptimizeFunctionOnNextCall:
+    case Runtime::kOptimizeMaglevOnNextCall:
     case Runtime::kOptimizeOsr:
     case Runtime::kPrepareFunctionForOptimization:
     case Runtime::kPretenureAllocationSite:
     case Runtime::kSetAllocationTimeout:
+    case Runtime::kSetForceSlowPath:
     case Runtime::kSimulateNewspaceFull:
     case Runtime::kWaitForBackgroundOptimization:
       return true;

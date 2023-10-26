@@ -200,7 +200,7 @@ bool WasmGraphBuilder::TryWasmInlining(int fct_index,
   // If the inlinee was not validated before, do that now.
   if (V8_UNLIKELY(!module->function_was_validated(fct_index))) {
     wasm::WasmFeatures unused_detected_features;
-    if (ValidateFunctionBody(enabled_features_, module,
+    if (ValidateFunctionBody(graph()->zone(), enabled_features_, module,
                              &unused_detected_features, inlinee_body)
             .failed()) {
       // At this point we cannot easily raise a compilation error any more.
@@ -427,11 +427,9 @@ void WasmGraphBuilder::StackCheck(
   DCHECK_NOT_NULL(env_);  // Wrappers don't get stack checks.
   if (!v8_flags.wasm_stack_checks) return;
 
-  Node* limit_address =
-      LOAD_INSTANCE_FIELD(StackLimitAddress, MachineType::Pointer());
-  // Since the limit can be mutated by a trap handler, we cannot use load
-  // elimination.
-  Node* limit = gasm_->Load(MachineType::Pointer(), limit_address, 0);
+  Node* limit =
+      gasm_->Load(MachineType::Pointer(), gasm_->LoadRootRegister(),
+                  mcgraph()->IntPtrConstant(IsolateData::jslimit_offset()));
 
   Node* check = SetEffect(graph()->NewNode(
       mcgraph()->machine()->StackPointerGreaterThan(StackCheckKind::kWasm),
@@ -7097,6 +7095,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
           case wasm::HeapType::kNone:
           case wasm::HeapType::kNoFunc:
           case wasm::HeapType::kNoExtern:
+          case wasm::HeapType::kExn:
+          case wasm::HeapType::kNoExn:
             return node;
           case wasm::HeapType::kBottom:
           case wasm::HeapType::kStringViewWtf8:
@@ -7131,6 +7131,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
         switch (type.heap_representation()) {
           case wasm::HeapType::kExtern:
           case wasm::HeapType::kNoExtern:
+          case wasm::HeapType::kExn:
+          case wasm::HeapType::kNoExn:
             return node;
           case wasm::HeapType::kNone:
           case wasm::HeapType::kNoFunc:
@@ -7264,6 +7266,9 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
             return input;
           case wasm::HeapType::kString:
             return BuildCheckString(input, js_context, type);
+          case wasm::HeapType::kExn:
+          case wasm::HeapType::kNoExn:
+            return input;
           case wasm::HeapType::kNone:
           case wasm::HeapType::kNoFunc:
           case wasm::HeapType::kI31:
@@ -8179,12 +8184,21 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
         },
         // Initialize wasm-specific callback options fields
         [this](Node* options_stack_slot) {
-          // TODO(14260): Do we need to support multiple memories for the fast
-          // API?
-          Node* mem_start = LOAD_INSTANCE_FIELD_NO_ELIMINATION(
-              Memory0Start, kMaybeSandboxedPointer);
-          Node* mem_size = LOAD_INSTANCE_FIELD_NO_ELIMINATION(
-              Memory0Size, MachineType::UintPtr());
+          Node* mem_start;
+          Node* mem_size;
+          if (module_->memories.empty()) {
+            mem_start = gasm_->UintPtrConstant(0);
+            mem_size = gasm_->UintPtrConstant(0);
+          } else if (module_->memories.size() == 1) {
+            mem_start = LOAD_INSTANCE_FIELD_NO_ELIMINATION(
+                Memory0Start, kMaybeSandboxedPointer);
+            mem_size = LOAD_INSTANCE_FIELD_NO_ELIMINATION(
+                Memory0Size, MachineType::UintPtr());
+          } else {
+            FATAL(
+                "Fast API does not support multiple memories yet "
+                "(https://crbug.com/v8/14260)");
+          }
 
           constexpr int kSize = sizeof(FastApiTypedArray<uint8_t>);
           constexpr int kAlign = alignof(FastApiTypedArray<uint8_t>);

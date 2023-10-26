@@ -1935,8 +1935,7 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
         SeqTwoByteString::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == FIXED_DOUBLE_ARRAY_TYPE) {
-    return FixedDoubleArray::SizeFor(
-        FixedDoubleArray::unchecked_cast(*this)->length(kAcquireLoad));
+    return FixedDoubleArray::unchecked_cast(*this)->AllocatedSize();
   }
   if (instance_type == FEEDBACK_METADATA_TYPE) {
     return FeedbackMetadata::SizeFor(
@@ -1949,8 +1948,7 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
   }
   if (base::IsInRange(instance_type, FIRST_WEAK_FIXED_ARRAY_TYPE,
                       LAST_WEAK_FIXED_ARRAY_TYPE)) {
-    return WeakFixedArray::SizeFor(
-        WeakFixedArray::unchecked_cast(*this)->length(kAcquireLoad));
+    return WeakFixedArray::unchecked_cast(*this)->AllocatedSize();
   }
   if (instance_type == WEAK_ARRAY_LIST_TYPE) {
     return WeakArrayList::SizeForCapacity(
@@ -4506,7 +4504,7 @@ MaybeHandle<SharedFunctionInfo> Script::FindSharedFunctionInfo(
   // triggers the mismatch.
   CHECK_LT(function_literal_id, script->shared_function_info_count());
   MaybeObject shared =
-      script->shared_function_infos()->Get(function_literal_id);
+      script->shared_function_infos()->get(function_literal_id);
   Tagged<HeapObject> heap_object;
   if (!shared.GetHeapObject(&heap_object) ||
       IsUndefined(heap_object, isolate)) {

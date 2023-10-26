@@ -2003,9 +2003,9 @@ Handle<TransitionArray> Factory::NewTransitionArray(int number_of_transitions,
   if (heap->incremental_marking()->black_allocation()) {
     heap->mark_compact_collector()->AddTransitionArray(*array);
   }
-  array->WeakFixedArray::Set(TransitionArray::kPrototypeTransitionsIndex,
+  array->WeakFixedArray::set(TransitionArray::kPrototypeTransitionsIndex,
                              MaybeObject::FromObject(Smi::zero()));
-  array->WeakFixedArray::Set(
+  array->WeakFixedArray::set(
       TransitionArray::kTransitionLengthIndex,
       MaybeObject::FromObject(Smi::FromInt(number_of_transitions)));
   return array;
@@ -2236,7 +2236,7 @@ Handle<T> Factory::CopyArrayWithMap(Handle<T> src, Handle<Map> map,
   initialize_length(result, len);
   // Copy the content.
   WriteBarrierMode mode = result->GetWriteBarrierMode(no_gc);
-  result->CopyElements(isolate(), 0, *src, 0, len, mode);
+  T::CopyElements(isolate(), result, 0, *src, 0, len, mode);
   return handle(result, isolate());
 }
 
@@ -2255,7 +2255,7 @@ Handle<T> Factory::CopyArrayAndGrow(Handle<T> src, int grow_by,
   initialize_length(result, new_len);
   // Copy the content.
   WriteBarrierMode mode = result->GetWriteBarrierMode(no_gc);
-  result->CopyElements(isolate(), 0, *src, 0, old_len, mode);
+  T::CopyElements(isolate(), *result, 0, *src, 0, old_len, mode);
   // TODO(jgruber,v8:14345): Enable the static assert once all T's support it:
   // static_assert(T::Shape::kElementSize == kTaggedSize);
   MemsetTagged(ObjectSlot(result->RawFieldOfElementAt(old_len)),
@@ -3482,12 +3482,9 @@ Handle<DebugInfo> Factory::NewDebugInfo(Handle<SharedFunctionInfo> shared) {
   debug_info->set_shared(raw_shared);
   debug_info->set_debugger_hints(0);
   DCHECK_EQ(DebugInfo::kNoDebuggingId, debug_info->debugging_id());
-  Tagged<HeapObject> undefined = *undefined_value();
-  debug_info->set_original_bytecode_array(undefined, kReleaseStore,
-                                          SKIP_WRITE_BARRIER);
-  debug_info->set_debug_bytecode_array(undefined, kReleaseStore,
-                                       SKIP_WRITE_BARRIER);
   debug_info->set_break_points(*empty_fixed_array(), SKIP_WRITE_BARRIER);
+  debug_info->clear_original_bytecode_array(kReleaseStore);
+  debug_info->clear_debug_bytecode_array(kReleaseStore);
 
   return handle(debug_info, isolate());
 }
@@ -3588,7 +3585,7 @@ Handle<Map> Factory::ObjectLiteralMapFromCache(Handle<NativeContext> context,
                                isolate());
 
   // Check to see whether there is a matching element in the cache.
-  MaybeObject result = cache->Get(number_of_properties);
+  MaybeObject result = cache->get(number_of_properties);
   Tagged<HeapObject> heap_object;
   if (result.GetHeapObjectIfWeak(&heap_object)) {
     Tagged<Map> map = Tagged<Map>::cast(heap_object);
@@ -3599,7 +3596,7 @@ Handle<Map> Factory::ObjectLiteralMapFromCache(Handle<NativeContext> context,
   // Create a new map and add it to the cache.
   Handle<Map> map = Map::Create(isolate(), number_of_properties);
   DCHECK(!map->is_dictionary_map());
-  cache->Set(number_of_properties, HeapObjectReference::Weak(*map));
+  cache->set(number_of_properties, HeapObjectReference::Weak(*map));
   return map;
 }
 

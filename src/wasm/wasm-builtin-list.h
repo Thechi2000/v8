@@ -23,6 +23,9 @@ namespace v8::internal::wasm {
   V(WasmLiftoffFrameSetup)                                                     \
   V(WasmDebugBreak)                                                            \
   V(WasmInt32ToHeapNumber)                                                     \
+  V(WasmFloat64ToString)                                                       \
+  V(WasmStringToDouble)                                                        \
+  V(WasmIntToString)                                                           \
   V(WasmTaggedNonSmiToInt32)                                                   \
   V(WasmFloat32ToNumber)                                                       \
   V(WasmFloat64ToNumber)                                                       \
@@ -120,6 +123,9 @@ namespace v8::internal::wasm {
   V(ThrowDataViewSetUint32DetachedError)                                       \
   V(ThrowDataViewSetUint32OutOfBounds)                                         \
   V(ThrowDataViewSetUint32TypeError)                                           \
+  V(ThrowIndexOfCalledOnNull)                                                  \
+  V(ThrowToLowerCaseCalledOnNull)                                              \
+  IF_INTL(V, StringToLowerCaseIntl)                                            \
   IF_TSAN(V, TSANRelaxedStore8IgnoreFP)                                        \
   IF_TSAN(V, TSANRelaxedStore8SaveFP)                                          \
   IF_TSAN(V, TSANRelaxedStore16IgnoreFP)                                       \
@@ -177,6 +183,7 @@ namespace v8::internal::wasm {
   V(WasmStringViewIterRewind)                                                  \
   V(WasmStringViewIterSlice)                                                   \
   V(StringCompare)                                                             \
+  V(StringIndexOf)                                                             \
   V(WasmStringFromCodePoint)                                                   \
   V(WasmStringHash)                                                            \
   V(WasmAnyConvertExtern)                                                      \
