@@ -161,7 +161,7 @@ class CanBeHandledVisitor final : private RegExpVisitor {
   }
 
   void* VisitCapture(RegExpCapture* node, void*) override {
-    if (inside_lookaround_) {
+    if (inside_positive_lookbehind_) {
       result_ = false;
     } else {
       node->body()->Accept(this, nullptr);
@@ -177,8 +177,8 @@ class CanBeHandledVisitor final : private RegExpVisitor {
   void* VisitLookaround(RegExpLookaround* node, void*) override {
     // TODO(mbid, v8:10765): This will be hard to support, but not impossible I
     // think.  See product automata.
-    auto temp = inside_lookaround_;
-    inside_lookaround_ = true;
+    bool temp = inside_positive_lookbehind_;
+    inside_positive_lookbehind_ = node->is_positive();
 
     if (node->type() == RegExpLookaround::Type::LOOKAHEAD) {
       result_ = false;
@@ -186,7 +186,7 @@ class CanBeHandledVisitor final : private RegExpVisitor {
       node->body()->Accept(this, nullptr);
     }
 
-    inside_lookaround_ = temp;
+    inside_positive_lookbehind_ = temp;
 
     return nullptr;
   }
@@ -202,7 +202,10 @@ class CanBeHandledVisitor final : private RegExpVisitor {
  private:
   // See comment in `VisitQuantifier`:
   int replication_factor_ = 1;
-  bool inside_lookaround_ = false;
+
+  // Positive lookbehinds cannot contain capture (the implementation does not
+  // allow it).
+  bool inside_positive_lookbehind_ = false;
 
   bool result_ = true;
 };
@@ -241,7 +244,7 @@ class BytecodeAssembler {
  private:
   // A temporary instruction can either be a `Label` or a `RegExpInstruction`.
   // For the latter, it may require a pc as payload, in which case we also give
-  // it a Label.
+  // it a Label. The actual PC will be computed later during the code elision.
   struct Inst {
     RegExpInstruction inst;
     std::optional<Label> label;

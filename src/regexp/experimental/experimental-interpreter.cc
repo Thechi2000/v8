@@ -4,8 +4,6 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
-#include <iostream>
-
 #include "src/base/optional.h"
 #include "src/base/strings.h"
 #include "src/common/assert-scope.h"
@@ -87,7 +85,6 @@ base::Vector<const base::uc16> ToCharacterVector<base::uc16>(
   DCHECK(content.IsTwoByte());
   return content.ToUC16Vector();
 }
-#include <iostream>
 
 template <class Character>
 class NfaInterpreter {
@@ -365,6 +362,10 @@ class NfaInterpreter {
       best_match_registers_ = base::nullopt;
     }
 
+    // The lookbehind threads needs to be executed before the thread of their
+    // parent (lookbehind or main expression). The order of the bytecode (see
+    // also `BytecodeAssembler`) ensures that they need to be executed from last
+    // to first (as of their position in the bytecode).
     active_threads_.Add(
         InterpreterThread(0, NewRegisterArray(kUndefinedRegisterValue),
                           InterpreterThread::ConsumedCharacter::DidConsume),
