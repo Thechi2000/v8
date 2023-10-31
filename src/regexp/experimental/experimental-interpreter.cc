@@ -365,7 +365,8 @@ class NfaInterpreter {
     // The lookbehind threads needs to be executed before the thread of their
     // parent (lookbehind or main expression). The order of the bytecode (see
     // also `BytecodeAssembler`) ensures that they need to be executed from last
-    // to first (as of their position in the bytecode).
+    // to first (as of their position in the bytecode). The main expression
+    // bytecode is located at PC 0, and is executed with the lowest priority.
     active_threads_.Add(
         InterpreterThread(0, NewRegisterArray(kUndefinedRegisterValue),
                           InterpreterThread::ConsumedCharacter::DidConsume),
@@ -491,9 +492,10 @@ class NfaInterpreter {
           ++t.pc;
           break;
         case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
-          lookbehind_table_[inst.payload.looktable_index] = true;
           // Reaching this instruction means that the current lookbehind thread
-          // has completed and needs to be destroyed.
+          // has completed and needs to be destroyed. Since the lookbehind is
+          // verified at this position, we update the `lookbehind_table_`.
+          lookbehind_table_[inst.payload.looktable_index] = true;
           DestroyThread(t);
           break;
         case RegExpInstruction::READ_LOOKBEHIND_TABLE:

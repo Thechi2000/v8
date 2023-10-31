@@ -7,12 +7,9 @@
 #include <optional>
 #include <variant>
 
-#include "src/base/logging.h"
 #include "src/base/strings.h"
-#include "src/regexp/experimental/experimental-bytecode.h"
 #include "src/regexp/experimental/experimental.h"
 #include "src/zone/zone-list-inl.h"
-#include "src/zone/zone-list.h"
 
 namespace v8 {
 namespace internal {
@@ -162,6 +159,7 @@ class CanBeHandledVisitor final : private RegExpVisitor {
 
   void* VisitCapture(RegExpCapture* node, void*) override {
     if (inside_positive_lookbehind_) {
+      // Positive lookbehinds with capture groups are not currently supported
       result_ = false;
     } else {
       node->body()->Accept(this, nullptr);
@@ -177,7 +175,7 @@ class CanBeHandledVisitor final : private RegExpVisitor {
   void* VisitLookaround(RegExpLookaround* node, void*) override {
     // TODO(mbid, v8:10765): This will be hard to support, but not impossible I
     // think.  See product automata.
-    bool temp = inside_positive_lookbehind_;
+    bool parent_is_positive_lookbehind = inside_positive_lookbehind_;
     inside_positive_lookbehind_ = node->is_positive();
 
     if (node->type() == RegExpLookaround::Type::LOOKAHEAD) {
@@ -186,7 +184,7 @@ class CanBeHandledVisitor final : private RegExpVisitor {
       node->body()->Accept(this, nullptr);
     }
 
-    inside_positive_lookbehind_ = temp;
+    inside_positive_lookbehind_ = parent_is_positive_lookbehind;
 
     return nullptr;
   }
@@ -231,7 +229,7 @@ struct Label {
   ~Label() = default;
 
  private:
-  explicit Label(int id) : id_(id){};
+  explicit Label(int id) : id_(id) {}
   friend class BytecodeAssembler;
 
   // Unique identifier of the label within the bytecode. Later used by
@@ -848,7 +846,7 @@ class CompileVisitor : private RegExpVisitor {
     // `CanBeHandled` visitor), which cannot capture the string.
     if (inside_lookaround_) {
       node->body()->Accept(this, nullptr);
-      return;
+      return nullptr;
     } else {
       int index = node->index();
       int start_register = RegExpCapture::StartRegister(index);

@@ -613,7 +613,7 @@ class RegExpParserImpl final {
   int next_pos_;
   int captures_started_;
   int capture_count_;  // Only valid after we have scanned for captures.
-  int lookaround_count;
+  int lookaround_count_;  // Only valid after we have scanned for lookbehinds.
   bool has_more_;
   bool simple_;
   bool contains_anchor_;
@@ -640,7 +640,7 @@ RegExpParserImpl<CharT>::RegExpParserImpl(
       next_pos_(0),
       captures_started_(0),
       capture_count_(0),
-      lookaround_count(0),
+      lookaround_count_(0),
       has_more_(true),
       simple_(false),
       contains_anchor_(false),
@@ -935,8 +935,8 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
           bool is_positive = (group_type == POSITIVE_LOOKAROUND);
           body = zone()->template New<RegExpLookaround>(
               body, is_positive, end_capture_index - capture_index,
-              capture_index, state->lookaround_type(), lookaround_count);
-          lookaround_count++;
+              capture_index, state->lookaround_type(), lookaround_count_);
+          lookaround_count_++;
         }
 
         // Restore previous state.

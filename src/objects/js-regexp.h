@@ -78,7 +78,6 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   inline int max_register_count() const;
   // Number of captures (without the match itself).
   inline int capture_count() const;
-  inline int lookaround_count() const;
   inline Tagged<Object> capture_name_map();
   inline void set_capture_name_map(Handle<FixedArray> capture_name_map);
   uint32_t backtrack_limit() const;
@@ -213,10 +212,7 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   // above to save space.
   static constexpr int kIrregexpBacktrackLimit =
       kIrregexpTicksUntilTierUpIndex + 1;
-  // Number of captures in the compiled regexp.
-  static constexpr int kIrregexpLookaroundCountIndex =
-      kIrregexpTicksUntilTierUpIndex + 1;
-  static constexpr int kIrregexpDataSize = kIrregexpLookaroundCountIndex + 1;
+  static constexpr int kIrregexpDataSize = kIrregexpBacktrackLimit + 1;
 
   // TODO(mbid,v8:10765): At the moment the EXPERIMENTAL data array conforms
   // to the format of an IRREGEXP data array, with most fields set to some

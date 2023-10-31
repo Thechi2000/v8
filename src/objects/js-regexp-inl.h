@@ -5,9 +5,8 @@
 #ifndef V8_OBJECTS_JS_REGEXP_INL_H_
 #define V8_OBJECTS_JS_REGEXP_INL_H_
 
-#include "src/objects/js-regexp.h"
-
 #include "src/objects/js-array-inl.h"
+#include "src/objects/js-regexp.h"
 #include "src/objects/objects-inl.h"  // Needed for write barriers
 #include "src/objects/smi.h"
 #include "src/objects/string.h"
@@ -41,18 +40,6 @@ int JSRegExp::capture_count() const {
     case EXPERIMENTAL:
     case IRREGEXP:
       return Smi::ToInt(DataAt(kIrregexpCaptureCountIndex));
-    default:
-      UNREACHABLE();
-  }
-}
-
-int JSRegExp::lookaround_count() const {
-  switch (type_tag()) {
-    case ATOM:
-      return 0;
-    case EXPERIMENTAL:
-    case IRREGEXP:
-      return Smi::ToInt(DataAt(kIrregexpLookaroundCountIndex));
     default:
       UNREACHABLE();
   }
