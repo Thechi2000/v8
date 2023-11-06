@@ -115,8 +115,7 @@ struct RegExpInstruction {
     bool is_positive : 1;
   };
 
-  static RegExpInstruction
-  ConsumeRange(base::uc16 min, base::uc16 max) {
+  static RegExpInstruction ConsumeRange(base::uc16 min, base::uc16 max) {
     RegExpInstruction result;
     result.opcode = CONSUME_RANGE;
     result.payload.consume_range = Uc16Range{min, max};

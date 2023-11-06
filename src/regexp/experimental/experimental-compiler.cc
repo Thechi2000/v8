@@ -369,7 +369,10 @@ class CompileVisitor : private RegExpVisitor {
 
  private:
   explicit CompileVisitor(Zone* zone)
-      : zone_(zone), lookbehinds_(zone), assembler_(zone), inside_lookaround_(false) {}
+      : zone_(zone),
+        lookbehinds_(zone),
+        assembler_(zone),
+        inside_lookaround_(false) {}
 
   // Generate a disjunction of code fragments compiled by a function `alt_gen`.
   // `alt_gen` is called repeatedly with argument `int i = 0, 1, ..., alt_num -
@@ -783,9 +786,8 @@ class CompileVisitor : private RegExpVisitor {
     return nullptr;
   }
 
-  void* VisitCapture(RegExpCapture* node,
-                     void*) override {  // Only negative lookbehinds contains
-                                        // captures (enforced by the
+  void* VisitCapture(RegExpCapture* node, void*) override {
+    // Only negative lookbehinds contain captures (enforced by the
     // `CanBeHandled` visitor), which cannot capture the string.
     if (inside_lookaround_) {
       node->body()->Accept(this, nullptr);

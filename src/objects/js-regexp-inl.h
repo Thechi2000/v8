@@ -5,8 +5,9 @@
 #ifndef V8_OBJECTS_JS_REGEXP_INL_H_
 #define V8_OBJECTS_JS_REGEXP_INL_H_
 
-#include "src/objects/js-array-inl.h"
 #include "src/objects/js-regexp.h"
+
+#include "src/objects/js-array-inl.h"
 #include "src/objects/objects-inl.h"  // Needed for write barriers
 #include "src/objects/smi.h"
 #include "src/objects/string.h"

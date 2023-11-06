@@ -499,8 +499,9 @@ class NfaInterpreter {
           DestroyThread(t);
           break;
         case RegExpInstruction::READ_LOOKBEHIND_TABLE:
-          // Destroy the thread if the corresponding lookbehind did not complete
-          // a match at the current position. The thread's priority ensures that
+          // Destroy the thread if the corresponding lookbehind did or did not
+          // complete a match at the current position (depending on whether or
+          // not the lookbehind is positive). The thread's priority ensures that
           // all the threads of the lookbehind have already been run at this
           // position.
           if (lookbehind_table_[inst.payload.read_lookbehind

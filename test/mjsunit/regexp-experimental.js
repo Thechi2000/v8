@@ -39,7 +39,7 @@ Test(/[^0-9]/, "123!xyz", ["!"], 0);
 Test(/\w\d/, "?a??a3!!!", ["a3"], 0);
 // [💩] without unicode flag is a character range matching one of the two
 // surrogate characters that make up 💩.  The leading surrogate is 0xD83D.
-Test(/[💩]/, "f💩", [String.fromCodePoint(0xD83D)], 0);
+Test(/[💩]/, 'f💩', [String.fromCodePoint(0xd83d)], 0);
 
 // Greedy and non-greedy quantifiers.
 Test(/x*/, "asdfxk", [""], 0);
@@ -95,4 +95,14 @@ Test(/^a/m, "x\na", ["a"], 0);
 Test(/x$/m, "x\na", ["x"], 0);
 
 // The dotall flag.
-Test(/asdf.xyz/s,  "asdf\nxyz", ["asdf\nxyz"], 0);
+Test(/asdf.xyz/s, 'asdf\nxyz', ['asdf\nxyz'], 0);
+
+// Lookbehinds.
+Test(/ab(?<=a(?<=a)b)c/, 'abc', ['abc'], 0);
+Test(/ab(?<=a(?<=a)b)(c)/, 'abc', ['abc', 'c'], 0);
+
+// Negative lookbehind.
+Test(/ab(?<=a(?<!b)b)c/, 'abc', ['abc'], 0);
+Test(/ab(?<=a(?<!(b))b)c/, 'abc', ['abc', undefined], 0);
+Test(/ab(?<=a(?<!b)b)(c)/, 'abc', ['abc', 'c'], 0);
+Test(/ab(?<=a(?<!(b))b)(c)/, 'abc', ['abc', undefined, 'c'], 0);
