@@ -158,7 +158,6 @@ class CanBeHandledVisitor final : private RegExpVisitor {
     if (inside_positive_lookbehind_) {
       // Positive lookbehinds with capture groups are not currently supported
       result_ = false;
-
     } else {
       node->body()->Accept(this, nullptr);
     }
