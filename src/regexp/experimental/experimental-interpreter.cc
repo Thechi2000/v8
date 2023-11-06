@@ -503,7 +503,9 @@ class NfaInterpreter {
           // a match at the current position. The thread's priority ensures that
           // all the threads of the lookbehind have already been run at this
           // position.
-          if (!lookbehind_table_[inst.payload.looktable_index]) {
+          if (lookbehind_table_[inst.payload.read_lookbehind
+                                    .lookbehind_index] ==
+              inst.payload.read_lookbehind.is_positive) {
             DestroyThread(t);
           } else {
             ++t.pc;

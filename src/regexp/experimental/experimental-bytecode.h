@@ -110,8 +110,13 @@ struct RegExpInstruction {
     base::uc16 min;  // Inclusive.
     base::uc16 max;  // Inclusive.
   };
+  struct ReadLookbehindTablePayload {
+    int32_t lookbehind_index : 31;
+    bool is_positive : 1;
+  };
 
-  static RegExpInstruction ConsumeRange(base::uc16 min, base::uc16 max) {
+  static RegExpInstruction
+  ConsumeRange(base::uc16 min, base::uc16 max) {
     RegExpInstruction result;
     result.opcode = CONSUME_RANGE;
     result.payload.consume_range = Uc16Range{min, max};
@@ -188,10 +193,11 @@ struct RegExpInstruction {
     return result;
   }
 
-  static RegExpInstruction ReadLookTable(int32_t index) {
+  static RegExpInstruction ReadLookTable(int32_t index, bool is_positive) {
     RegExpInstruction result;
     result.opcode = READ_LOOKBEHIND_TABLE;
-    result.payload.looktable_index = index;
+    result.payload.read_lookbehind = {.lookbehind_index = index,
+                                      .is_positive = is_positive};
     return result;
   }
 
@@ -205,8 +211,10 @@ struct RegExpInstruction {
     int32_t register_index;
     // Payload of ASSERTION:
     RegExpAssertion::Type assertion_type;
-    // Payload of WRITE_LOOKBEHIND_TABLE and READ_LOOKBEHIND_TABLE:
+    // Payload of WRITE_LOOKBEHIND_TABLE:
     int32_t looktable_index;
+    // Payload of READ_LOOKBEHIND_TABLE:
+    ReadLookbehindTablePayload read_lookbehind;
   } payload;
   static_assert(sizeof(payload) == 4);
 };
