@@ -95,7 +95,6 @@ struct RegExpInstruction {
   enum Opcode : int32_t {
     ACCEPT,
     ASSERTION,
-    CLEAR_REGISTER,
     CONSUME_RANGE,
     FORK,
     JMP,
@@ -151,13 +150,6 @@ struct RegExpInstruction {
   static RegExpInstruction SetRegisterToCp(int32_t register_index) {
     RegExpInstruction result;
     result.opcode = SET_REGISTER_TO_CP;
-    result.payload.register_index = register_index;
-    return result;
-  }
-
-  static RegExpInstruction ClearRegister(int32_t register_index) {
-    RegExpInstruction result;
-    result.opcode = CLEAR_REGISTER;
     result.payload.register_index = register_index;
     return result;
   }

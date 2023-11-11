@@ -86,8 +86,6 @@ base::Vector<const base::uc16> ToCharacterVector<base::uc16>(
   return content.ToUC16Vector();
 }
 
-#include <iostream>
-
 template <class Character>
 class NfaInterpreter {
   // Executes a bytecode program in breadth-first mode, without backtracking.
@@ -152,8 +150,6 @@ class NfaInterpreter {
         input_(ToCharacterVector<Character>(input, no_gc_)),
         input_index_(input_index),
         clock(0),
-        quantifiers_clock(zone->AllocateArray<int>(bytecode.length()),
-                          bytecode.length()),
         pc_last_input_index_(zone->AllocateArray<int>(bytecode.length()),
                              bytecode.length()),
         active_threads_(0, zone),
@@ -217,7 +213,16 @@ class NfaInterpreter {
  private:
   // The state of a "thread" executing experimental regexp bytecode.  (Not to
   // be confused with an OS thread.)
-  struct InterpreterThread {
+  class InterpreterThread {
+   public:
+    InterpreterThread(int pc, int* register_array_begin,
+                      int* quantifiers_clock_array_begin,
+                      int* captures_clock_array_begin)
+        : pc(pc),
+          register_array_begin(register_array_begin),
+          quantifiers_clock_array_begin(quantifiers_clock_array_begin),
+          captures_clock_array_begin(captures_clock_array_begin) {}
+
     // This thread's program counter, i.e. the index within `bytecode_` of the
     // next instruction to be executed.
     int pc;
@@ -229,6 +234,7 @@ class NfaInterpreter {
     // saved, which is always size `register_count_per_match_`.  Should be
     // deallocated with `register_array_allocator_`.
     int* quantifiers_clock_array_begin;
+    int* captures_clock_array_begin;
   };
 
   // Handles pending interrupts if there are any.  Returns
@@ -341,8 +347,8 @@ class NfaInterpreter {
 
     // All threads start at bytecode 0.
     active_threads_.Add(
-        InterpreterThread{0, NewRegisterArray(kUndefinedRegisterValue),
-                          NewRegisterArray(0)},
+        InterpreterThread(0, NewRegisterArray(kUndefinedRegisterValue),
+                          NewQuantifierClockArray(0), NewCaptureClockArray(0)),
         zone_);
     // Run the initial thread, potentially forking new threads, until every
     // thread is blocked without further input.
@@ -405,9 +411,10 @@ class NfaInterpreter {
           ++t.pc;
           break;
         case RegExpInstruction::FORK: {
-          InterpreterThread fork{inst.payload.pc,
+          InterpreterThread fork(inst.payload.pc,
                                  NewRegisterArrayUninitialized(),
-                                 NewRegisterArrayUninitialized()};
+                                 NewQuantifierClockArrayUninitialized(),
+                                 NewCaptureClockArrayUninitialized());
 
           base::Vector<int> fork_registers = GetRegisterArray(fork);
           base::Vector<int> t_registers = GetRegisterArray(t);
@@ -425,6 +432,13 @@ class NfaInterpreter {
                     t_fork_quantifier_clocks.end(),
                     fork_quantifier_clocks.begin());
 
+          base::Vector<int> fork_capture_clocks = GetCaptureClockArray(fork);
+          base::Vector<int> t_fork_capture_clocks = GetCaptureClockArray(t);
+          DCHECK_EQ(fork_capture_clocks.length(),
+                    t_fork_capture_clocks.length());
+          std::copy(t_fork_capture_clocks.begin(), t_fork_capture_clocks.end(),
+                    fork_capture_clocks.begin());
+
           active_threads_.Add(fork, zone_);
 
           ++t.pc;
@@ -434,31 +448,26 @@ class NfaInterpreter {
           t.pc = inst.payload.pc;
           break;
         case RegExpInstruction::ACCEPT:
-          if (best_match_registers_.has_value()) {
-            FreeRegisterArray(best_match_registers_->begin());
-          }
-          best_match_registers_ = GetRegisterArray(t);
+          best_match_registers_ = GetFilteredRegisters(t);
 
           for (InterpreterThread s : active_threads_) {
-            FreeRegisterArray(s.register_array_begin);
+            DestroyThread(s);
           }
           active_threads_.DropAndClear();
           return;
         case RegExpInstruction::SET_REGISTER_TO_CP:
           GetRegisterArray(t)[inst.payload.register_index] = input_index_;
-          ++t.pc;
-          break;
-        case RegExpInstruction::CLEAR_REGISTER:
-          GetRegisterArray(t)[inst.payload.register_index] =
-              kUndefinedRegisterValue;
+          GetCaptureClockArray(t)[inst.payload.register_index] = clock;
           ++t.pc;
           break;
         case RegExpInstruction::SET_QUANT_TO_CLOCK:
           GetQuantifierClockArray(t)[inst.payload.quantifier_id] = clock;
           ++t.pc;
           break;
-        default:
-          assert(0);
+        case RegExpInstruction::FILTER_QUANTIFIER:
+        case RegExpInstruction::FILTER_GROUP:
+        case RegExpInstruction::FILTER_CHILD:
+          UNREACHABLE();
       }
     }
   }
@@ -502,6 +511,10 @@ class NfaInterpreter {
 
   base::Vector<int> GetQuantifierClockArray(InterpreterThread t) {
     return base::Vector<int>(t.quantifiers_clock_array_begin,
+                             quantifiers_count_);
+  }
+  base::Vector<int> GetCaptureClockArray(InterpreterThread t) {
+    return base::Vector<int>(t.captures_clock_array_begin,
                              register_count_per_match_);
   }
 
@@ -521,8 +534,155 @@ class NfaInterpreter {
                                          register_count_per_match_);
   }
 
+  int* NewQuantifierClockArrayUninitialized() {
+    return register_array_allocator_.allocate(quantifiers_count_);
+  }
+
+  int* NewQuantifierClockArray(int fill_value) {
+    int* array_begin = NewQuantifierClockArrayUninitialized();
+    int* array_end = array_begin + quantifiers_count_;
+    std::fill(array_begin, array_end, fill_value);
+    return array_begin;
+  }
+
+  void FreeQuantifierClockArray(int* quantifier_clock_array_begin) {
+    register_array_allocator_.deallocate(quantifier_clock_array_begin,
+                                         quantifiers_count_);
+  }
+
+  int* NewCaptureClockArrayUninitialized() {
+    return register_array_allocator_.allocate(register_count_per_match_);
+  }
+
+  int* NewCaptureClockArray(int fill_value) {
+    int* array_begin = NewCaptureClockArrayUninitialized();
+    int* array_end = array_begin + register_count_per_match_;
+    std::fill(array_begin, array_end, fill_value);
+    return array_begin;
+  }
+
+  void FreeCaptureClockArray(int* register_array_begin) {
+    register_array_allocator_.deallocate(register_array_begin,
+                                         register_count_per_match_);
+  }
+
+  base::Vector<int> GetFilteredRegisters(InterpreterThread t) {
+    bool completed = false;
+    int pc = t.pc + 1;
+    int max_clock = 0;
+
+    if (pc == bytecode_.length()) {
+      return GetRegisterArray(t);
+    }
+
+    bool can_encounter_filter = false;
+    ZoneLinkedList<int> stack(zone_);
+    ZoneLinkedList<int> max_clocks(zone_);
+
+    base::Vector<int> filtered_registers(
+        NewRegisterArray(kUndefinedRegisterValue), register_count_per_match_);
+
+    base::Vector<int> registers = GetRegisterArray(t);
+    base::Vector<int> quantifiers_clocks = GetQuantifierClockArray(t);
+    base::Vector<int> capture_clocks = GetCaptureClockArray(t);
+
+    filtered_registers[0] = registers[0];
+    filtered_registers[1] = registers[1];
+
+    while (!completed) {
+      auto instr = bytecode_[pc];
+      switch (instr.opcode) {
+        case RegExpInstruction::FILTER_CHILD:
+          stack.push_front(pc + 1);
+          max_clocks.push_front(max_clock);
+          pc = instr.payload.pc;
+          can_encounter_filter = true;
+          break;
+
+        case RegExpInstruction::FILTER_GROUP:
+          if (can_encounter_filter) {
+            int group_id = instr.payload.group_id;
+            if (capture_clocks[2 * group_id] >= max_clock) {
+              filtered_registers[2 * group_id] = registers[2 * group_id];
+              filtered_registers[2 * group_id + 1] =
+                  registers[2 * group_id + 1];
+              ++pc;
+
+              if (pc == bytecode_.length()) {
+                if (stack.size() > 0) {
+                  pc = stack.front();
+                  max_clock = max_clocks.front();
+                  stack.pop_front();
+                  max_clocks.pop_front();
+                } else {
+                  completed = true;
+                }
+              }
+            } else {
+              pc = stack.front();
+              max_clock = max_clocks.front();
+              stack.pop_front();
+              max_clocks.pop_front();
+            }
+            can_encounter_filter = false;
+          } else {
+            if (stack.size() > 1) {
+              pc = stack.front();
+              max_clock = max_clocks.front();
+              stack.pop_front();
+              max_clocks.pop_front();
+            } else {
+              completed = true;
+            }
+          }
+          break;
+
+        case RegExpInstruction::FILTER_QUANTIFIER:
+          if (can_encounter_filter) {
+            int quantifier_id = instr.payload.quantifier_id;
+            if (quantifiers_clocks[quantifier_id] >= max_clock) {
+              max_clock = quantifiers_clocks[quantifier_id];
+              ++pc;
+
+              if (pc == bytecode_.length()) {
+                if (stack.size() > 0) {
+                  pc = stack.front();
+                  max_clock = max_clocks.front();
+                  stack.pop_front();
+                  max_clocks.pop_front();
+                } else {
+                  completed = true;
+                }
+              }
+            } else {
+              pc = stack.front();
+              max_clock = max_clocks.front();
+              stack.pop_front();
+              max_clocks.pop_front();
+            }
+            can_encounter_filter = false;
+          } else {
+            if (stack.size() > 1) {
+              pc = stack.front();
+              stack.pop_front();
+            } else {
+              completed = true;
+            }
+          }
+          break;
+
+        default:
+          UNREACHABLE();
+      }
+    }
+
+    return filtered_registers;
+  }
+
   void DestroyThread(InterpreterThread t) {
     FreeRegisterArray(t.register_array_begin);
+    FreeQuantifierClockArray(t.quantifiers_clock_array_begin);
+    FreeCaptureClockArray(t.captures_clock_array_begin);
   }
 
   // It is redundant to have two threads t, t0 execute at the same PC value,
@@ -570,8 +730,6 @@ class NfaInterpreter {
 
   // Global clock counting the total of executed instructions
   int clock;
-  // Stores the global clock value at the last time we went into each quantifier
-  base::Vector<int> quantifiers_clock;
 
   // pc_last_input_index_[k] records the value of input_index_ the last
   // time a thread t such that t.pc == k was activated, i.e. put on

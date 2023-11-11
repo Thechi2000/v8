@@ -234,10 +234,6 @@ class BytecodeAssembler {
     code_.Add(RegExpInstruction::Assertion(t), zone_);
   }
 
-  void ClearRegister(int32_t register_index) {
-    code_.Add(RegExpInstruction::ClearRegister(register_index), zone_);
-  }
-
   void ConsumeRange(base::uc16 from, base::uc16 to) {
     code_.Add(RegExpInstruction::ConsumeRange(from, to), zone_);
   }
@@ -592,18 +588,6 @@ class CompileVisitor : private RegExpVisitor {
       assembler_.ConsumeRange(c, c);
     }
     return nullptr;
-  }
-
-  void ClearRegisters(Interval indices) {
-    if (indices.is_empty()) return;
-    DCHECK_EQ(indices.from() % 2, 0);
-    DCHECK_EQ(indices.to() % 2, 1);
-    for (int i = indices.from(); i <= indices.to(); i += 2) {
-      // It suffices to clear the register containing the `begin` of a capture
-      // because this indicates that the capture is undefined, regardless of
-      // the value in the `end` register.
-      assembler_.ClearRegister(i);
-    }
   }
 
   // Emit bytecode corresponding to /<emit_body>*/.

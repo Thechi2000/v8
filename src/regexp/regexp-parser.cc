@@ -1235,7 +1235,6 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
         continue;
     }
     RegExpQuantifier::QuantifierType quantifier_type = RegExpQuantifier::GREEDY;
-    ++quantifier_count_;
     if (current() == '?') {
       quantifier_type = RegExpQuantifier::NON_GREEDY;
       Advance();
@@ -1248,6 +1247,7 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
                                       quantifier_type)) {
       return ReportError(RegExpError::kInvalidQuantifier);
     }
+    ++quantifier_count_;
   }
 }
 
@@ -2961,6 +2961,7 @@ bool RegExpParserImpl<CharT>::Parse(RegExpCompileData* result) {
   result->contains_anchor = contains_anchor();
   result->capture_count = capture_count;
   result->named_captures = GetNamedCaptures();
+  result->quantifier_count = quantifier_count_;
   return true;
 }
 
