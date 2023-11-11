@@ -86,6 +86,125 @@ base::Vector<const base::uc16> ToCharacterVector<base::uc16>(
   return content.ToUC16Vector();
 }
 
+class FilterGroups {
+ public:
+  static base::Vector<int> Filter(
+      int pc, base::Vector<int> registers, base::Vector<int> quantifiers_clocks,
+      base::Vector<int> capture_clocks, base::Vector<int> filtered_registers,
+      base::Vector<const RegExpInstruction>& bytecode, Zone* zone) {
+    return FilterGroups(pc, registers, quantifiers_clocks, capture_clocks,
+                        filtered_registers, bytecode, zone)
+        .Run();
+  }
+
+ private:
+  FilterGroups(int pc, base::Vector<int> registers,
+               base::Vector<int> quantifiers_clocks,
+               base::Vector<int> capture_clocks,
+               base::Vector<int> filtered_registers,
+               base::Vector<const RegExpInstruction>& bytecode, Zone* zone)
+      : completed_(false),
+        pc_(pc),
+        max_clock_(0),
+        can_encounter_filter_(false),
+        pc_stack_(zone),
+        max_clocks_(zone),
+        registers_(registers),
+        quantifiers_clocks_(quantifiers_clocks),
+        capture_clocks_(capture_clocks),
+        filtered_registers_(filtered_registers),
+        bytecode_(bytecode) {}
+
+  void Up() {
+    pc_ = pc_stack_.front();
+    max_clock_ = max_clocks_.front();
+    pc_stack_.pop_front();
+    max_clocks_.pop_front();
+  }
+
+  void UpOrComplete() {
+    if (pc_stack_.size() > 0) {
+      Up();
+    } else {
+      completed_ = true;
+    }
+  }
+
+  void TryIncrementPC() {
+    ++pc_;
+    if (pc_ == bytecode_.length()) {
+      Up();
+    }
+  }
+
+  base::Vector<int> Run() {
+    if (pc_ == bytecode_.length()) {
+      return registers_;
+    }
+
+    while (!completed_) {
+      auto instr = bytecode_[pc_];
+      switch (instr.opcode) {
+        case RegExpInstruction::FILTER_CHILD:
+          pc_stack_.push_front(pc_ + 1);
+          max_clocks_.push_front(max_clock_);
+          pc_ = instr.payload.pc;
+          can_encounter_filter_ = true;
+          break;
+
+        case RegExpInstruction::FILTER_GROUP:
+          if (can_encounter_filter_) {
+            int group_id = instr.payload.group_id;
+            if (capture_clocks_[2 * group_id] >= max_clock_) {
+              filtered_registers_[2 * group_id] = registers_[2 * group_id];
+              filtered_registers_[2 * group_id + 1] =
+                  registers_[2 * group_id + 1];
+              TryIncrementPC();
+            } else {
+              Up();
+            }
+            can_encounter_filter_ = false;
+          } else {
+            UpOrComplete();
+          }
+          break;
+
+        case RegExpInstruction::FILTER_QUANTIFIER:
+          if (can_encounter_filter_) {
+            int quantifier_id = instr.payload.quantifier_id;
+            if (quantifiers_clocks_[quantifier_id] >= max_clock_) {
+              max_clock_ = quantifiers_clocks_[quantifier_id];
+              TryIncrementPC();
+            } else {
+              Up();
+            }
+            can_encounter_filter_ = false;
+          } else {
+            UpOrComplete();
+          }
+          break;
+
+        default:
+          UNREACHABLE();
+      }
+    }
+
+    return filtered_registers_;
+  }
+
+  bool completed_;
+  int pc_;
+  int max_clock_;
+  bool can_encounter_filter_;
+  ZoneLinkedList<int> pc_stack_;
+  ZoneLinkedList<int> max_clocks_;
+  base::Vector<int> registers_;
+  base::Vector<int> quantifiers_clocks_;
+  base::Vector<int> capture_clocks_;
+  base::Vector<int> filtered_registers_;
+  base::Vector<const RegExpInstruction>& bytecode_;
+};
+
 template <class Character>
 class NfaInterpreter {
   // Executes a bytecode program in breadth-first mode, without backtracking.
@@ -567,116 +686,16 @@ class NfaInterpreter {
   }
 
   base::Vector<int> GetFilteredRegisters(InterpreterThread t) {
-    bool completed = false;
-    int pc = t.pc + 1;
-    int max_clock = 0;
-
-    if (pc == bytecode_.length()) {
-      return GetRegisterArray(t);
-    }
-
-    bool can_encounter_filter = false;
-    ZoneLinkedList<int> stack(zone_);
-    ZoneLinkedList<int> max_clocks(zone_);
-
+    base::Vector<int> registers = GetRegisterArray(t);
     base::Vector<int> filtered_registers(
         NewRegisterArray(kUndefinedRegisterValue), register_count_per_match_);
-
-    base::Vector<int> registers = GetRegisterArray(t);
-    base::Vector<int> quantifiers_clocks = GetQuantifierClockArray(t);
-    base::Vector<int> capture_clocks = GetCaptureClockArray(t);
 
     filtered_registers[0] = registers[0];
     filtered_registers[1] = registers[1];
 
-    while (!completed) {
-      auto instr = bytecode_[pc];
-      switch (instr.opcode) {
-        case RegExpInstruction::FILTER_CHILD:
-          stack.push_front(pc + 1);
-          max_clocks.push_front(max_clock);
-          pc = instr.payload.pc;
-          can_encounter_filter = true;
-          break;
-
-        case RegExpInstruction::FILTER_GROUP:
-          if (can_encounter_filter) {
-            int group_id = instr.payload.group_id;
-            if (capture_clocks[2 * group_id] >= max_clock) {
-              filtered_registers[2 * group_id] = registers[2 * group_id];
-              filtered_registers[2 * group_id + 1] =
-                  registers[2 * group_id + 1];
-              ++pc;
-
-              if (pc == bytecode_.length()) {
-                if (stack.size() > 0) {
-                  pc = stack.front();
-                  max_clock = max_clocks.front();
-                  stack.pop_front();
-                  max_clocks.pop_front();
-                } else {
-                  completed = true;
-                }
-              }
-            } else {
-              pc = stack.front();
-              max_clock = max_clocks.front();
-              stack.pop_front();
-              max_clocks.pop_front();
-            }
-            can_encounter_filter = false;
-          } else {
-            if (stack.size() > 1) {
-              pc = stack.front();
-              max_clock = max_clocks.front();
-              stack.pop_front();
-              max_clocks.pop_front();
-            } else {
-              completed = true;
-            }
-          }
-          break;
-
-        case RegExpInstruction::FILTER_QUANTIFIER:
-          if (can_encounter_filter) {
-            int quantifier_id = instr.payload.quantifier_id;
-            if (quantifiers_clocks[quantifier_id] >= max_clock) {
-              max_clock = quantifiers_clocks[quantifier_id];
-              ++pc;
-
-              if (pc == bytecode_.length()) {
-                if (stack.size() > 0) {
-                  pc = stack.front();
-                  max_clock = max_clocks.front();
-                  stack.pop_front();
-                  max_clocks.pop_front();
-                } else {
-                  completed = true;
-                }
-              }
-            } else {
-              pc = stack.front();
-              max_clock = max_clocks.front();
-              stack.pop_front();
-              max_clocks.pop_front();
-            }
-            can_encounter_filter = false;
-          } else {
-            if (stack.size() > 1) {
-              pc = stack.front();
-              stack.pop_front();
-            } else {
-              completed = true;
-            }
-          }
-          break;
-
-        default:
-          UNREACHABLE();
-      }
-    }
-
-    return filtered_registers;
+    return FilterGroups::Filter(t.pc + 1, registers, GetQuantifierClockArray(t),
+                                GetCaptureClockArray(t), filtered_registers,
+                                bytecode_, zone_);
   }
 
   void DestroyThread(InterpreterThread t) {
