@@ -101,6 +101,9 @@ struct RegExpInstruction {
     JMP,
     SET_REGISTER_TO_CP,
     SET_QUANT_TO_CLOCK,
+    FILTER_QUANTIFIER,
+    FILTER_GROUP,
+    FILTER_CHILD,
   };
 
   struct Uc16Range {
@@ -173,18 +176,41 @@ struct RegExpInstruction {
     return result;
   }
 
+  static RegExpInstruction FilterQuantifier(int32_t quantifier_id) {
+    RegExpInstruction result;
+    result.opcode = FILTER_QUANTIFIER;
+    result.payload.quantifier_id = quantifier_id;
+    return result;
+  }
+
+  static RegExpInstruction FilterGroup(int32_t group_id) {
+    RegExpInstruction result;
+    result.opcode = FILTER_GROUP;
+    result.payload.group_id = group_id;
+    return result;
+  }
+
+  static RegExpInstruction FilterChild(int32_t pc) {
+    RegExpInstruction result;
+    result.opcode = SET_QUANT_TO_CLOCK;
+    result.payload.pc = pc;
+    return result;
+  }
+
   Opcode opcode;
   union {
     // Payload of CONSUME_RANGE:
     Uc16Range consume_range;
-    // Payload of FORK and JMP, the next/forked program counter (pc):
+    // Payload of FORK, JMP and FILTER_CHILD, the next/forked program counter (pc):
     int32_t pc;
     // Payload of SET_REGISTER_TO_CP and CLEAR_REGISTER:
     int32_t register_index;
     // Payload of ASSERTION:
     RegExpAssertion::Type assertion_type;
-    // Payload of SET_QUANT_TO_CLOCK
+    // Payload of SET_QUANT_TO_CLOCK and FILTER_QUANTIFIER:
     int32_t quantifier_id;
+    // Payload of FILTER_GROUP:
+    int32_t group_id;
   } payload;
   static_assert(sizeof(payload) == 4);
 };

@@ -84,9 +84,7 @@ class CanBeHandledVisitor final : private RegExpVisitor {
     return nullptr;
   }
 
-  void* VisitAtom(RegExpAtom* node, void*) override {
-    return nullptr;
-  }
+  void* VisitAtom(RegExpAtom* node, void*) override { return nullptr; }
 
   void* VisitText(RegExpText* node, void*) override {
     for (TextElement& el : *node->elements()) {
@@ -264,6 +262,18 @@ class BytecodeAssembler {
     code_.Add(RegExpInstruction::SetQuantToClock(quantifier_id), zone_);
   }
 
+  void FilterQuantifier(int32_t quantifier_id) {
+    code_.Add(RegExpInstruction::FilterQuantifier(quantifier_id), zone_);
+  }
+
+  void FilterGroup(int32_t group_id) {
+    code_.Add(RegExpInstruction::FilterGroup(group_id), zone_);
+  }
+
+  void FilterChild(Label& target) {
+    LabelledInstrImpl(RegExpInstruction::Opcode::FILTER_CHILD, target);
+  }
+
   void Bind(Label& target) {
     DCHECK_EQ(target.state_, Label::UNBOUND);
 
@@ -308,6 +318,131 @@ class BytecodeAssembler {
   ZoneList<RegExpInstruction> code_;
 };
 
+class FilterGroupsCompileVisitor final : private RegExpVisitor {
+ public:
+  static void CompileFilter(Zone* zone, RegExpTree* tree,
+                            BytecodeAssembler& assembler) {
+    FilterGroupsCompileVisitor visitor(assembler, zone);
+
+    tree->Accept(&visitor, nullptr);
+
+    while (!visitor.nodes_.empty()) {
+      auto& entry = visitor.nodes_.front();
+
+      visitor.assembler_.Bind(entry.label);
+      visitor.compile_capture_or_quant_ = true;
+      entry.node->Accept(&visitor, nullptr);
+      
+      visitor.nodes_.pop_front();
+    }
+  }
+
+ private:
+  class BFEntry {
+   public:
+    BFEntry(RegExpTree* node) : label(), node(node) {}
+
+    Label label;
+    RegExpTree* node;
+  };
+
+  FilterGroupsCompileVisitor(BytecodeAssembler& assembler, Zone* zone)
+      : zone_(zone),
+        assembler_(assembler),
+        nodes_(zone_),
+        compile_capture_or_quant_(false) {}
+
+  void* VisitDisjunction(RegExpDisjunction* node, void* max_clock) override {
+    for (RegExpTree* alt : *node->alternatives()) {
+      alt->Accept(this, nullptr);
+    }
+    return nullptr;
+  }
+
+  void* VisitAlternative(RegExpAlternative* node, void* max_clock) override {
+    for (RegExpTree* alt : *node->nodes()) {
+      alt->Accept(this, nullptr);
+    }
+    return nullptr;
+  }
+
+  void* VisitClassRanges(RegExpClassRanges* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitClassSetOperand(RegExpClassSetOperand* node,
+                             void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitClassSetExpression(RegExpClassSetExpression* node,
+                                void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitAssertion(RegExpAssertion* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitAtom(RegExpAtom* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitText(RegExpText* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitQuantifier(RegExpQuantifier* node, void* max_clock) override {
+    if (compile_capture_or_quant_) {
+      assembler_.FilterQuantifier(node->index());
+      compile_capture_or_quant_ = false;
+      node->body()->Accept(this, nullptr);
+    } else {
+      nodes_.emplace_back(node);
+      assembler_.FilterChild(nodes_.back().label);
+    }
+
+    return nullptr;
+  }
+
+  void* VisitCapture(RegExpCapture* node, void* max_clock) override {
+    if (compile_capture_or_quant_) {
+      assembler_.FilterGroup(node->index());
+      compile_capture_or_quant_ = false;
+      node->body()->Accept(this, nullptr);
+    } else {
+      nodes_.emplace_back(node);
+      assembler_.FilterChild(nodes_.back().label);
+    }
+
+    return nullptr;
+  }
+
+  void* VisitGroup(RegExpGroup* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitLookaround(RegExpLookaround* node, void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitBackReference(RegExpBackReference* node,
+                           void* max_clock) override {
+    return nullptr;
+  }
+
+  void* VisitEmpty(RegExpEmpty* node, void* max_clock) override {
+    return nullptr;
+  }
+
+ private:
+  Zone* zone_;
+
+  BytecodeAssembler& assembler_;
+  ZoneLinkedList<BFEntry> nodes_;
+  bool compile_capture_or_quant_;
+};
+
 class CompileVisitor : private RegExpVisitor {
  public:
   static ZoneList<RegExpInstruction> Compile(RegExpTree* tree,
@@ -326,6 +461,8 @@ class CompileVisitor : private RegExpVisitor {
     tree->Accept(&compiler, nullptr);
     compiler.assembler_.SetRegisterToCp(1);
     compiler.assembler_.Accept();
+
+    FilterGroupsCompileVisitor::CompileFilter(zone, tree, compiler.assembler_);
 
     return std::move(compiler.assembler_).IntoCode();
   }

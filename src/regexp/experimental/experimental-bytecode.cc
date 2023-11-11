@@ -74,6 +74,15 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
     case RegExpInstruction::SET_QUANT_TO_CLOCK:
       os << "SET_QUANT_TO_CLOCK " << inst.payload.quantifier_id;
       break;
+    case RegExpInstruction::FILTER_QUANTIFIER:
+      os << "FILTER_QUANTIFIER " << inst.payload.quantifier_id;
+      break;
+    case RegExpInstruction::FILTER_GROUP:
+      os << "FILTER_GROUP " << inst.payload.group_id;
+      break;
+    case RegExpInstruction::FILTER_CHILD:
+      os << "FILTER_CHILD " << inst.payload.pc;
+      break;
   }
   return os;
 }
