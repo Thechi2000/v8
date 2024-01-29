@@ -318,6 +318,11 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
  public:
   static void CompileFilter(Zone* zone, RegExpTree* tree,
                             BytecodeAssembler& assembler) {
+    /* Compiles the regexp's AST using the `FILTER_*` instructions (see
+     * `FilterGroups` in experimental-interpreter.cc). The regexp's AST is
+     * traversed in breadth-first mode, compiling one node at a time, while
+     * saving its children in a queue. */
+
     FilterGroupsCompileVisitor visitor(assembler, zone);
 
     tree->Accept(&visitor, nullptr);
@@ -328,20 +333,12 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
       visitor.assembler_.Bind(entry.label);
       visitor.compile_capture_or_quant_ = true;
       entry.node->Accept(&visitor, nullptr);
-      
+
       visitor.nodes_.pop_front();
     }
   }
 
  private:
-  class BFEntry {
-   public:
-    BFEntry(RegExpTree* node) : label(), node(node) {}
-
-    Label label;
-    RegExpTree* node;
-  };
-
   FilterGroupsCompileVisitor(BytecodeAssembler& assembler, Zone* zone)
       : zone_(zone),
         assembler_(assembler),
@@ -433,10 +430,25 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
   }
 
  private:
+  // Entry in the nodes queue. Contains the node to compile and a label to bind
+  // at the start of its bytecode.
+  class BFEntry {
+   public:
+    BFEntry(RegExpTree* node) : label(), node(node) {}
+
+    Label label;
+    RegExpTree* node;
+  };
+
   Zone* zone_;
 
   BytecodeAssembler& assembler_;
   ZoneLinkedList<BFEntry> nodes_;
+
+  // Whether we can compile a capture group or quantifier. This is set to true
+  // after popping an element from the queue, and false after having compiled
+  // one. When false, encountered capture groups and quantifiers are pushed on
+  // the queue.
   bool compile_capture_or_quant_;
 };
 
