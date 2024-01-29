@@ -415,6 +415,7 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
   }
 
   void* VisitGroup(RegExpGroup* node, void* max_clock) override {
+    node->body()->Accept(this, nullptr);
     return nullptr;
   }
 
