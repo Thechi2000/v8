@@ -78,7 +78,8 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   inline int max_register_count() const;
   // Number of captures (without the match itself).
   inline int capture_count() const;
-  // Number of quantifiers TODO including `?` ?
+  // Number of quantifiers that can do several iterations (excluding `?` and
+  // `??`).
   inline int quantifier_count() const;
   inline Object capture_name_map();
   inline void set_capture_name_map(Handle<FixedArray> capture_name_map);

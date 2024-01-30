@@ -94,24 +94,15 @@ class FilterGroups {
       base::Vector<const RegExpInstruction>& bytecode, Zone* zone) {
     /* Capture groups that were not traversed in the last iteration of a
      * quantifier need to be discarded. In order to determine which groups need
-     * to be discarded, the interpreter keeps an internal count of the count of
+     * to be discarded, the interpreter maintains a clock, an internal count of
      * bytecode instructions executed. Whenever it reaches a quantifier or
-     * capture a part of the string, it saves the current clock alongside with
-     * that quantifier/group. After having found a match, it iterates over a set
-     * of special instruction encoding the tree of quantifiers and capturing
-     * groups, discarding any group which clock is less than the clock of its
-     * parent quantifier.
-     *
-     * To achieve this, the regexp's AST is compiled using a special sets of
-     * instructions, `FILTER_GROUP`, `FILTER_QUANTIFIER` and `FILTER_CHILD`.
-     * They encode the dependencies between groups and quantifier (which
-     * contains which). To build it, we consider a simplified version of the
-     * AST, with only capture groups and quantifiers. We then convert that AST
-     * in the following form: each node is represented as a `FILTER_GROUP` or
-     * `FILTER_QUANTIFIER` instruction, containing the index of the respective
-     * group or quantifier, followed by a variable number of `FILTER_CHILD`
-     * instructions (one per child of the group/quantifier), containing the
-     * index of their respective node in the bytecode. */
+     * capture a part of the string, it records the current clock. After a match
+     * is found, the interpreter filters out capture group that were defined in
+     * any other iteration than the last. To do so, it compares the last clock
+     * value of the group with the last clock value of its parent
+     * quantifier/group, keeping only groups that were defined after the parent
+     * quantifier/group last iteration. The structure of the bytecode used is
+     * explained in `FilterGroupsCompileVisitor` (experimental-compiler.cc). */
 
     return FilterGroups(pc, registers, quantifiers_clocks, capture_clocks,
                         filtered_registers, bytecode, zone)
@@ -127,33 +118,32 @@ class FilterGroups {
       : completed_(false),
         pc_(pc),
         max_clock_(0),
-        can_encounter_filter_(false),
         pc_stack_(zone),
-        max_clocks_(zone),
+        max_clock_stack_(zone),
         quantifiers_clocks_(quantifiers_clocks),
         capture_clocks_(capture_clocks),
         registers_(registers),
         filtered_registers_(filtered_registers),
         bytecode_(bytecode) {}
 
-  /* Goes on node up on the tree, restoring pc_ and max_clock_. If already at
-   * the top of the tree, completes the filtering process. */
+  /* Goes back to the parent node, restoring pc_ and max_clock_. If already at
+   * the root of the tree, completes the filtering process. */
   void Up() {
     if (pc_stack_.size() > 0) {
       pc_ = pc_stack_.front();
-      max_clock_ = max_clocks_.front();
+      max_clock_ = max_clock_stack_.front();
       pc_stack_.pop_front();
-      max_clocks_.pop_front();
+      max_clock_stack_.pop_front();
     } else {
       completed_ = true;
     }
   }
 
-  /* Increments pc_. If at the end of the bytecode_, goes one node up on the
-   * tree. */
+  /* Increments pc_. When at the end of a node, goes back to the parent node. */
   void TryIncrementPC() {
     ++pc_;
-    if (pc_ == bytecode_.length()) {
+    if (pc_ == bytecode_.length() ||
+        bytecode_[pc_].opcode != RegExpInstruction::FILTER_CHILD) {
       Up();
     }
   }
@@ -169,47 +159,38 @@ class FilterGroups {
         case RegExpInstruction::FILTER_CHILD:
           // Enter the child's node.
           pc_stack_.push_front(pc_ + 1);
-          max_clocks_.push_front(max_clock_);
+          max_clock_stack_.push_front(max_clock_);
           pc_ = instr.payload.pc;
-          can_encounter_filter_ = true;
           break;
 
         case RegExpInstruction::FILTER_GROUP:
-          if (can_encounter_filter_) {
-            int group_id = instr.payload.group_id;
+          int group_id = instr.payload.group_id;
 
-            // Checks whether the captured group should be saved or discarded.
-            if (capture_clocks_[2 * group_id] >= max_clock_) {
-              filtered_registers_[2 * group_id] = registers_[2 * group_id];
-              filtered_registers_[2 * group_id + 1] =
-                  registers_[2 * group_id + 1];
-              TryIncrementPC();
-            } else {
-              // If it should be discarded, all its content should be too.
-              Up();
-            }
-
-            can_encounter_filter_ = false;
+          // Checks whether the captured group should be saved or discarded.
+          if (capture_clocks_[2 * group_id] >= max_clock_) {
+            filtered_registers_[2 * group_id] = registers_[2 * group_id];
+            filtered_registers_[2 * group_id + 1] =
+                registers_[2 * group_id + 1];
+            TryIncrementPC();
           } else {
+            // If the node should be discarded, all its children should be too.
+            // By going back to the parent, we don't visit the children, and
+            // therefore don't copy their registers.
             Up();
           }
           break;
 
         case RegExpInstruction::FILTER_QUANTIFIER:
-          if (can_encounter_filter_) {
-            int quantifier_id = instr.payload.quantifier_id;
+          int quantifier_id = instr.payload.quantifier_id;
 
-            // Checks whether the quantifier should be saved or discarded.
-            if (quantifiers_clocks_[quantifier_id] >= max_clock_) {
-              max_clock_ = quantifiers_clocks_[quantifier_id];
-              TryIncrementPC();
-            } else {
-              // If it should be discarded, all its content should be too.
-              Up();
-            }
-
-            can_encounter_filter_ = false;
+          // Checks whether the quantifier should be saved or discarded.
+          if (quantifiers_clocks_[quantifier_id] >= max_clock_) {
+            max_clock_ = quantifiers_clocks_[quantifier_id];
+            TryIncrementPC();
           } else {
+            // If the node should be discarded, all its children should be too.
+            // By going back to the parent, we don't visit the children, and
+            // therefore don't copy their registers.
             Up();
           }
           break;
@@ -229,16 +210,9 @@ class FilterGroups {
   // Any groups whose clock is less then max_clock_ needs to be discarded.
   int max_clock_;
 
-  // Whether the intepreted is allowed to encounter a FILTER_GROUP or
-  // FILTER_QUANTIFIER instruction. since any node in our simplified AST is
-  // composed of one of those two instruction followed by FILTER_CHILD
-  // instructions. This avoids the need of an instruction to indicate the end of
-  // a node.
-  bool can_encounter_filter_;
-
-  // Stores pc_ and max_clock_ when the intepreter enters a node.
+  // Stores pc_ and max_clock_ when the interpreter enters a node.
   ZoneLinkedList<int> pc_stack_;
-  ZoneLinkedList<int> max_clocks_;
+  ZoneLinkedList<int> max_clock_stack_;
 
   // Stores the last clock count for each quantifier and capture groups.
   base::Vector<int> quantifiers_clocks_;
@@ -321,7 +295,7 @@ class NfaInterpreter {
         active_threads_(0, zone),
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
-        best_match_registers_(base::nullopt),
+        best_match_thread_(base::nullopt),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
@@ -345,7 +319,7 @@ class NfaInterpreter {
 
       if (!FoundMatch()) break;
 
-      base::Vector<int> registers = *best_match_registers_;
+      base::Vector<int> registers = GetFilteredRegisters(*best_match_thread_);
       output_registers =
           std::copy(registers.begin(), registers.end(), output_registers);
 
@@ -475,7 +449,7 @@ class NfaInterpreter {
   }
 
   // Find the next match and return the corresponding capture registers and
-  // write its capture registers to `best_match_registers_`.  The search starts
+  // write its capture registers to `best_match_thread_`.  The search starts
   // at the current `input_index_`.  Returns RegExp::kInternalRegExpSuccess if
   // execution could finish regularly (with or without a match) and an error
   // code due to interrupt otherwise.
@@ -506,9 +480,9 @@ class NfaInterpreter {
     }
     active_threads_.DropAndClear();
 
-    if (best_match_registers_.has_value()) {
-      FreeRegisterArray(best_match_registers_->begin());
-      best_match_registers_ = base::nullopt;
+    if (best_match_thread_.has_value()) {
+      FreeRegisterArray(best_match_thread_->begin());
+      best_match_thread_ = base::nullopt;
     }
 
     // All threads start at bytecode 0.
@@ -614,7 +588,10 @@ class NfaInterpreter {
           t.pc = inst.payload.pc;
           break;
         case RegExpInstruction::ACCEPT:
-          best_match_registers_ = GetFilteredRegisters(t);
+          if (best_match_thread_.has_value()) {
+            DestroyThread(*best_match_thread_);
+          }
+          best_match_thread_ = t;
 
           for (InterpreterThread s : active_threads_) {
             DestroyThread(s);
@@ -669,7 +646,7 @@ class NfaInterpreter {
     blocked_threads_.DropAndClear();
   }
 
-  bool FoundMatch() const { return best_match_registers_.has_value(); }
+  bool FoundMatch() const { return best_match_thread_.has_value(); }
 
   base::Vector<int> GetRegisterArray(InterpreterThread t) {
     return base::Vector<int>(t.register_array_begin, register_count_per_match_);
@@ -820,7 +797,7 @@ class NfaInterpreter {
   // search.  If several threads ACCEPTed, then this will be the register array
   // of the accepting thread with highest priority.  Should be deallocated with
   // `register_array_allocator_`.
-  base::Optional<base::Vector<int>> best_match_registers_;
+  base::Optional<InterpreterThread> best_match_thread_;
 
   Zone* zone_;
 };

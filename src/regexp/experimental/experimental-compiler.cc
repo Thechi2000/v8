@@ -84,7 +84,9 @@ class CanBeHandledVisitor final : private RegExpVisitor {
     return nullptr;
   }
 
-  void* VisitAtom(RegExpAtom* node, void*) override { return nullptr; }
+  void* VisitAtom(RegExpAtom* node, void*) override {
+    return nullptr;
+  }
 
   void* VisitText(RegExpText* node, void*) override {
     for (TextElement& el : *node->elements()) {
@@ -318,10 +320,18 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
  public:
   static void CompileFilter(Zone* zone, RegExpTree* tree,
                             BytecodeAssembler& assembler) {
-    /* Compiles the regexp's AST using the `FILTER_*` instructions (see
-     * `FilterGroups` in experimental-interpreter.cc). The regexp's AST is
-     * traversed in breadth-first mode, compiling one node at a time, while
-     * saving its children in a queue. */
+    /* To filter out groups that were not matched in the last iteration of a
+     * quantifier, the regexp's AST is compiled using a special sets of
+     * instructions, `FILTER_GROUP`, `FILTER_QUANTIFIER` and `FILTER_CHILD`.
+     * They encode a simplified AST containing only the groups and quantifiers.
+     * Each node is represented as either a `FILTER_GROUP` or a
+     * `FILTER_QUANTIFIER` instruction, containing the index of the respective
+     * group or quantifier, followed by a variable number of `FILTER_CHILD`
+     * instructions each containing the index of their respective node in the
+     * bytecode.
+     *
+     * The regexp's AST is traversed in breadth-first mode, compiling one node
+     * at a time, while saving its children in a queue. */
 
     FilterGroupsCompileVisitor visitor(assembler, zone);
 
