@@ -163,7 +163,7 @@ class FilterGroups {
           pc_ = instr.payload.pc;
           break;
 
-        case RegExpInstruction::FILTER_GROUP:
+        case RegExpInstruction::FILTER_GROUP: {
           int group_id = instr.payload.group_id;
 
           // Checks whether the captured group should be saved or discarded.
@@ -179,8 +179,9 @@ class FilterGroups {
             Up();
           }
           break;
+        }
 
-        case RegExpInstruction::FILTER_QUANTIFIER:
+        case RegExpInstruction::FILTER_QUANTIFIER: {
           int quantifier_id = instr.payload.quantifier_id;
 
           // Checks whether the quantifier should be saved or discarded.
@@ -194,6 +195,7 @@ class FilterGroups {
             Up();
           }
           break;
+        }
 
         default:
           UNREACHABLE();
@@ -481,7 +483,7 @@ class NfaInterpreter {
     active_threads_.DropAndClear();
 
     if (best_match_thread_.has_value()) {
-      FreeRegisterArray(best_match_thread_->begin());
+      DestroyThread(*best_match_thread_);
       best_match_thread_ = base::nullopt;
     }
 
