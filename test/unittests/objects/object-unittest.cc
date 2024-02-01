@@ -60,7 +60,7 @@ TEST(Object, InstanceTypeListOrder) {
   int prev = -1;
   InstanceType current_type = static_cast<InstanceType>(current);
   EXPECT_EQ(current_type, InstanceType::FIRST_TYPE);
-  EXPECT_EQ(current_type, InstanceType::INTERNALIZED_STRING_TYPE);
+  EXPECT_EQ(current_type, InstanceType::INTERNALIZED_TWO_BYTE_STRING_TYPE);
 #define TEST_INSTANCE_TYPE(type)                                           \
   current_type = InstanceType::type;                                       \
   current = static_cast<int>(current_type);                                \
@@ -235,7 +235,7 @@ static void CheckString(Isolate* isolate, const char* value,
 
 static void CheckNumber(Isolate* isolate, double value, const char* string) {
   Handle<Object> number = isolate->factory()->NewNumber(value);
-  CHECK(number->IsNumber());
+  CHECK(IsNumber(*number));
   CheckObject(isolate, number, string);
 }
 
@@ -352,7 +352,8 @@ TEST_F(ObjectTest, EnumCache) {
     CHECK_EQ(c->map()->instance_descriptors()->enum_cache(),
              *factory->empty_enum_cache());
 
-    EnumCache enum_cache = cc->map()->instance_descriptors()->enum_cache();
+    Tagged<EnumCache> enum_cache =
+        cc->map()->instance_descriptors()->enum_cache();
     CHECK_NE(enum_cache, *factory->empty_enum_cache());
     CHECK_EQ(enum_cache->keys()->length(), 3);
     CHECK_EQ(enum_cache->indices()->length(), 3);
@@ -369,7 +370,8 @@ TEST_F(ObjectTest, EnumCache) {
 
     // The enum cache is shared on the descriptor array of maps {a}, {b} and
     // {c} only.
-    EnumCache enum_cache = a->map()->instance_descriptors()->enum_cache();
+    Tagged<EnumCache> enum_cache =
+        a->map()->instance_descriptors()->enum_cache();
     CHECK_NE(enum_cache, *factory->empty_enum_cache());
     CHECK_NE(cc->map()->instance_descriptors()->enum_cache(),
              *factory->empty_enum_cache());
@@ -397,7 +399,8 @@ TEST_F(ObjectTest, EnumCache) {
     CHECK_EQ(c->map()->EnumLength(), 3);
     CHECK_EQ(cc->map()->EnumLength(), 3);
 
-    EnumCache enum_cache = c->map()->instance_descriptors()->enum_cache();
+    Tagged<EnumCache> enum_cache =
+        c->map()->instance_descriptors()->enum_cache();
     CHECK_NE(enum_cache, *factory->empty_enum_cache());
     // The keys and indices caches are updated.
     CHECK_EQ(enum_cache, *previous_enum_cache);
@@ -433,7 +436,8 @@ TEST_F(ObjectTest, EnumCache) {
     CHECK_EQ(c->map()->EnumLength(), 3);
     CHECK_EQ(cc->map()->EnumLength(), 3);
 
-    EnumCache enum_cache = c->map()->instance_descriptors()->enum_cache();
+    Tagged<EnumCache> enum_cache =
+        c->map()->instance_descriptors()->enum_cache();
     CHECK_NE(enum_cache, *factory->empty_enum_cache());
     // The keys and indices caches are not updated.
     CHECK_EQ(enum_cache, *previous_enum_cache);
@@ -459,20 +463,20 @@ TEST_F(ObjectTest, ObjectMethodsThatTruncateMinusZero) {
   Factory* factory = i_isolate()->factory();
 
   Handle<Object> minus_zero = factory->NewNumber(-1.0 * 0.0);
-  CHECK(minus_zero->IsMinusZero());
+  CHECK(IsMinusZero(*minus_zero));
 
   Handle<Object> result =
       Object::ToInteger(i_isolate(), minus_zero).ToHandleChecked();
-  CHECK(result->IsZero());
+  CHECK(IsZero(*result));
 
   result = Object::ToLength(i_isolate(), minus_zero).ToHandleChecked();
-  CHECK(result->IsZero());
+  CHECK(IsZero(*result));
 
   // Choose an error message template, doesn't matter which.
   result = Object::ToIndex(i_isolate(), minus_zero,
                            MessageTemplate::kInvalidAtomicAccessIndex)
                .ToHandleChecked();
-  CHECK(result->IsZero());
+  CHECK(IsZero(*result));
 }
 
 #define TEST_FUNCTION_KIND(Name)                                            \
@@ -657,8 +661,8 @@ TEST_F(ObjectTest, ConstructorInstanceTypes) {
 
   DisallowGarbageCollection no_gc;
   for (int i = 0; i < Context::NATIVE_CONTEXT_SLOTS; i++) {
-    Object value = context->get(i);
-    if (!value.IsJSFunction()) continue;
+    Tagged<Object> value = context->get(i);
+    if (!IsJSFunction(value)) continue;
     InstanceType instance_type =
         JSFunction::cast(value)->map()->instance_type();
 

@@ -8,6 +8,7 @@
 
 #include "src/common/globals.h"
 #include "src/objects/elements-kind.h"
+#include "src/objects/heap-object-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/visitors.h"
 #include "src/roots/static-roots.h"
@@ -48,10 +49,10 @@ void ReadOnlyRoots::Iterate(RootVisitor* visitor) {
 #ifdef DEBUG
 void ReadOnlyRoots::VerifyNameForProtectors() {
   DisallowGarbageCollection no_gc;
-  Name prev;
+  Tagged<Name> prev;
   for (RootIndex root_index = RootIndex::kFirstNameForProtector;
        root_index <= RootIndex::kLastNameForProtector; ++root_index) {
-    Name current = Name::cast(object_at(root_index));
+    Tagged<Name> current = Name::cast(object_at(root_index));
     DCHECK(IsNameForProtector(current));
     if (root_index != RootIndex::kFirstNameForProtector) {
       // Make sure the objects are adjacent in memory.
@@ -84,7 +85,7 @@ void ReadOnlyRoots::VerifyNameForProtectors() {
       return Tagged<Oddball>::cast(Tagged<Object>(value))->kind() ==          \
              Oddball::kFalse;                                                 \
     } else {                                                                  \
-      return value->Is##Type();                                               \
+      return Is##Type(value);                                                 \
     }                                                                         \
   }
 

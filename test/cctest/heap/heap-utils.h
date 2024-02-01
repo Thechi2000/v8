@@ -32,7 +32,7 @@ void FillCurrentPage(v8::internal::NewSpace* space,
                      std::vector<Handle<FixedArray>>* out_handles = nullptr);
 
 void FillCurrentPageButNBytes(
-    v8::internal::NewSpace* space, int extra_bytes,
+    v8::internal::SemiSpaceNewSpace* space, int extra_bytes,
     std::vector<Handle<FixedArray>>* out_handles = nullptr);
 
 // Helper function that simulates many incremental marking steps until
@@ -64,17 +64,17 @@ template <typename GlobalOrPersistent>
 bool InYoungGeneration(v8::Isolate* isolate, const GlobalOrPersistent& global) {
   v8::HandleScope scope(isolate);
   auto tmp = global.Get(isolate);
-  return i::Heap::InYoungGeneration(*v8::Utils::OpenHandle(*tmp));
+  return i::Heap::InYoungGeneration(*v8::Utils::OpenDirectHandle(*tmp));
 }
 
-bool InCorrectGeneration(HeapObject object);
+bool InCorrectGeneration(Tagged<HeapObject> object);
 
 template <typename GlobalOrPersistent>
 bool InCorrectGeneration(v8::Isolate* isolate,
                          const GlobalOrPersistent& global) {
   v8::HandleScope scope(isolate);
   auto tmp = global.Get(isolate);
-  return InCorrectGeneration(*v8::Utils::OpenHandle(*tmp));
+  return InCorrectGeneration(*v8::Utils::OpenDirectHandle(*tmp));
 }
 
 class ManualEvacuationCandidatesSelectionScope {

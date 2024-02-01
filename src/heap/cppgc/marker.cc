@@ -274,6 +274,8 @@ void MarkerBase::EnterAtomicPause(StackState stack_state) {
   StatsCollector::EnabledScope stats_scope(heap().stats_collector(),
                                            StatsCollector::kMarkAtomicPrologue);
 
+  const MarkingConfig::MarkingType old_marking_type = config_.marking_type;
+
   if (ExitIncrementalMarkingIfNeeded(config_, heap())) {
     // Cancel remaining incremental tasks. Concurrent marking jobs are left to
     // run in parallel with the atomic pause until the mutator thread runs out
@@ -292,7 +294,7 @@ void MarkerBase::EnterAtomicPause(StackState stack_state) {
     VisitRoots(config_.stack_state);
     HandleNotFullyConstructedObjects();
   }
-  if (heap().marking_support() ==
+  if (old_marking_type ==
       MarkingConfig::MarkingType::kIncrementalAndConcurrent) {
     // Start parallel marking.
     mutator_marking_state_.Publish();
@@ -469,18 +471,18 @@ void MarkerBase::VisitRoots(StackState stack_state) {
   heap().object_allocator().ResetLinearAllocationBuffers();
 
   {
-    {
-      StatsCollector::DisabledScope inner_stats_scope(
-          heap().stats_collector(), StatsCollector::kMarkVisitPersistents);
-      RootMarkingVisitor root_marking_visitor(mutator_marking_state_);
-      heap().GetStrongPersistentRegion().Iterate(root_marking_visitor);
-    }
+    StatsCollector::DisabledScope inner_stats_scope(
+        heap().stats_collector(), StatsCollector::kMarkVisitPersistents);
+    RootMarkingVisitor root_marking_visitor(mutator_marking_state_);
+    heap().GetStrongPersistentRegion().Iterate(root_marking_visitor);
   }
 
   if (stack_state != StackState::kNoHeapPointers) {
     StatsCollector::DisabledScope stack_stats_scope(
         heap().stats_collector(), StatsCollector::kMarkVisitStack);
-    heap().stack()->IteratePointers(&stack_visitor());
+    heap().stack()->SetMarkerIfNeededAndCallback([this]() {
+      heap().stack()->IteratePointersUntilMarker(&stack_visitor());
+    });
   }
 
 #if defined(CPPGC_YOUNG_GENERATION)

@@ -9,6 +9,7 @@
 
 #include "include/v8-platform.h"
 #include "src/base/atomic-utils.h"
+#include "src/base/functional.h"
 #include "src/base/optional.h"
 #include "src/base/platform/condition-variable.h"
 #include "src/base/platform/mutex.h"
@@ -17,6 +18,7 @@
 #include "src/heap/memory-measurement.h"
 #include "src/heap/slot-set.h"
 #include "src/heap/spaces.h"
+#include "src/heap/young-generation-marking-visitor.h"
 #include "src/init/v8.h"
 #include "src/tasks/cancelable-task.h"
 #include "src/utils/allocation.h"
@@ -41,8 +43,8 @@ struct MemoryChunkData {
 // common case where the requested element is the same as the one previously
 // tried.
 class MemoryChunkDataMap final {
-  using MemoryChunkDataMapT =
-      std::unordered_map<MemoryChunk*, MemoryChunkData, MemoryChunk::Hasher>;
+  using MemoryChunkDataMapT = std::unordered_map<MemoryChunk*, MemoryChunkData,
+                                                 base::hash<MemoryChunk*>>;
 
  public:
   MemoryChunkDataMapT::mapped_type& operator[](
@@ -89,6 +91,8 @@ class MemoryChunkDataMap final {
     map_.clear();
   }
 
+  bool empty() const { return map_.empty(); }
+
  private:
   MemoryChunkDataMapT::key_type last_key_ = nullptr;
   MemoryChunkDataMapT::mapped_type* last_mapped_ = nullptr;
@@ -116,15 +120,14 @@ class V8_EXPORT_PRIVATE ConcurrentMarking {
   // Schedules asynchronous job to perform concurrent marking at |priority|.
   // Objects in the heap should not be moved while these are active (can be
   // stopped safely via Stop() or PauseScope).
-  void ScheduleJob(GarbageCollector garbage_collector,
-                   TaskPriority priority = TaskPriority::kUserVisible);
+  void TryScheduleJob(GarbageCollector garbage_collector,
+                      TaskPriority priority = TaskPriority::kUserVisible);
 
   // Waits for scheduled job to complete.
   void Join();
   // Preempts ongoing job ASAP. Returns true if concurrent marking was in
   // progress, false otherwise.
   bool Pause();
-  void Cancel();
 
   // Schedules asynchronous job to perform concurrent marking at |priority| if
   // not already running, otherwise adjusts the number of workers running job
@@ -134,11 +137,13 @@ class V8_EXPORT_PRIVATE ConcurrentMarking {
       TaskPriority priority = TaskPriority::kUserVisible);
   // Flushes native context sizes to the given table of the main thread.
   void FlushNativeContexts(NativeContextStats* main_stats);
-  // Flushes memory chunk data using the given marking state.
-  void FlushMemoryChunkData(NonAtomicMarkingState* marking_state);
+  // Flushes memory chunk data.
+  void FlushMemoryChunkData();
   // This function is called for a new space page that was cleared after
   // scavenge and is going to be re-used.
   void ClearMemoryChunkData(MemoryChunk* chunk);
+  // Flushes pretenuring feedback.
+  void FlushPretenuringFeedback();
 
   // Checks if all threads are stopped.
   bool IsStopped();
@@ -163,14 +168,17 @@ class V8_EXPORT_PRIVATE ConcurrentMarking {
   struct TaskState;
   class JobTaskMinor;
   class JobTaskMajor;
+  class MinorMarkingState;
+
   void RunMinor(JobDelegate* delegate);
+  template <YoungGenerationMarkingVisitationMode marking_mode>
+  size_t RunMinorImpl(JobDelegate* delegate, TaskState* task_state);
   void RunMajor(JobDelegate* delegate,
                 base::EnumSet<CodeFlushMode> code_flush_mode,
                 unsigned mark_compact_epoch, bool should_keep_ages_unchanged);
   size_t GetMajorMaxConcurrency(size_t worker_count);
   size_t GetMinorMaxConcurrency(size_t worker_count);
   void Resume();
-  void FlushPretenuringFeedback();
 
   std::unique_ptr<JobHandle> job_handle_;
   Heap* const heap_;
@@ -180,6 +188,8 @@ class V8_EXPORT_PRIVATE ConcurrentMarking {
   std::vector<std::unique_ptr<TaskState>> task_state_;
   std::atomic<size_t> total_marked_bytes_{0};
   std::atomic<bool> another_ephemeron_iteration_{false};
+  base::Optional<uint64_t> current_job_trace_id_;
+  std::unique_ptr<MinorMarkingState> minor_marking_state_;
 
   friend class Heap;
 };

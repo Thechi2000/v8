@@ -20,7 +20,8 @@
 namespace v8 {
 namespace internal {
 
-void MarkCompactCollector::MarkObject(HeapObject host, HeapObject obj) {
+void MarkCompactCollector::MarkObject(Tagged<HeapObject> host,
+                                      Tagged<HeapObject> obj) {
   DCHECK(ReadOnlyHeap::Contains(obj) || heap_->Contains(obj));
   if (marking_state_->TryMark(obj)) {
     local_marking_worklists_->Push(obj);
@@ -31,14 +32,10 @@ void MarkCompactCollector::MarkObject(HeapObject host, HeapObject obj) {
 }
 
 // static
-void MarkCompactCollector::RecordSlot(HeapObject object, ObjectSlot slot,
-                                      HeapObject target) {
-  RecordSlot(object, HeapObjectSlot(slot), target);
-}
-
-// static
-void MarkCompactCollector::RecordSlot(HeapObject object, HeapObjectSlot slot,
-                                      HeapObject target) {
+template <typename THeapObjectSlot>
+void MarkCompactCollector::RecordSlot(Tagged<HeapObject> object,
+                                      THeapObjectSlot slot,
+                                      Tagged<HeapObject> target) {
   MemoryChunk* source_page = MemoryChunk::FromHeapObject(object);
   if (!source_page->ShouldSkipEvacuationSlotRecording()) {
     RecordSlot(source_page, slot, target);
@@ -46,21 +43,35 @@ void MarkCompactCollector::RecordSlot(HeapObject object, HeapObjectSlot slot,
 }
 
 // static
+template <typename THeapObjectSlot>
 void MarkCompactCollector::RecordSlot(MemoryChunk* source_page,
-                                      HeapObjectSlot slot, HeapObject target) {
+                                      THeapObjectSlot slot,
+                                      Tagged<HeapObject> target) {
   BasicMemoryChunk* target_page = BasicMemoryChunk::FromHeapObject(target);
   if (target_page->IsEvacuationCandidate()) {
     if (target_page->IsFlagSet(MemoryChunk::IS_EXECUTABLE)) {
       RememberedSet<OLD_TO_CODE>::Insert<AccessMode::ATOMIC>(source_page,
                                                              slot.address());
-    } else {
+    } else if (source_page->IsFlagSet(MemoryChunk::IS_TRUSTED) &&
+               target_page->IsFlagSet(MemoryChunk::IS_TRUSTED)) {
+      RememberedSet<TRUSTED_TO_TRUSTED>::Insert<AccessMode::ATOMIC>(
+          source_page, slot.address());
+    } else if (V8_LIKELY(!target_page->InWritableSharedSpace()) ||
+               source_page->heap()->isolate()->is_shared_space_isolate()) {
+      DCHECK_EQ(source_page->heap(), target_page->heap());
       RememberedSet<OLD_TO_OLD>::Insert<AccessMode::ATOMIC>(source_page,
                                                             slot.address());
+    } else {
+      // DCHECK here that we only don't record in case of local->shared
+      // references in a client GC.
+      DCHECK(!source_page->heap()->isolate()->is_shared_space_isolate());
+      DCHECK(target_page->heap()->isolate()->is_shared_space_isolate());
+      DCHECK(target_page->InWritableSharedSpace());
     }
   }
 }
 
-void MarkCompactCollector::AddTransitionArray(TransitionArray array) {
+void MarkCompactCollector::AddTransitionArray(Tagged<TransitionArray> array) {
   local_weak_objects()->transition_arrays_local.Push(array);
 }
 

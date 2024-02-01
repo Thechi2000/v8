@@ -13,6 +13,7 @@
 #include "src/codegen/bailout-reason.h"
 #include "src/codegen/s390/assembler-s390.h"
 #include "src/common/globals.h"
+#include "src/execution/frame-constants.h"
 #include "src/execution/isolate-data.h"
 #include "src/objects/contexts.h"
 
@@ -84,6 +85,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadFromConstantsTable(Register destination, int constant_index) final;
   void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
   void LoadRootRelative(Register destination, int32_t offset) final;
+  void StoreRootRelative(int32_t offset, Register value) final;
 
   // Operand pointing to an external reference.
   // May emit code to set up the scratch register. The operand is
@@ -108,6 +110,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void JumpIfLessThan(Register x, int32_t y, Label* dest);
 
   void LoadMap(Register destination, Register object);
+
+  void LoadFeedbackVector(Register dst, Register closure, Register scratch,
+                          Label* fbv_undef);
 
   void Call(Register target);
   void Call(Address target, RelocInfo::Mode rmode, Condition cond = al);
@@ -146,7 +151,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void CallBuiltinByIndex(Register builtin_index, Register target);
 
   // Register move. May do nothing if the registers are identical.
-  void Move(Register dst, Smi smi) { LoadSmiLiteral(dst, smi); }
+  void Move(Register dst, Tagged<Smi> smi) { LoadSmiLiteral(dst, smi); }
   void Move(Register dst, Handle<HeapObject> source,
             RelocInfo::Mode rmode = RelocInfo::FULL_EMBEDDED_OBJECT);
   void Move(Register dst, ExternalReference reference);
@@ -626,7 +631,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // Push a handle.
   void Push(Handle<HeapObject> handle);
-  void Push(Smi smi);
+  void Push(Tagged<Smi> smi);
 
   // Push two registers.  Pushes leftmost register first (to highest address).
   void Push(Register src1, Register src2) {
@@ -821,7 +826,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // than assembler-s390 and may generate variable length sequences
 
   // load an SMI value <value> to GPR <dst>
-  void LoadSmiLiteral(Register dst, Smi smi);
+  void LoadSmiLiteral(Register dst, Tagged<Smi> smi);
 
   // load a literal double value <value> to FPR <result>
   template <class T>
@@ -851,7 +856,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
     LoadF64(result, static_cast<uint64_t>(int_val) << 32, scratch);
   }
 
-  void CmpSmiLiteral(Register src1, Smi smi, Register scratch);
+  void CmpSmiLiteral(Register src1, Tagged<Smi> smi, Register scratch);
 
   // Set new rounding mode RN to FPSCR
   void SetRoundingMode(FPRoundingMode RN);
@@ -1129,6 +1134,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void ExceptionHandler() {}
   // Define an exception handler and bind a label.
   void BindExceptionHandler(Label* label) { bind(label); }
+
+  // Convenience functions to call/jmp to the code of a JSFunction object.
+  void CallJSFunction(Register function_object);
+  void JumpJSFunction(Register function_object,
+                      JumpMode jump_mode = JumpMode::kJump);
 
   // Generates an instruction sequence s.t. the return address points to the
   // instruction following the call.
@@ -1742,6 +1752,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   }
 
   // Tiering support.
+  void AssertFeedbackCell(Register object,
+                          Register scratch) NOOP_UNLESS_DEBUG_CODE;
   void AssertFeedbackVector(Register object,
                             Register scratch) NOOP_UNLESS_DEBUG_CODE;
   void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
@@ -1787,10 +1799,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
  private:
   static const int kSmiShift = kSmiTagSize + kSmiShiftSize;
 
-  void CallCFunctionHelper(Register function, int num_reg_arguments,
-                           int num_double_arguments,
-                           SetIsolateDataSlots set_isolate_data_slots);
-
   void Jump(intptr_t target, RelocInfo::Mode rmode, Condition cond = al);
   int CalculateStackPassedWords(int num_reg_arguments,
                                 int num_double_arguments);
@@ -1807,6 +1815,34 @@ struct MoveCycleState {
   // Whether a move in the cycle needs a double scratch register.
   bool pending_double_scratch_register_use = false;
 };
+
+// Provides access to exit frame parameters (GC-ed).
+inline MemOperand ExitFrameStackSlotOperand(int offset) {
+  // The slot at [sp] is reserved in all ExitFrames for storing the return
+  // address before doing the actual call, it's necessary for frame iteration
+  // (see StoreReturnAddressAndCall for details).
+  static constexpr int kSPOffset = 1 * kSystemPointerSize;
+  return MemOperand(sp, (kStackFrameExtraParamSlot * kSystemPointerSize) +
+                            offset + kSPOffset);
+}
+
+// Provides access to exit frame stack space (not GC-ed).
+inline MemOperand ExitFrameCallerStackSlotOperand(int index) {
+  return MemOperand(
+      fp, (BuiltinExitFrameConstants::kFixedSlotCountAboveFp + index) *
+              kSystemPointerSize);
+}
+
+// Calls an API function.  Allocates HandleScope, extracts returned value
+// from handle and propagates exceptions.  Restores context.  On return removes
+// *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+// (GCed, includes the call JS arguments space and the additional space
+// allocated for the fast call).
+void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
+                              Register function_address,
+                              ExternalReference thunk_ref, Register thunk_arg,
+                              int stack_space, MemOperand* stack_space_operand,
+                              MemOperand return_value_operand);
 
 #define ACCESS_MASM(masm) masm->
 

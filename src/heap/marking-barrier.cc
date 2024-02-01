@@ -39,24 +39,32 @@ MarkingBarrier::MarkingBarrier(LocalHeap* local_heap)
 
 MarkingBarrier::~MarkingBarrier() { DCHECK(typed_slots_map_.empty()); }
 
-void MarkingBarrier::Write(HeapObject host, HeapObjectSlot slot,
-                           HeapObject value) {
+void MarkingBarrier::Write(Tagged<HeapObject> host, IndirectPointerSlot slot) {
   DCHECK(IsCurrentMarkingBarrier(host));
   DCHECK(is_activated_ || shared_heap_worklist_.has_value());
   DCHECK(MemoryChunk::FromHeapObject(host)->IsMarking());
 
-  if ((is_major() || Heap::InYoungGeneration(host)) &&
-      !marking_state_.IsMarked(host))
-    return;
-
+  // An indirect pointer slot can only contain a Smi if it is uninitialized (in
+  // which case the vaue will be Smi::zero()). However, at this point the slot
+  // must have been initialized because it was just written to.
+  Tagged<HeapObject> value = HeapObject::cast(slot.load(isolate()));
   MarkValue(host, value);
 
-  if (slot.address() && IsCompacting(host)) {
-    MarkCompactCollector::RecordSlot(host, slot, value);
-  }
+  // We don't emit generational- and shared write barriers for indirect
+  // pointers as objects referenced through them are currently never allocated
+  // in the young generation or the shared (writable) heap. If this ever
+  // changes (in which case, this DCHECK here would fail), we would need to
+  // update the code for these barriers and make the remembered sets aware of
+  // pointer table entries.
+  DCHECK(!Heap::InYoungGeneration(value));
+  DCHECK(!InWritableSharedSpace(value));
+
+  // We never need to record indirect pointer slots (i.e. references through a
+  // pointer table) since the referenced object owns its table entry and will
+  // take care of updating the pointer to itself if it is relocated.
 }
 
-void MarkingBarrier::WriteWithoutHost(HeapObject value) {
+void MarkingBarrier::WriteWithoutHost(Tagged<HeapObject> value) {
   DCHECK(is_main_thread_barrier_);
   DCHECK(is_activated_);
 
@@ -64,26 +72,23 @@ void MarkingBarrier::WriteWithoutHost(HeapObject value) {
   // objects are considered local.
   if (V8_UNLIKELY(uses_shared_heap_) && !is_shared_space_isolate_) {
     // On client isolates (= worker isolates) shared values can be ignored.
-    if (value.InWritableSharedSpace()) {
+    if (InWritableSharedSpace(value)) {
       return;
     }
   }
-  if (value.InReadOnlySpace()) return;
+  if (InReadOnlySpace(value)) return;
   MarkValueLocal(value);
 }
 
-void MarkingBarrier::Write(InstructionStream host, RelocInfo* reloc_info,
-                           HeapObject value) {
+void MarkingBarrier::Write(Tagged<InstructionStream> host,
+                           RelocInfo* reloc_info, Tagged<HeapObject> value) {
   DCHECK(IsCurrentMarkingBarrier(host));
-  DCHECK(!host.InWritableSharedSpace());
+  DCHECK(!InWritableSharedSpace(host));
   DCHECK(is_activated_ || shared_heap_worklist_.has_value());
   DCHECK(MemoryChunk::FromHeapObject(host)->IsMarking());
 
-  if (!marking_state_.IsMarked(host) &&
-      (is_major() || Heap::InYoungGeneration(host)))
-    return;
-
   MarkValue(host, value);
+
   if (is_compacting_) {
     DCHECK(is_major());
     if (is_main_thread_barrier_) {
@@ -96,15 +101,11 @@ void MarkingBarrier::Write(InstructionStream host, RelocInfo* reloc_info,
   }
 }
 
-void MarkingBarrier::Write(JSArrayBuffer host,
+void MarkingBarrier::Write(Tagged<JSArrayBuffer> host,
                            ArrayBufferExtension* extension) {
   DCHECK(IsCurrentMarkingBarrier(host));
-  DCHECK(!host.InWritableSharedSpace());
+  DCHECK(!InWritableSharedSpace(host));
   DCHECK(MemoryChunk::FromHeapObject(host)->IsMarking());
-
-  if (!marking_state_.IsMarked(host) &&
-      (is_major() || Heap::InYoungGeneration(host)))
-    return;
 
   if (is_minor()) {
     if (Heap::InYoungGeneration(host)) {
@@ -115,14 +116,14 @@ void MarkingBarrier::Write(JSArrayBuffer host,
   }
 }
 
-void MarkingBarrier::Write(DescriptorArray descriptor_array,
+void MarkingBarrier::Write(Tagged<DescriptorArray> descriptor_array,
                            int number_of_own_descriptors) {
   DCHECK(IsCurrentMarkingBarrier(descriptor_array));
   DCHECK(IsReadOnlyHeapObject(descriptor_array->map()));
   DCHECK(MemoryChunk::FromHeapObject(descriptor_array)->IsMarking());
 
   // Only major GC uses custom liveness.
-  if (is_minor() || descriptor_array.IsStrongDescriptorArray()) {
+  if (is_minor() || IsStrongDescriptorArray(descriptor_array)) {
     MarkValueLocal(descriptor_array);
     return;
   }
@@ -130,7 +131,7 @@ void MarkingBarrier::Write(DescriptorArray descriptor_array,
   unsigned gc_epoch;
   MarkingWorklist::Local* worklist;
   if (V8_UNLIKELY(uses_shared_heap_) &&
-      descriptor_array.InWritableSharedSpace() && !is_shared_space_isolate_) {
+      InWritableSharedSpace(descriptor_array) && !is_shared_space_isolate_) {
     gc_epoch = isolate()
                    ->shared_space_isolate()
                    ->heap()
@@ -159,8 +160,9 @@ void MarkingBarrier::Write(DescriptorArray descriptor_array,
   }
 }
 
-void MarkingBarrier::RecordRelocSlot(InstructionStream host, RelocInfo* rinfo,
-                                     HeapObject target) {
+void MarkingBarrier::RecordRelocSlot(Tagged<InstructionStream> host,
+                                     RelocInfo* rinfo,
+                                     Tagged<HeapObject> target) {
   DCHECK(IsCurrentMarkingBarrier(host));
   if (!MarkCompactCollector::ShouldRecordRelocSlot(host, rinfo, target)) return;
 
@@ -219,6 +221,11 @@ void ActivateSpaces(Heap* heap, MarkingMode marking_mode) {
       }
     }
   }
+
+  ActivateSpace(heap->trusted_space(), marking_mode);
+  for (LargePage* p : *heap->trusted_lo_space()) {
+    p->SetOldGenerationPageFlags(marking_mode);
+  }
 }
 
 void DeactivateSpace(PagedSpace* space) {
@@ -264,6 +271,11 @@ void DeactivateSpaces(Heap* heap, MarkingMode marking_mode) {
         p->SetOldGenerationPageFlags(MarkingMode::kNoMarking);
       }
     }
+  }
+
+  DeactivateSpace(heap->trusted_space());
+  for (LargePage* p : *heap->trusted_lo_space()) {
+    p->SetOldGenerationPageFlags(MarkingMode::kNoMarking);
   }
 }
 }  // namespace
@@ -421,7 +433,7 @@ void MarkingBarrier::PublishSharedIfNeeded() {
 }
 
 bool MarkingBarrier::IsCurrentMarkingBarrier(
-    HeapObject verification_candidate) {
+    Tagged<HeapObject> verification_candidate) {
   return WriteBarrier::CurrentMarkingBarrier(verification_candidate) == this;
 }
 

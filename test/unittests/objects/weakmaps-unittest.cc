@@ -68,7 +68,8 @@ TEST_F(WeakMapsTest, Weakness) {
   Handle<Object> key;
   {
     HandleScope inner_scope(isolate);
-    Handle<Map> map = factory->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
+    Handle<Map> map = factory->NewContextfulMapForCurrentContext(
+        JS_OBJECT_TYPE, JSObject::kHeaderSize);
     Handle<JSObject> object = factory->NewJSObjectFromMap(map);
     key = global_handles->Create(*object);
   }
@@ -77,12 +78,13 @@ TEST_F(WeakMapsTest, Weakness) {
   // Put two chained entries into weak map.
   {
     HandleScope inner_scope(isolate);
-    Handle<Map> map = factory->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
+    Handle<Map> map = factory->NewContextfulMapForCurrentContext(
+        JS_OBJECT_TYPE, JSObject::kHeaderSize);
     Handle<JSObject> object = factory->NewJSObjectFromMap(map);
     Handle<Smi> smi(Smi::FromInt(23), isolate);
-    int32_t hash = key->GetOrCreateHash(isolate).value();
+    int32_t hash = Object::GetOrCreateHash(*key, isolate).value();
     JSWeakCollection::Set(weakmap, key, object, hash);
-    int32_t object_hash = object->GetOrCreateHash(isolate).value();
+    int32_t object_hash = Object::GetOrCreateHash(*object, isolate).value();
     JSWeakCollection::Set(weakmap, object, smi, object_hash);
   }
   // Put a symbol key into weak map.
@@ -130,11 +132,12 @@ TEST_F(WeakMapsTest, Shrinking) {
   // Fill up weak map to trigger capacity change.
   {
     HandleScope inner_scope(isolate);
-    Handle<Map> map = factory->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
+    Handle<Map> map = factory->NewContextfulMapForCurrentContext(
+        JS_OBJECT_TYPE, JSObject::kHeaderSize);
     for (int i = 0; i < 32; i++) {
       Handle<JSObject> object = factory->NewJSObjectFromMap(map);
       Handle<Smi> smi(Smi::FromInt(i), isolate);
-      int32_t object_hash = object->GetOrCreateHash(isolate).value();
+      int32_t object_hash = Object::GetOrCreateHash(*object, isolate).value();
       JSWeakCollection::Set(weakmap, object, smi, object_hash);
     }
   }
@@ -157,7 +160,8 @@ TEST_F(WeakMapsTest, Shrinking) {
 }
 
 namespace {
-bool EphemeronHashTableContainsKey(EphemeronHashTable table, HeapObject key) {
+bool EphemeronHashTableContainsKey(Tagged<EphemeronHashTable> table,
+                                   Tagged<HeapObject> key) {
   for (InternalIndex i : table->IterateEntries()) {
     if (table->KeyAt(i) == key) return true;
   }
@@ -175,10 +179,11 @@ TEST_F(WeakMapsTest, WeakMapPromotionMarkCompact) {
 
   CHECK(!ObjectInYoungGeneration(weakmap->table()));
 
-  Handle<Map> map = factory->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
+  Handle<Map> map = factory->NewContextfulMapForCurrentContext(
+      JS_OBJECT_TYPE, JSObject::kHeaderSize);
   Handle<JSObject> object = factory->NewJSObjectFromMap(map);
   Handle<Smi> smi(Smi::FromInt(1), isolate);
-  int32_t object_hash = object->GetOrCreateHash(isolate).value();
+  int32_t object_hash = Object::GetOrCreateHash(*object, isolate).value();
   JSWeakCollection::Set(weakmap, object, smi, object_hash);
 
   CHECK(EphemeronHashTableContainsKey(
@@ -208,10 +213,11 @@ TEST_F(WeakMapsTest, WeakMapScavenge) {
   InvokeAtomicMinorGC();
   CHECK(ObjectInYoungGeneration(weakmap->table()));
 
-  Handle<Map> map = factory->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
+  Handle<Map> map = factory->NewContextfulMapForCurrentContext(
+      JS_OBJECT_TYPE, JSObject::kHeaderSize);
   Handle<JSObject> object = factory->NewJSObjectFromMap(map);
   Handle<Smi> smi(Smi::FromInt(1), isolate);
-  int32_t object_hash = object->GetOrCreateHash(isolate).value();
+  int32_t object_hash = Object::GetOrCreateHash(*object, isolate).value();
   JSWeakCollection::Set(weakmap, object, smi, object_hash);
 
   CHECK(EphemeronHashTableContainsKey(
@@ -261,7 +267,7 @@ TEST_F(WeakMapsTest, Regress2060a) {
       CHECK(!Heap::InYoungGeneration(*object));
       CHECK_IMPLIES(!v8_flags.enable_third_party_heap,
                     !first_page->Contains(object->address()));
-      int32_t hash = key->GetOrCreateHash(isolate).value();
+      int32_t hash = Object::GetOrCreateHash(*key, isolate).value();
       JSWeakCollection::Set(weakmap, key, object, hash);
     }
   }
@@ -303,7 +309,7 @@ TEST_F(WeakMapsTest, Regress2060b) {
   Handle<JSWeakMap> weakmap = isolate->factory()->NewJSWeakMap();
   for (int i = 0; i < 32; i++) {
     Handle<Smi> smi(Smi::FromInt(i), isolate);
-    int32_t hash = keys[i]->GetOrCreateHash(isolate).value();
+    int32_t hash = Object::GetOrCreateHash(*keys[i], isolate).value();
     JSWeakCollection::Set(weakmap, keys[i], smi, hash);
   }
 
@@ -353,8 +359,8 @@ TEST_F(WeakMapsTest, WeakMapsWithChainedEntries) {
     g2.SetWeak();
     Handle<Object> i_o1 = v8::Utils::OpenHandle(*o1);
     Handle<Object> i_o2 = v8::Utils::OpenHandle(*o2);
-    int32_t hash1 = i_o1->GetOrCreateHash(i_isolate()).value();
-    int32_t hash2 = i_o2->GetOrCreateHash(i_isolate()).value();
+    int32_t hash1 = Object::GetOrCreateHash(*i_o1, i_isolate()).value();
+    int32_t hash2 = Object::GetOrCreateHash(*i_o2, i_isolate()).value();
     JSWeakCollection::Set(weakmap1, i_o1, i_o2, hash1);
     JSWeakCollection::Set(weakmap2, i_o2, i_o1, hash2);
   }

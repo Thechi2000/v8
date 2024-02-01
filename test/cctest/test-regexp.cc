@@ -109,12 +109,13 @@ class InterruptTest {
     i::Handle<i::JSRegExp> regexp = Utils::OpenHandle(*re);
     // We executed on a two-byte subject so far, so we expect only bytecode for
     // two-byte to be present.
-    i::Object one_byte_code = regexp->bytecode(/* is_latin1 */ true);
-    CHECK(one_byte_code.IsSmi());
+    i::Tagged<i::Object> one_byte_code = regexp->bytecode(/* is_latin1 */ true);
+    CHECK(IsSmi(one_byte_code));
     CHECK_EQ(i::Smi::cast(one_byte_code).value(),
              i::JSRegExp::kUninitializedValue);
-    i::Object two_byte_code = regexp->bytecode(/* is_latin1 */ false);
-    CHECK(two_byte_code.IsByteArray());
+    i::Tagged<i::Object> two_byte_code =
+        regexp->bytecode(/* is_latin1 */ false);
+    CHECK(IsByteArray(two_byte_code));
 
     // Transition the subject string to one-byte by internalizing it.
     // It already contains only one-byte characters.
@@ -342,6 +343,6 @@ TEST(InterruptAndTransitionSubjectFromTwoByteToOneByte) {
   // After the test, we expect that bytecode for a one-byte subject has been
   // installed during the interrupt.
   i::Handle<i::JSRegExp> regexp = Utils::OpenHandle(*test.GetRegExp());
-  i::Object one_byte_code = regexp->bytecode(/* is_latin1 */ true);
-  CHECK(one_byte_code.IsByteArray());
+  i::Tagged<i::Object> one_byte_code = regexp->bytecode(/* is_latin1 */ true);
+  CHECK(IsByteArray(one_byte_code));
 }

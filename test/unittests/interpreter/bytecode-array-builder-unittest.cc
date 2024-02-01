@@ -256,7 +256,9 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
   builder.Delete(reg, LanguageMode::kSloppy).Delete(reg, LanguageMode::kStrict);
 
   // Emit construct.
-  builder.Construct(reg, reg_list, 1).ConstructWithSpread(reg, reg_list, 1);
+  builder.Construct(reg, reg_list, 1)
+      .ConstructWithSpread(reg, reg_list, 1)
+      .ConstructForwardAllArgs(reg, 1);
 
   // Emit test operator invocations.
   builder.CompareOperation(Token::Value::EQ, reg, 1)
@@ -274,12 +276,8 @@ TEST_F(BytecodeArrayBuilderTest, AllBytecodesGenerated) {
       .CompareNull();
 
   // Emit conversion operator invocations.
-  builder.ToNumber(1)
-      .ToNumeric(1)
-      .ToObject(reg)
-      .ToName(reg)
-      .ToString()
-      .ToBoolean(ToBooleanMode::kConvertToBoolean);
+  builder.ToNumber(1).ToNumeric(1).ToObject(reg).ToName().ToString().ToBoolean(
+      ToBooleanMode::kConvertToBoolean);
 
   // Emit GetSuperConstructor.
   builder.GetSuperConstructor(reg);
@@ -522,7 +520,7 @@ TEST_F(BytecodeArrayBuilderTest, FrameSizesLookGood) {
         builder.StoreAccumulatorInRegister(temp);
         // Ensure temporaries are used so not optimized away by the
         // register optimizer.
-        builder.ToName(temp);
+        builder.ToName().StoreAccumulatorInRegister(temp);
       }
       builder.Return();
 

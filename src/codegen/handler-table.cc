@@ -19,7 +19,7 @@
 namespace v8 {
 namespace internal {
 
-HandlerTable::HandlerTable(Code code)
+HandlerTable::HandlerTable(Tagged<Code> code)
     : HandlerTable(code->handler_table_address(), code->handler_table_size(),
                    kReturnAddressBasedEncoding) {}
 
@@ -29,11 +29,11 @@ HandlerTable::HandlerTable(const wasm::WasmCode* code)
                    kReturnAddressBasedEncoding) {}
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-HandlerTable::HandlerTable(BytecodeArray bytecode_array)
+HandlerTable::HandlerTable(Tagged<BytecodeArray> bytecode_array)
     : HandlerTable(bytecode_array->handler_table()) {}
 
-HandlerTable::HandlerTable(ByteArray byte_array)
-    : HandlerTable(reinterpret_cast<Address>(byte_array->GetDataStartAddress()),
+HandlerTable::HandlerTable(Tagged<TrustedByteArray> byte_array)
+    : HandlerTable(reinterpret_cast<Address>(byte_array->begin()),
                    byte_array->length(), kRangeBasedEncoding) {}
 
 HandlerTable::HandlerTable(Address handler_table, int handler_table_size,

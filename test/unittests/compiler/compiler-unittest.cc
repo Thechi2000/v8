@@ -34,7 +34,7 @@ static Handle<Object> GetGlobalProperty(const char* name) {
       .ToHandleChecked();
 }
 
-static void SetGlobalProperty(const char* name, Object value) {
+static void SetGlobalProperty(const char* name, Tagged<Object> value) {
   Isolate* isolate = reinterpret_cast<i::Isolate*>(v8::Isolate::GetCurrent());
   Handle<Object> object(value, isolate);
   Handle<String> internalized_name =
@@ -50,11 +50,13 @@ static Handle<JSFunction> Compile(const char* source) {
   Handle<String> source_code = isolate->factory()
                                    ->NewStringFromUtf8(base::CStrVector(source))
                                    .ToHandleChecked();
+  ScriptCompiler::CompilationDetails compilation_details;
   Handle<SharedFunctionInfo> shared =
       Compiler::GetSharedFunctionInfoForScript(
           isolate, source_code, ScriptDetails(),
           v8::ScriptCompiler::kNoCompileOptions,
-          ScriptCompiler::kNoCacheNoReason, NOT_NATIVES_CODE)
+          ScriptCompiler::kNoCacheNoReason, NOT_NATIVES_CODE,
+          &compilation_details)
           .ToHandleChecked();
   return Factory::JSFunctionBuilder{isolate, shared, isolate->native_context()}
       .Build();
@@ -72,7 +74,7 @@ static double Inc(Isolate* isolate, int x) {
   Execution::CallScript(isolate, fun, global,
                         isolate->factory()->empty_fixed_array())
       .Check();
-  return GetGlobalProperty("result")->Number();
+  return Object::Number(*GetGlobalProperty("result"));
 }
 
 TEST_F(CompilerTest, Inc) {
@@ -90,7 +92,7 @@ static double Add(Isolate* isolate, int x, int y) {
   Execution::CallScript(isolate, fun, global,
                         isolate->factory()->empty_fixed_array())
       .Check();
-  return GetGlobalProperty("result")->Number();
+  return Object::Number(*GetGlobalProperty("result"));
 }
 
 TEST_F(CompilerTest, Add) {
@@ -107,7 +109,7 @@ static double Abs(Isolate* isolate, int x) {
   Execution::CallScript(isolate, fun, global,
                         isolate->factory()->empty_fixed_array())
       .Check();
-  return GetGlobalProperty("result")->Number();
+  return Object::Number(*GetGlobalProperty("result"));
 }
 
 TEST_F(CompilerTest, Abs) {
@@ -125,7 +127,7 @@ static double Sum(Isolate* isolate, int n) {
   Execution::CallScript(isolate, fun, global,
                         isolate->factory()->empty_fixed_array())
       .Check();
-  return GetGlobalProperty("result")->Number();
+  return Object::Number(*GetGlobalProperty("result"));
 }
 
 TEST_F(CompilerTest, Sum) {
@@ -180,7 +182,7 @@ TEST_F(CompilerTest, Stuff) {
   Execution::CallScript(i_isolate(), fun, global,
                         i_isolate()->factory()->empty_fixed_array())
       .Check();
-  EXPECT_EQ(511.0, GetGlobalProperty("r")->Number());
+  EXPECT_EQ(511.0, Object::Number(*GetGlobalProperty("r")));
 }
 
 TEST_F(CompilerTest, UncaughtThrow) {
@@ -194,7 +196,7 @@ TEST_F(CompilerTest, UncaughtThrow) {
   EXPECT_TRUE(Execution::CallScript(isolate, fun, global,
                                     isolate->factory()->empty_fixed_array())
                   .is_null());
-  EXPECT_EQ(42.0, isolate->pending_exception().Number());
+  EXPECT_EQ(42.0, Object::Number(isolate->exception()));
 }
 
 using CompilerC2JSFramesTest = WithPrintExtensionMixin<v8::TestWithIsolate>;
@@ -229,7 +231,7 @@ TEST_F(CompilerC2JSFramesTest, C2JSFrames) {
   Handle<Object> fun1 =
       JSReceiver::GetProperty(isolate, isolate->global_object(), "foo")
           .ToHandleChecked();
-  EXPECT_TRUE(fun1->IsJSFunction());
+  EXPECT_TRUE(IsJSFunction(*fun1));
 
   Handle<Object> argv[] = {
       isolate->factory()->InternalizeString(base::StaticCharVector("hello"))};
@@ -252,7 +254,7 @@ TEST_F(CompilerTest, Regression236) {
 
 TEST_F(CompilerTest, GetScriptLineNumber) {
   v8::HandleScope scope(isolate());
-  v8::ScriptOrigin origin = v8::ScriptOrigin(isolate(), NewString("test"));
+  v8::ScriptOrigin origin = v8::ScriptOrigin(NewString("test"));
   const char function_f[] = "function f() {}";
   const int max_rows = 1000;
   const int buffer_size = max_rows + sizeof(function_f);
@@ -299,21 +301,21 @@ TEST_F(CompilerTest, FeedbackVectorPreservedAcrossRecompiles) {
   FeedbackSlot slot_for_a(0);
   MaybeObject object = feedback_vector->Get(slot_for_a);
   {
-    HeapObject heap_object;
-    EXPECT_TRUE(object->GetHeapObjectIfWeak(&heap_object));
-    EXPECT_TRUE(heap_object.IsJSFunction());
+    Tagged<HeapObject> heap_object;
+    EXPECT_TRUE(object.GetHeapObjectIfWeak(&heap_object));
+    EXPECT_TRUE(IsJSFunction(heap_object));
   }
 
   RunJS("%OptimizeFunctionOnNextCall(f); f(fun1);");
 
   // Verify that the feedback is still "gathered" despite a recompilation
   // of the full code.
-  EXPECT_TRUE(f->HasAttachedOptimizedCode());
+  EXPECT_TRUE(f->HasAttachedOptimizedCode(i_isolate()));
   object = f->feedback_vector()->Get(slot_for_a);
   {
-    HeapObject heap_object;
-    EXPECT_TRUE(object->GetHeapObjectIfWeak(&heap_object));
-    EXPECT_TRUE(heap_object.IsJSFunction());
+    Tagged<HeapObject> heap_object;
+    EXPECT_TRUE(object.GetHeapObjectIfWeak(&heap_object));
+    EXPECT_TRUE(IsJSFunction(heap_object));
   }
 }
 
@@ -390,11 +392,11 @@ TEST_F(CompilerTest, OptimizedCodeSharing1) {
                 ->Global()
                 ->Get(context(), NewString("closure2"))
                 .ToLocalChecked())));
-    EXPECT_TRUE(fun1->HasAttachedOptimizedCode() ||
+    EXPECT_TRUE(fun1->HasAttachedOptimizedCode(i_isolate()) ||
                 !i_isolate()->use_optimizer());
-    EXPECT_TRUE(fun2->HasAttachedOptimizedCode() ||
+    EXPECT_TRUE(fun2->HasAttachedOptimizedCode(i_isolate()) ||
                 !i_isolate()->use_optimizer());
-    EXPECT_EQ(fun1->code(), fun2->code());
+    EXPECT_EQ(fun1->code(i_isolate()), fun2->code(i_isolate()));
   }
 }
 
@@ -605,7 +607,7 @@ TEST_F(CompilerTest, CompileFunctionQuirks) {
 
 TEST_F(CompilerTest, CompileFunctionScriptOrigin) {
   v8::HandleScope scope(isolate());
-  v8::ScriptOrigin origin(isolate(), NewString("test"), 22, 41);
+  v8::ScriptOrigin origin(NewString("test"), 22, 41);
   v8::ScriptCompiler::Source script_source(NewString("throw new Error()"),
                                            origin);
   v8::Local<v8::Function> fun =
@@ -613,7 +615,7 @@ TEST_F(CompilerTest, CompileFunctionScriptOrigin) {
           .ToLocalChecked();
   EXPECT_TRUE(!fun.IsEmpty());
   auto fun_i = i::Handle<i::JSFunction>::cast(Utils::OpenHandle(*fun));
-  EXPECT_TRUE(fun_i->shared().IsSharedFunctionInfo());
+  EXPECT_TRUE(IsSharedFunctionInfo(fun_i->shared()));
   EXPECT_TRUE(Utils::ToLocal(
                   i::handle(i::Script::cast(fun_i->shared()->script())->name(),
                             i_isolate()))
@@ -649,7 +651,7 @@ TEST_F(CompilerTest, CompileFunctionFunctionToString) {
 
     // Regression test for v8:6190
     {
-      v8::ScriptOrigin origin(isolate(), NewString("test"), 22, 41);
+      v8::ScriptOrigin origin(NewString("test"), 22, 41);
       v8::ScriptCompiler::Source script_source(NewString("return event"),
                                                origin);
 
@@ -675,7 +677,7 @@ TEST_F(CompilerTest, CompileFunctionFunctionToString) {
 
     // With no parameters:
     {
-      v8::ScriptOrigin origin(isolate(), NewString("test"), 17, 31);
+      v8::ScriptOrigin origin(NewString("test"), 17, 31);
       v8::ScriptCompiler::Source script_source(NewString("return 0"), origin);
 
       v8::TryCatch try_catch(isolate());
@@ -698,7 +700,7 @@ TEST_F(CompilerTest, CompileFunctionFunctionToString) {
 
     // With a name:
     {
-      v8::ScriptOrigin origin(isolate(), NewString("test"), 17, 31);
+      v8::ScriptOrigin origin(NewString("test"), 17, 31);
       v8::ScriptCompiler::Source script_source(NewString("return 0"), origin);
 
       v8::TryCatch try_catch(isolate());
@@ -915,7 +917,7 @@ TEST_F(CompilerTest, ProfilerEnabledDuringBackgroundCompile) {
   v8::Local<v8::Script> script =
       v8::ScriptCompiler::Compile(isolate()->GetCurrentContext(),
                                   &streamed_source, NewString(source),
-                                  v8::ScriptOrigin(isolate(), NewString("foo")))
+                                  v8::ScriptOrigin(NewString("foo")))
           .ToLocalChecked();
 
   i::Handle<i::Object> obj = Utils::OpenHandle(*script);

@@ -54,26 +54,23 @@ FunctionLiteral* Parser::DefaultConstructor(const AstRawString* name,
   {
     FunctionState function_state(&function_state_, &scope_, function_scope);
 
+    // ES#sec-runtime-semantics-classdefinitionevaluation
+    //
+    // 14.a
+    //  ...
+    //  iv. If F.[[ConstructorKind]] is DERIVED, then
+    //    1. NOTE: This branch behaves similarly to constructor(...args) {
+    //       super(...args); }. The most notable distinction is that while the
+    //       aforementioned ECMAScript source text observably calls the
+    //       @@iterator method on %Array.prototype%, this function does not.
+    //    2. Let func be ! F.[[GetPrototypeOf]]().
+    //    3. If IsConstructor(func) is false, throw a TypeError exception.
+    //    4. Let result be ? Construct(func, args, NewTarget).
+    //  ...
     if (call_super) {
-      // Create a SuperCallReference and handle in BytecodeGenerator.
-      auto constructor_args_name = ast_value_factory()->empty_string();
-      bool is_rest = true;
-      bool is_optional = false;
-      Variable* constructor_args = function_scope->DeclareParameter(
-          constructor_args_name, VariableMode::kTemporary, is_optional, is_rest,
-          ast_value_factory(), pos);
-
-      Expression* call;
-      {
-        ScopedPtrList<Expression> args(pointer_buffer());
-        Spread* spread_args = factory()->NewSpread(
-            factory()->NewVariableProxy(constructor_args), pos, pos);
-
-        args.Add(spread_args);
-        Expression* super_call_ref = NewSuperCallReference(pos);
-        constexpr bool has_spread = true;
-        call = factory()->NewCall(super_call_ref, args, pos, has_spread);
-      }
+      SuperCallReference* super_call_ref = NewSuperCallReference(pos);
+      Expression* call =
+          factory()->NewSuperCallForwardArgs(super_call_ref, pos);
       body.Add(factory()->NewReturnStatement(call, pos));
     }
 
@@ -220,6 +217,33 @@ bool Parser::ShortcutNumericLiteralBinaryExpression(Expression** x,
   return false;
 }
 
+bool Parser::CollapseConditionalChain(Expression** x, Expression* cond,
+                                      Expression* then_expression,
+                                      Expression* else_expression, int pos,
+                                      const SourceRange& then_range) {
+  if (*x && (*x)->IsConditionalChain()) {
+    ConditionalChain* conditional_chain = (*x)->AsConditionalChain();
+    if (then_expression != nullptr) {
+      conditional_chain->AddChainEntry(cond, then_expression, pos);
+      AppendConditionalChainSourceRange(conditional_chain, then_range);
+    }
+    if (else_expression != nullptr) {
+      conditional_chain->set_else_expression(else_expression);
+      DCHECK_GT(conditional_chain->conditional_chain_length(), 1);
+    }
+    return true;
+  }
+  return false;
+}
+
+void Parser::AppendConditionalChainElse(Expression** x,
+                                        const SourceRange& else_range) {
+  if (*x && (*x)->IsConditionalChain()) {
+    ConditionalChain* conditional_chain = (*x)->AsConditionalChain();
+    AppendConditionalChainElseSourceRange(conditional_chain, else_range);
+  }
+}
+
 bool Parser::CollapseNaryExpression(Expression** x, Expression* y,
                                     Token::Value op, int pos,
                                     const SourceRange& range) {
@@ -314,7 +338,7 @@ Expression* Parser::NewSuperPropertyReference(Scope* home_object_scope,
       pos);
 }
 
-Expression* Parser::NewSuperCallReference(int pos) {
+SuperCallReference* Parser::NewSuperCallReference(int pos) {
   VariableProxy* new_target_proxy =
       NewUnresolved(ast_value_factory()->new_target_string(), pos);
   VariableProxy* this_function_proxy =
@@ -821,7 +845,7 @@ Expression* Parser::WrapREPLResult(Expression* value) {
   // object literal:
   //
   //     return %_AsyncFunctionResolve(
-  //                .generator_object, {.repl_result: .result});
+  //               .generator_object, {__proto__: null, .repl_result: .result});
   //
   // Should ".result" be a resolved promise itself, the async return
   // would chain the promises and return the resolve value instead of
@@ -832,8 +856,14 @@ Expression* Parser::WrapREPLResult(Expression* value) {
   ObjectLiteralProperty* property =
       factory()->NewObjectLiteralProperty(property_name, value, true);
 
+  Literal* proto_name = factory()->NewStringLiteral(
+      ast_value_factory()->proto_string(), kNoSourcePosition);
+  ObjectLiteralProperty* prototype = factory()->NewObjectLiteralProperty(
+      proto_name, factory()->NewNullLiteral(kNoSourcePosition), false);
+
   ScopedPtrList<ObjectLiteralProperty> properties(pointer_buffer());
   properties.Add(property);
+  properties.Add(prototype);
   return factory()->NewObjectLiteral(properties, false, kNoSourcePosition,
                                      false);
 }
@@ -901,7 +931,6 @@ void Parser::ParseFunction(Isolate* isolate, ParseInfo* info,
   FunctionKind function_kind = flags().function_kind();
   FunctionLiteral* result;
   if (V8_UNLIKELY(IsClassMembersInitializerFunction(function_kind))) {
-    DCHECK(!maybe_outer_scope_info.is_null());
     // Reparsing of class member initializer functions has to be handled
     // specially because they require reparsing of the whole class body,
     // function start/end positions correspond to the class literal body
@@ -1375,7 +1404,7 @@ ZonePtrList<const Parser::NamedImport>* Parser::ParseNamedImports(int pos) {
   return result;
 }
 
-ImportAssertions* Parser::ParseImportAssertClause() {
+ImportAttributes* Parser::ParseImportWithOrAssertClause() {
   // WithClause :
   //    with '{' '}'
   //    with '{' WithEntries ','? '}'
@@ -1389,7 +1418,7 @@ ImportAssertions* Parser::ParseImportAssertClause() {
   //    assert '{' '}'
   //    assert '{' WithEntries ','? '}'
 
-  auto import_assertions = zone()->New<ImportAssertions>(zone());
+  auto import_attributes = zone()->New<ImportAttributes>(zone());
 
   if (v8_flags.harmony_import_attributes && Check(Token::WITH)) {
     // 'with' keyword consumed
@@ -1401,23 +1430,18 @@ ImportAssertions* Parser::ParseImportAssertClause() {
     //
     // TODO(v8:13856): Remove once decision is made to unship 'assert' or keep.
     ++use_counts_[v8::Isolate::kImportAssertionDeprecatedSyntax];
+    info_->pending_error_handler()->ReportWarningAt(
+        position(), end_position(), MessageTemplate::kImportAssertDeprecated,
+        "12.6");
   } else {
-    return import_assertions;
+    return import_attributes;
   }
 
   Expect(Token::LBRACE);
 
   while (peek() != Token::RBRACE) {
-    const AstRawString* attribute_key = nullptr;
-    if (Check(Token::STRING) || Check(Token::SMI)) {
-      attribute_key = GetSymbol();
-    } else if (Check(Token::NUMBER)) {
-      attribute_key = GetNumberAsSymbol();
-    } else if (Check(Token::BIGINT)) {
-      attribute_key = GetBigIntAsSymbol();
-    } else {
-      attribute_key = ParsePropertyName();
-    }
+    const AstRawString* attribute_key =
+        Check(Token::STRING) ? GetSymbol() : ParsePropertyName();
 
     Scanner::Location location = scanner()->location();
 
@@ -1430,10 +1454,10 @@ ImportAssertions* Parser::ParseImportAssertClause() {
     // sense both for errors due to the key and errors due to the value.
     location.end_pos = scanner()->location().end_pos;
 
-    auto result = import_assertions->insert(std::make_pair(
+    auto result = import_attributes->insert(std::make_pair(
         attribute_key, std::make_pair(attribute_value, location)));
     if (!result.second) {
-      // It is a syntax error if two AssertEntries have the same key.
+      // It is a syntax error if two WithEntries have the same key.
       ReportMessageAt(location, MessageTemplate::kImportAssertionDuplicateKey,
                       attribute_key);
       break;
@@ -1448,7 +1472,7 @@ ImportAssertions* Parser::ParseImportAssertClause() {
 
   Expect(Token::RBRACE);
 
-  return import_assertions;
+  return import_attributes;
 }
 
 void Parser::ParseImportDeclaration() {
@@ -1478,9 +1502,9 @@ void Parser::ParseImportDeclaration() {
   if (tok == Token::STRING) {
     Scanner::Location specifier_loc = scanner()->peek_location();
     const AstRawString* module_specifier = ParseModuleSpecifier();
-    const ImportAssertions* import_assertions = ParseImportAssertClause();
+    const ImportAttributes* import_attributes = ParseImportWithOrAssertClause();
     ExpectSemicolon();
-    module()->AddEmptyImport(module_specifier, import_assertions, specifier_loc,
+    module()->AddEmptyImport(module_specifier, import_attributes, specifier_loc,
                              zone());
     return;
   }
@@ -1524,7 +1548,7 @@ void Parser::ParseImportDeclaration() {
   ExpectContextualKeyword(ast_value_factory()->from_string());
   Scanner::Location specifier_loc = scanner()->peek_location();
   const AstRawString* module_specifier = ParseModuleSpecifier();
-  const ImportAssertions* import_assertions = ParseImportAssertClause();
+  const ImportAttributes* import_attributes = ParseImportWithOrAssertClause();
   ExpectSemicolon();
 
   // Now that we have all the information, we can make the appropriate
@@ -1537,25 +1561,25 @@ void Parser::ParseImportDeclaration() {
 
   if (module_namespace_binding != nullptr) {
     module()->AddStarImport(module_namespace_binding, module_specifier,
-                            import_assertions, module_namespace_binding_loc,
+                            import_attributes, module_namespace_binding_loc,
                             specifier_loc, zone());
   }
 
   if (import_default_binding != nullptr) {
     module()->AddImport(ast_value_factory()->default_string(),
                         import_default_binding, module_specifier,
-                        import_assertions, import_default_binding_loc,
+                        import_attributes, import_default_binding_loc,
                         specifier_loc, zone());
   }
 
   if (named_imports != nullptr) {
     if (named_imports->length() == 0) {
-      module()->AddEmptyImport(module_specifier, import_assertions,
+      module()->AddEmptyImport(module_specifier, import_attributes,
                                specifier_loc, zone());
     } else {
       for (const NamedImport* import : *named_imports) {
         module()->AddImport(import->import_name, import->local_name,
-                            module_specifier, import_assertions,
+                            module_specifier, import_attributes,
                             import->location, specifier_loc, zone());
       }
     }
@@ -1645,9 +1669,9 @@ void Parser::ParseExportStar() {
     ExpectContextualKeyword(ast_value_factory()->from_string());
     Scanner::Location specifier_loc = scanner()->peek_location();
     const AstRawString* module_specifier = ParseModuleSpecifier();
-    const ImportAssertions* import_assertions = ParseImportAssertClause();
+    const ImportAttributes* import_attributes = ParseImportWithOrAssertClause();
     ExpectSemicolon();
-    module()->AddStarExport(module_specifier, import_assertions, loc,
+    module()->AddStarExport(module_specifier, import_attributes, loc,
                             specifier_loc, zone());
     return;
   }
@@ -1675,10 +1699,10 @@ void Parser::ParseExportStar() {
   ExpectContextualKeyword(ast_value_factory()->from_string());
   Scanner::Location specifier_loc = scanner()->peek_location();
   const AstRawString* module_specifier = ParseModuleSpecifier();
-  const ImportAssertions* import_assertions = ParseImportAssertClause();
+  const ImportAttributes* import_attributes = ParseImportWithOrAssertClause();
   ExpectSemicolon();
 
-  module()->AddStarImport(local_name, module_specifier, import_assertions,
+  module()->AddStarImport(local_name, module_specifier, import_attributes,
                           local_name_loc, specifier_loc, zone());
   module()->AddExport(local_name, export_name, export_name_loc, zone());
 }
@@ -1736,16 +1760,17 @@ Statement* Parser::ParseExportDeclaration() {
       if (CheckContextualKeyword(ast_value_factory()->from_string())) {
         Scanner::Location specifier_loc = scanner()->peek_location();
         const AstRawString* module_specifier = ParseModuleSpecifier();
-        const ImportAssertions* import_assertions = ParseImportAssertClause();
+        const ImportAttributes* import_attributes =
+            ParseImportWithOrAssertClause();
         ExpectSemicolon();
 
         if (export_data->empty()) {
-          module()->AddEmptyImport(module_specifier, import_assertions,
+          module()->AddEmptyImport(module_specifier, import_attributes,
                                    specifier_loc, zone());
         } else {
           for (const ExportClauseData& data : *export_data) {
             module()->AddExport(data.local_name, data.export_name,
-                                module_specifier, import_assertions,
+                                module_specifier, import_attributes,
                                 data.location, specifier_loc, zone());
           }
         }
@@ -1957,38 +1982,6 @@ Block* Parser::IgnoreCompletion(Statement* statement) {
   Block* block = factory()->NewBlock(1, true);
   block->statements()->Add(statement, zone());
   return block;
-}
-
-Expression* Parser::RewriteReturn(Expression* return_value, int pos) {
-  if (IsDerivedConstructor(function_state_->kind())) {
-    // For subclass constructors we need to return this in case of undefined;
-    // other primitive values trigger an exception in the ConstructStub.
-    //
-    //   return expr;
-    //
-    // Is rewritten as:
-    //
-    //   return (temp = expr) === undefined ? this : temp;
-
-    // temp = expr
-    Variable* temp = NewTemporary(ast_value_factory()->empty_string());
-    Assignment* assign = factory()->NewAssignment(
-        Token::ASSIGN, factory()->NewVariableProxy(temp), return_value, pos);
-
-    // temp === undefined
-    Expression* is_undefined = factory()->NewCompareOperation(
-        Token::EQ_STRICT, assign,
-        factory()->NewUndefinedLiteral(kNoSourcePosition), pos);
-
-    // is_undefined ? this : temp
-    // We don't need to call UseThis() since it's guaranteed to be called
-    // for derived constructors after parsing the constructor in
-    // ParseFunctionBody.
-    return_value =
-        factory()->NewConditional(is_undefined, factory()->ThisExpression(),
-                                  factory()->NewVariableProxy(temp), pos);
-  }
-  return return_value;
 }
 
 Statement* Parser::RewriteSwitchStatement(SwitchStatement* switch_statement,
@@ -3430,7 +3423,7 @@ void Parser::HandleSourceURLComments(IsolateT* isolate, Handle<Script> script) {
   // The API can provide a source map URL and the API should take precedence.
   // Let's make sure we do not override the API with the magic comment.
   if (!source_mapping_url.is_null() &&
-      script->source_mapping_url(isolate).IsUndefined(isolate)) {
+      IsUndefined(script->source_mapping_url(isolate), isolate)) {
     script->set_source_mapping_url(*source_mapping_url);
   }
 }
@@ -3459,6 +3452,9 @@ void Parser::UpdateStatistics(Isolate* isolate, Handle<Script> script) {
   if (scanner_.SawMagicCommentCompileHintsAll()) {
     isolate->CountUsage(v8::Isolate::kCompileHintsMagicAll);
   }
+  if (scanner_.SawSourceMappingUrlMagicCommentAtSign()) {
+    isolate->CountUsage(v8::Isolate::kSourceMappingUrlMagicCommentAtSign);
+  }
 }
 
 void Parser::UpdateStatistics(
@@ -3480,6 +3476,9 @@ void Parser::UpdateStatistics(
   }
   if (scanner_.SawMagicCommentCompileHintsAll()) {
     use_counts->emplace_back(v8::Isolate::kCompileHintsMagicAll);
+  }
+  if (scanner_.SawSourceMappingUrlMagicCommentAtSign()) {
+    use_counts->emplace_back(v8::Isolate::kSourceMappingUrlMagicCommentAtSign);
   }
 
   *preparse_skipped = total_preparse_skipped_;

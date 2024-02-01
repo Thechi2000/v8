@@ -43,9 +43,9 @@
 namespace v8 {
 namespace internal {
 
-static bool IsAddressWithinFuncCode(JSFunction function, Isolate* isolate,
-                                    void* addr) {
-  i::AbstractCode code = function->abstract_code(isolate);
+static bool IsAddressWithinFuncCode(Tagged<JSFunction> function,
+                                    Isolate* isolate, void* addr) {
+  i::Tagged<i::AbstractCode> code = function->abstract_code(isolate);
   return code->contains(isolate, reinterpret_cast<Address>(addr));
 }
 
@@ -55,7 +55,8 @@ static bool IsAddressWithinFuncCode(v8::Local<v8::Context> context,
   v8::Local<v8::Value> func =
       context->Global()->Get(context, v8_str(func_name)).ToLocalChecked();
   CHECK(func->IsFunction());
-  JSFunction js_func = JSFunction::cast(*v8::Utils::OpenHandle(*func));
+  Tagged<JSFunction> js_func =
+      JSFunction::cast(*v8::Utils::OpenDirectHandle(*func));
   return IsAddressWithinFuncCode(js_func, isolate, addr);
 }
 
@@ -70,7 +71,8 @@ static void construct_call(const v8::FunctionCallbackInfo<v8::Value>& info) {
         frame_iterator.frame()->is_builtin_exit() ||
         frame_iterator.frame()->is_api_callback_exit());
   frame_iterator.Advance();
-  CHECK(frame_iterator.frame()->is_construct());
+  CHECK(frame_iterator.frame()->is_construct() ||
+        frame_iterator.frame()->is_fast_construct());
   frame_iterator.Advance();
   if (frame_iterator.frame()->type() == i::StackFrame::STUB) {
     // Skip over bytecode handler frame.

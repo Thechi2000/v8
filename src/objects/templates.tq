@@ -7,8 +7,8 @@ extern class TemplateInfo extends Struct {
   tag: Smi;
   serial_number: Smi;
   number_of_properties: Smi;
-  property_list: TemplateList|Undefined;
-  property_accessors: TemplateList|Undefined;
+  property_list: ArrayList|Undefined;
+  property_accessors: ArrayList|Undefined;
 }
 
 extern class FunctionTemplateRareData extends Struct {
@@ -77,4 +77,10 @@ bitfield struct ObjectTemplateInfoFlags extends uint31 {
 extern class ObjectTemplateInfo extends TemplateInfo {
   constructor: FunctionTemplateInfo|Undefined;
   data: SmiTagged<ObjectTemplateInfoFlags>;
+}
+
+@generateBodyDescriptor
+extern class DictionaryTemplateInfo extends HeapObject {
+  property_names: FixedArray;
+  fully_populated_map: Weak<Map>;
 }

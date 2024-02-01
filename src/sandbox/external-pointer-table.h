@@ -5,6 +5,8 @@
 #ifndef V8_SANDBOX_EXTERNAL_POINTER_TABLE_H_
 #define V8_SANDBOX_EXTERNAL_POINTER_TABLE_H_
 
+#include <vector>
+
 #include "include/v8config.h"
 #include "src/base/atomicops.h"
 #include "src/base/memory.h"
@@ -19,6 +21,7 @@ namespace internal {
 
 class Isolate;
 class Counters;
+class ReadOnlyArtifacts;
 
 /**
  * The entries of an ExternalPointerTable.
@@ -49,6 +52,9 @@ struct ExternalPointerTableEntry {
   // This entry must be an external pointer entry.
   inline void SetExternalPointer(Address value, ExternalPointerTag tag);
 
+  // Returns true if this entry contains an external pointer with the given tag.
+  inline bool HasExternalPointer(ExternalPointerTag tag) const;
+
   // Exchanges the external pointer stored in this entry with the provided one.
   // Returns the old external pointer. This entry must be an external pointer
   // entry. If the provided tag doesn't match the tag of the old entry, the
@@ -68,6 +74,9 @@ struct ExternalPointerTableEntry {
   // Make this entry an evacuation entry containing the address of the handle to
   // the entry being evacuated.
   inline void MakeEvacuationEntry(Address handle_location);
+
+  // Returns true if this entry contains an evacuation entry.
+  inline bool HasEvacuationEntry() const;
 
   // Move the content of this entry into the provided entry while also clearing
   // the marking bit. Used during table compaction. This invalidates the entry.
@@ -93,7 +102,12 @@ struct ExternalPointerTableEntry {
     }
 
     bool IsTaggedWith(ExternalPointerTag tag) const {
-      return (encoded_word_ & kExternalPointerTagMask) == tag;
+      // We have to explicitly ignore the marking bit (which is part of the
+      // tag) since an unmarked entry with tag kXyzTag is still considered to
+      // be tagged with kXyzTag.
+      uint64_t expected = tag & ~kExternalPointerMarkBit;
+      uint64_t actual = encoded_word_ & kExternalPointerTagMaskWithoutMarkBit;
+      return expected == actual;
     }
 
     void SetMarkBit() { encoded_word_ |= kExternalPointerMarkBit; }
@@ -171,13 +185,9 @@ struct ExternalPointerTableEntry {
 #if defined(LEAK_SANITIZER)
 //  When LSan is active, we need "fat" entries, see above.
 static_assert(sizeof(ExternalPointerTableEntry) == 16);
-constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
-    kExternalPointerTableReservationSize * 2;
 #else
 //  We expect ExternalPointerTable entries to consist of a single 64-bit word.
 static_assert(sizeof(ExternalPointerTableEntry) == 8);
-constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
-    kExternalPointerTableReservationSize;
 #endif
 
 /**
@@ -282,10 +292,14 @@ constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
  * guarded by write barriers to avoid this scenario.
  */
 class V8_EXPORT_PRIVATE ExternalPointerTable
-    : public ExternalEntityTable<
-          ExternalPointerTableEntry,
-          kExternalPointerTableReservationSizeAfterAccountingForLSan> {
+    : public ExternalEntityTable<ExternalPointerTableEntry,
+                                 kExternalPointerTableReservationSize> {
+#if defined(LEAK_SANITIZER)
+  //  When LSan is active, we use "fat" entries, see above.
+  static_assert(kMaxExternalPointers == kMaxCapacity * 2);
+#else
   static_assert(kMaxExternalPointers == kMaxCapacity);
+#endif
 
  public:
   // Size of an ExternalPointerTable, for layout computation in IsolateData.
@@ -297,16 +311,26 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
 
   // The Spaces used by an ExternalPointerTable also contain the state related
   // to compaction.
-  struct Space
-      : public ExternalEntityTable<
-            ExternalPointerTableEntry,
-            kExternalPointerTableReservationSizeAfterAccountingForLSan>::Space {
+  struct Space : public ExternalEntityTable<
+                     ExternalPointerTableEntry,
+                     kExternalPointerTableReservationSize>::Space {
    public:
     Space() : start_of_evacuation_area_(kNotCompactingMarker) {}
 
     // Determine if compaction is needed and if so start the compaction.
     // This is expected to be called at the start of the GC marking phase.
     void StartCompactingIfNeeded();
+
+    // During table compaction, we may record the addresses of fields
+    // containing external pointer handles (if they are evacuation candidates).
+    // As such, if such a field is invalidated (for example because the host
+    // object is converted to another object type), we need to be notified of
+    // that. Note that we do not need to care about "re-validated" fields here:
+    // if an external pointer field is first converted to different kind of
+    // field, then again converted to a external pointer field, then it will be
+    // re-initialized, at which point it will obtain a new entry in the
+    // external pointer table which cannot be a candidate for evacuation.
+    inline void NotifyExternalPointerFieldInvalidated(Address field_address);
 
    private:
     friend class ExternalPointerTable;
@@ -317,6 +341,9 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
     inline void StopCompacting();
     inline void AbortCompacting(uint32_t start_of_evacuation_area);
     inline bool CompactingWasAborted();
+
+    inline bool FieldWasInvalidated(Address field_address) const;
+    inline void ClearInvalidatedFields();
 
     // This value indicates that this space is not currently being compacted. It
     // is set to uint32_t max so that determining whether an entry should be
@@ -345,7 +372,21 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
     //   compaction has been aborted during marking. The original start of the
     //   evacuation area is still contained in the lower bits.
     std::atomic<uint32_t> start_of_evacuation_area_;
+
+    // List of external pointer fields that have been invalidated. See
+    // NotifyExternalPointerFieldInvalidated. Only used when table compaction
+    // is running.
+    // We expect very few (usually none at all) fields to be invalidated during
+    // a GC, so a std::vector is probably better than a std::set or similar.
+    std::vector<Address> invalidated_fields_;
+
+    // Mutex guarding access to the invalidated_fields_ set.
+    base::Mutex invalidated_fields_mutex_;
   };
+
+  // Initializes all slots in the RO space from pre-existing artifacts.
+  void SetUpFromReadOnlyArtifacts(Space* read_only_space,
+                                  const ReadOnlyArtifacts* artifacts);
 
   // Retrieves the entry referenced by the given handle.
   //
@@ -394,14 +435,14 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
   uint32_t SweepAndCompact(Space* space, Counters* counters);
 
  private:
-  inline bool IsValidHandle(ExternalPointerHandle handle) const;
-  inline uint32_t HandleToIndex(ExternalPointerHandle handle) const;
-  inline ExternalPointerHandle IndexToHandle(uint32_t index) const;
+  static inline bool IsValidHandle(ExternalPointerHandle handle);
+  static inline uint32_t HandleToIndex(ExternalPointerHandle handle);
+  static inline ExternalPointerHandle IndexToHandle(uint32_t index);
 
   inline void MaybeCreateEvacuationEntry(Space* space, uint32_t index,
                                          Address handle_location);
 
-  void ResolveEvacuationEntryDuringSweeping(
+  bool TryResolveEvacuationEntryDuringSweeping(
       uint32_t index, ExternalPointerHandle* handle_location,
       uint32_t start_of_evacuation_area);
 

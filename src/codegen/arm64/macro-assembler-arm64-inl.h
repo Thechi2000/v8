@@ -21,6 +21,21 @@ MemOperand FieldMemOperand(Register object, int offset) {
   return MemOperand(object, offset - kHeapObjectTag);
 }
 
+// Provides access to exit frame parameters (GC-ed).
+MemOperand ExitFrameStackSlotOperand(int offset) {
+  // The slot at [sp] is reserved in all ExitFrames for storing the return
+  // address before doing the actual call, it's necessary for frame iteration
+  // (see StoreReturnAddressAndCall for details).
+  static constexpr int kSPOffset = 1 * kSystemPointerSize;
+  return MemOperand(sp, kSPOffset + offset);
+}
+
+// Provides access to exit frame parameters (GC-ed).
+MemOperand ExitFrameCallerStackSlotOperand(int index) {
+  return MemOperand(fp, (ExitFrameConstants::kFixedSlotCountAboveFp + index) *
+                            kSystemPointerSize);
+}
+
 void MacroAssembler::And(const Register& rd, const Register& rn,
                          const Operand& operand) {
   DCHECK(allow_macro_instructions());
@@ -1456,17 +1471,28 @@ void MacroAssembler::PushArgument(const Register& arg) { Push(padreg, arg); }
 
 void MacroAssembler::CompareAndBranch(const Register& lhs, const Operand& rhs,
                                       Condition cond, Label* label) {
-  if (rhs.IsImmediate() && (rhs.ImmediateValue() == 0) &&
-      ((cond == eq) || (cond == ne) || (cond == hi) || (cond == ls))) {
-    if ((cond == eq) || (cond == ls)) {
-      Cbz(lhs, label);
-    } else {
-      Cbnz(lhs, label);
+  if (rhs.IsImmediate() && (rhs.ImmediateValue() == 0)) {
+    switch (cond) {
+      case eq:
+      case ls:
+        Cbz(lhs, label);
+        return;
+      case lt:
+        Tbnz(lhs, lhs.SizeInBits() - 1, label);
+        return;
+      case ge:
+        Tbz(lhs, lhs.SizeInBits() - 1, label);
+        return;
+      case ne:
+      case hi:
+        Cbnz(lhs, label);
+        return;
+      default:
+        break;
     }
-  } else {
-    Cmp(lhs, rhs);
-    B(cond, label);
   }
+  Cmp(lhs, rhs);
+  B(cond, label);
 }
 
 void MacroAssembler::CompareTaggedAndBranch(const Register& lhs,

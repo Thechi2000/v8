@@ -59,12 +59,7 @@ void DeepForEachInputImpl(
       break;
     }
     case DeoptFrame::FrameType::kConstructInvokeStubFrame: {
-      f(frame.as_construct_stub().closure(), &input_locations[index++]);
       f(frame.as_construct_stub().receiver(), &input_locations[index++]);
-      for (first_argument<Function> node :
-           frame.as_construct_stub().arguments_without_receiver()) {
-        f(node, &input_locations[index++]);
-      }
       f(frame.as_construct_stub().context(), &input_locations[index++]);
       break;
     }
@@ -112,12 +107,7 @@ void DeepForEachInput(const_if_function_first_arg_not_reference<
           });
       break;
     case DeoptFrame::FrameType::kConstructInvokeStubFrame: {
-      f(top_frame.as_construct_stub().closure(), &input_locations[index++]);
       f(top_frame.as_construct_stub().receiver(), &input_locations[index++]);
-      for (first_argument<Function> node :
-           top_frame.as_construct_stub().arguments_without_receiver()) {
-        f(node, &input_locations[index++]);
-      }
       f(top_frame.as_construct_stub().context(), &input_locations[index++]);
       break;
     }
@@ -136,22 +126,6 @@ void DeepForEachInput(const_if_function_first_arg_not_reference<
 }
 
 }  // namespace detail
-
-inline void AddDeoptRegistersToSnapshot(RegisterSnapshot* snapshot,
-                                        const EagerDeoptInfo* deopt_info) {
-  detail::DeepForEachInput(deopt_info, [&](ValueNode* node,
-                                           InputLocation* input) {
-    if (!input->IsAnyRegister()) return;
-    if (input->IsDoubleRegister()) {
-      snapshot->live_double_registers.set(input->AssignedDoubleRegister());
-    } else {
-      snapshot->live_registers.set(input->AssignedGeneralRegister());
-      if (node->is_tagged()) {
-        snapshot->live_tagged_registers.set(input->AssignedGeneralRegister());
-      }
-    }
-  });
-}
 
 #ifdef DEBUG
 inline RegList GetGeneralRegistersUsedAsInputs(
@@ -190,6 +164,7 @@ inline void DefineAsFixed(Node* node, Register reg) {
                                 reg.code(), kNoVreg);
 }
 
+// TODO(v8:7700): Create generic DefineSameAs(..., int input).
 inline void DefineSameAsFirst(Node* node) {
   node->result().SetUnallocated(kNoVreg, 0);
 }

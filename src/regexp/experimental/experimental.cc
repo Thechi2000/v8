@@ -14,11 +14,17 @@
 namespace v8 {
 namespace internal {
 
-bool ExperimentalRegExp::CanBeHandled(RegExpTree* tree, RegExpFlags flags,
-                                      int capture_count) {
+bool ExperimentalRegExp::CanBeHandled(RegExpTree* tree, Handle<String> pattern,
+                                      RegExpFlags flags, int capture_count) {
   DCHECK(v8_flags.enable_experimental_regexp_engine ||
          v8_flags.enable_experimental_regexp_engine_on_excessive_backtracks);
-  return ExperimentalRegExpCompiler::CanBeHandled(tree, flags, capture_count);
+  bool can_be_handled =
+      ExperimentalRegExpCompiler::CanBeHandled(tree, flags, capture_count);
+  if (!can_be_handled && v8_flags.trace_experimental_regexp_engine) {
+    StdoutStream{} << "Pattern not supported by experimental engine: "
+                   << pattern << std::endl;
+  }
+  return can_be_handled;
 }
 
 void ExperimentalRegExp::Initialize(Isolate* isolate, Handle<JSRegExp> re,
@@ -53,7 +59,7 @@ Handle<ByteArray> VectorToByteArray(Isolate* isolate, base::Vector<T> data) {
   int byte_length = sizeof(T) * data.length();
   Handle<ByteArray> byte_array = isolate->factory()->NewByteArray(byte_length);
   DisallowGarbageCollection no_gc;
-  MemCopy(byte_array->GetDataStartAddress(), data.begin(), byte_length);
+  MemCopy(byte_array->begin(), data.begin(), byte_length);
   return byte_array;
 }
 
@@ -73,7 +79,7 @@ base::Optional<CompilationResult> CompileImpl(Isolate* isolate,
 
   // Parse and compile the regexp source.
   RegExpCompileData parse_result;
-  DCHECK(!isolate->has_pending_exception());
+  DCHECK(!isolate->has_exception());
 
   RegExpFlags flags = JSRegExp::AsRegExpFlags(regexp->flags());
   bool parse_success = RegExpParser::ParseRegExpFromHeapString(
@@ -114,7 +120,7 @@ bool ExperimentalRegExp::Compile(Isolate* isolate, Handle<JSRegExp> re) {
   base::Optional<CompilationResult> compilation_result =
       CompileImpl(isolate, re);
   if (!compilation_result.has_value()) {
-    DCHECK(isolate->has_pending_exception());
+    DCHECK(isolate->has_exception());
     return false;
   }
 
@@ -124,9 +130,10 @@ bool ExperimentalRegExp::Compile(Isolate* isolate, Handle<JSRegExp> re) {
   return true;
 }
 
-base::Vector<RegExpInstruction> AsInstructionSequence(ByteArray raw_bytes) {
+base::Vector<RegExpInstruction> AsInstructionSequence(
+    Tagged<ByteArray> raw_bytes) {
   RegExpInstruction* inst_begin =
-      reinterpret_cast<RegExpInstruction*>(raw_bytes->GetDataStartAddress());
+      reinterpret_cast<RegExpInstruction*>(raw_bytes->begin());
   int inst_num = raw_bytes->length() / sizeof(RegExpInstruction);
   DCHECK_EQ(sizeof(RegExpInstruction) * inst_num, raw_bytes->length());
   return base::Vector<RegExpInstruction>(inst_begin, inst_num);
@@ -135,9 +142,10 @@ base::Vector<RegExpInstruction> AsInstructionSequence(ByteArray raw_bytes) {
 namespace {
 
 int32_t ExecRawImpl(Isolate* isolate, RegExp::CallOrigin call_origin,
-                    ByteArray bytecode, String subject, int capture_count,
-                    int quantifier_count, int32_t* output_registers,
-                    int32_t output_register_count, int32_t subject_index) {
+                    Tagged<ByteArray> bytecode, Tagged<String> subject,
+                    int capture_count, int quantifier_count,
+                    int32_t* output_registers, int32_t output_register_count,
+                    int32_t subject_index) {
   DisallowGarbageCollection no_gc;
   // TODO(cbruni): remove once gcmole is fixed.
   DisableGCMole no_gc_mole;
@@ -146,27 +154,22 @@ int32_t ExecRawImpl(Isolate* isolate, RegExp::CallOrigin call_origin,
       JSRegExp::RegistersForCaptureCount(capture_count);
 
   int32_t result;
-  do {
-    DCHECK(subject->IsFlat());
-    Zone zone(isolate->allocator(), ZONE_NAME);
-    result = ExperimentalRegExpInterpreter::FindMatches(
-        isolate, call_origin, bytecode, register_count_per_match,
-        quantifier_count, subject, subject_index, output_registers,
-        output_register_count, &zone);
-  } while (result == RegExp::kInternalRegExpRetry &&
-           call_origin == RegExp::kFromRuntime);
+  DCHECK(subject->IsFlat());
+  Zone zone(isolate->allocator(), ZONE_NAME);
+  result = ExperimentalRegExpInterpreter::FindMatches(
+      isolate, call_origin, bytecode, register_count_per_match,
+      quantifier_count, subject, subject_index, output_registers,
+      output_register_count, &zone);
   return result;
 }
 
 }  // namespace
 
 // Returns the number of matches.
-int32_t ExperimentalRegExp::ExecRaw(Isolate* isolate,
-                                    RegExp::CallOrigin call_origin,
-                                    JSRegExp regexp, String subject,
-                                    int32_t* output_registers,
-                                    int32_t output_register_count,
-                                    int32_t subject_index) {
+int32_t ExperimentalRegExp::ExecRaw(
+    Isolate* isolate, RegExp::CallOrigin call_origin, Tagged<JSRegExp> regexp,
+    Tagged<String> subject, int32_t* output_registers,
+    int32_t output_register_count, int32_t subject_index) {
   DCHECK(v8_flags.enable_experimental_regexp_engine);
   DisallowGarbageCollection no_gc;
 
@@ -176,10 +179,10 @@ int32_t ExperimentalRegExp::ExecRaw(Isolate* isolate,
   }
 
   static constexpr bool kIsLatin1 = true;
-  ByteArray bytecode = ByteArray::cast(regexp->bytecode(kIsLatin1));
+  Tagged<ByteArray> bytecode = ByteArray::cast(regexp->bytecode(kIsLatin1));
 
   return ExecRawImpl(isolate, call_origin, bytecode, subject,
-                     regexp.capture_count(), regexp.quantifier_count(),
+                     regexp->capture_count(), regexp->quantifier_count(),
                      output_registers, output_register_count, subject_index);
 }
 
@@ -197,9 +200,9 @@ int32_t ExperimentalRegExp::MatchForCallFromJs(
   DisallowHandleAllocation no_handles;
   DisallowHandleDereference no_deref;
 
-  String subject_string = String::cast(Object(subject));
+  Tagged<String> subject_string = String::cast(Tagged<Object>(subject));
 
-  JSRegExp regexp_obj = JSRegExp::cast(Object(regexp));
+  Tagged<JSRegExp> regexp_obj = JSRegExp::cast(Tagged<Object>(regexp));
 
   return ExecRaw(isolate, RegExp::kFromJs, regexp_obj, subject_string,
                  output_registers, output_register_count, start_position);
@@ -216,7 +219,7 @@ MaybeHandle<Object> ExperimentalRegExp::Exec(
 #endif
 
   if (!IsCompiled(regexp, isolate) && !Compile(isolate, regexp)) {
-    DCHECK(isolate->has_pending_exception());
+    DCHECK(isolate->has_exception());
     return MaybeHandle<Object>();
   }
 
@@ -236,26 +239,33 @@ MaybeHandle<Object> ExperimentalRegExp::Exec(
     output_registers_release.reset(output_registers);
   }
 
-  int num_matches =
-      ExecRaw(isolate, RegExp::kFromRuntime, *regexp, *subject,
-              output_registers, output_register_count, subject_index);
+  do {
+    int num_matches =
+        ExecRaw(isolate, RegExp::kFromRuntime, *regexp, *subject,
+                output_registers, output_register_count, subject_index);
 
-  if (num_matches > 0) {
-    DCHECK_EQ(num_matches, 1);
-    if (exec_quirks == RegExp::ExecQuirks::kTreatMatchAtEndAsFailure) {
-      if (output_registers[0] >= subject->length()) {
-        return isolate->factory()->null_value();
+    if (num_matches > 0) {
+      DCHECK_EQ(num_matches, 1);
+      if (exec_quirks == RegExp::ExecQuirks::kTreatMatchAtEndAsFailure) {
+        if (output_registers[0] >= subject->length()) {
+          return isolate->factory()->null_value();
+        }
       }
+      return RegExp::SetLastMatchInfo(isolate, last_match_info, subject,
+                                      capture_count, output_registers);
+    } else if (num_matches == 0) {
+      return isolate->factory()->null_value();
+    } else {
+      DCHECK_LT(num_matches, 0);
+      if (num_matches == RegExp::kInternalRegExpRetry) {
+        // Re-run execution.
+        continue;
+      }
+      DCHECK(isolate->has_exception());
+      return MaybeHandle<Object>();
     }
-    return RegExp::SetLastMatchInfo(isolate, last_match_info, subject,
-                                    capture_count, output_registers);
-  } else if (num_matches == 0) {
-    return isolate->factory()->null_value();
-  } else {
-    DCHECK_LT(num_matches, 0);
-    DCHECK(isolate->has_pending_exception());
-    return MaybeHandle<Object>();
-  }
+  } while (true);
+  UNREACHABLE();
 }
 
 int32_t ExperimentalRegExp::OneshotExecRaw(Isolate* isolate,
@@ -301,25 +311,32 @@ MaybeHandle<Object> ExperimentalRegExp::OneshotExec(
     output_registers_release.reset(output_registers);
   }
 
-  int num_matches = OneshotExecRaw(isolate, regexp, subject, output_registers,
-                                   output_register_count, subject_index);
+  do {
+    int num_matches = OneshotExecRaw(isolate, regexp, subject, output_registers,
+                                     output_register_count, subject_index);
 
-  if (num_matches > 0) {
-    DCHECK_EQ(num_matches, 1);
-    if (exec_quirks == RegExp::ExecQuirks::kTreatMatchAtEndAsFailure) {
-      if (output_registers[0] >= subject->length()) {
-        return isolate->factory()->null_value();
+    if (num_matches > 0) {
+      DCHECK_EQ(num_matches, 1);
+      if (exec_quirks == RegExp::ExecQuirks::kTreatMatchAtEndAsFailure) {
+        if (output_registers[0] >= subject->length()) {
+          return isolate->factory()->null_value();
+        }
       }
+      return RegExp::SetLastMatchInfo(isolate, last_match_info, subject,
+                                      capture_count, output_registers);
+    } else if (num_matches == 0) {
+      return isolate->factory()->null_value();
+    } else {
+      DCHECK_LT(num_matches, 0);
+      if (num_matches == RegExp::kInternalRegExpRetry) {
+        // Re-run execution.
+        continue;
+      }
+      DCHECK(isolate->has_exception());
+      return MaybeHandle<Object>();
     }
-    return RegExp::SetLastMatchInfo(isolate, last_match_info, subject,
-                                    capture_count, output_registers);
-  } else if (num_matches == 0) {
-    return isolate->factory()->null_value();
-  } else {
-    DCHECK_LT(num_matches, 0);
-    DCHECK(isolate->has_pending_exception());
-    return MaybeHandle<Object>();
-  }
+  } while (true);
+  UNREACHABLE();
 }
 
 }  // namespace internal

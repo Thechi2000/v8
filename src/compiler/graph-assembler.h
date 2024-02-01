@@ -85,12 +85,12 @@ class Reducer;
   V(IntSub)                                         \
   T(Uint32LessThan, BoolT, Uint32T, Uint32T)        \
   T(Uint32LessThanOrEqual, BoolT, Uint32T, Uint32T) \
-  V(Uint64LessThan)                                 \
+  T(Uint64LessThan, BoolT, Uint64T, Uint64T)        \
   T(Uint64LessThanOrEqual, BoolT, Uint64T, Uint64T) \
   V(UintLessThan)                                   \
   T(Word32And, Word32T, Word32T, Word32T)           \
   T(Word32Equal, BoolT, Word32T, Word32T)           \
-  V(Word32Or)                                       \
+  T(Word32Or, Word32T, Word32T, Word32T)            \
   V(Word32Sar)                                      \
   V(Word32SarShiftOutZeros)                         \
   V(Word32Shl)                                      \
@@ -129,30 +129,30 @@ class Reducer;
   V(Uint64Div)                               \
   V(Uint64Mod)
 
-#define JSGRAPH_SINGLETON_CONSTANT_LIST(V)                   \
-  V(AllocateInOldGenerationStub, InstructionStream)          \
-  V(AllocateInYoungGenerationStub, InstructionStream)        \
-  V(AllocateRegularInOldGenerationStub, InstructionStream)   \
-  V(AllocateRegularInYoungGenerationStub, InstructionStream) \
-  V(BigIntMap, Map)                                          \
-  V(BooleanMap, Map)                                         \
-  V(EmptyString, String)                                     \
-  V(ExternalObjectMap, Map)                                  \
-  V(False, Boolean)                                          \
-  V(FixedArrayMap, Map)                                      \
-  V(FixedDoubleArrayMap, Map)                                \
-  V(WeakFixedArrayMap, Map)                                  \
-  V(HeapNumberMap, Map)                                      \
-  V(MinusOne, Number)                                        \
-  V(NaN, Number)                                             \
-  V(NoContext, Object)                                       \
-  V(Null, Null)                                              \
-  V(One, Number)                                             \
-  V(TheHole, Hole)                                           \
-  V(ToNumberBuiltin, InstructionStream)                      \
-  V(PlainPrimitiveToNumberBuiltin, InstructionStream)        \
-  V(True, Boolean)                                           \
-  V(Undefined, Undefined)                                    \
+#define JSGRAPH_SINGLETON_CONSTANT_LIST(V)                         \
+  V(AllocateInOldGenerationStub, InstructionStream)                \
+  V(AllocateInYoungGenerationStub, InstructionStream)              \
+  IF_WASM(V, WasmAllocateInYoungGenerationStub, InstructionStream) \
+  IF_WASM(V, WasmAllocateInOldGenerationStub, InstructionStream)   \
+  V(BigIntMap, Map)                                                \
+  V(BooleanMap, Map)                                               \
+  V(EmptyString, String)                                           \
+  V(ExternalObjectMap, Map)                                        \
+  V(False, Boolean)                                                \
+  V(FixedArrayMap, Map)                                            \
+  V(FixedDoubleArrayMap, Map)                                      \
+  V(WeakFixedArrayMap, Map)                                        \
+  V(HeapNumberMap, Map)                                            \
+  V(MinusOne, Number)                                              \
+  V(NaN, Number)                                                   \
+  V(NoContext, Object)                                             \
+  V(Null, Null)                                                    \
+  V(One, Number)                                                   \
+  V(TheHole, Hole)                                                 \
+  V(ToNumberBuiltin, InstructionStream)                            \
+  V(PlainPrimitiveToNumberBuiltin, InstructionStream)              \
+  V(True, Boolean)                                                 \
+  V(Undefined, Undefined)                                          \
   V(Zero, Number)
 
 class GraphAssembler;
@@ -338,6 +338,10 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   Node* Parameter(int index);
 
   Node* LoadFramePointer();
+#if V8_ENABLE_WEBASSEMBLY
+  Node* LoadStackPointer();
+  Node* SetStackPointer(Node* sp, wasm::FPRelativeScope fp_scope);
+#endif
 
   Node* LoadHeapNumberValue(Node* heap_number);
 
@@ -352,6 +356,7 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   CHECKED_ASSEMBLER_MACH_BINOP_LIST(BINOP_DECL)
 #undef BINOP_DECL
 #undef BINOP_DECL_TNODE
+  TNode<BoolT> UintPtrLessThan(TNode<UintPtrT> left, TNode<UintPtrT> right);
   TNode<BoolT> UintPtrLessThanOrEqual(TNode<UintPtrT> left,
                                       TNode<UintPtrT> right);
   TNode<UintPtrT> UintPtrAdd(TNode<UintPtrT> left, TNode<UintPtrT> right);
@@ -969,9 +974,7 @@ class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {
   JSGRAPH_SINGLETON_CONSTANT_LIST(SINGLETON_CONST_TEST_DECL)
 #undef SINGLETON_CONST_TEST_DECL
 
-  Node* Allocate(
-      AllocationType allocation, Node* size,
-      AllowLargeObjects allow_large_objects = AllowLargeObjects::kFalse);
+  Node* Allocate(AllocationType allocation, Node* size);
   TNode<Map> LoadMap(TNode<HeapObject> object);
   Node* LoadField(FieldAccess const&, Node* object);
   template <typename T>
@@ -994,6 +997,8 @@ class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {
   Node* StoreField(FieldAccess const&, Node* object, Node* value);
   Node* StoreElement(ElementAccess const&, Node* object, Node* index,
                      Node* value);
+  Node* ClearPendingMessage();
+
   void TransitionAndStoreElement(MapRef double_map, MapRef fast_map,
                                  TNode<HeapObject> object, TNode<Number> index,
                                  TNode<Object> value);
@@ -1017,7 +1022,10 @@ class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {
   TNode<Boolean> ObjectIsCallable(TNode<Object> value);
   TNode<Boolean> ObjectIsSmi(TNode<Object> value);
   TNode<Boolean> ObjectIsUndetectable(TNode<Object> value);
-  Node* CheckIf(Node* cond, DeoptimizeReason reason);
+  Node* CheckIf(Node* cond, DeoptimizeReason reason,
+                const FeedbackSource& feedback = {});
+  Node* Assert(Node* cond, const char* condition_string = "",
+               const char* file = "", int line = -1);
   TNode<Boolean> NumberIsFloat64Hole(TNode<Number> value);
   TNode<Boolean> ToBoolean(TNode<Object> value);
   TNode<Object> ConvertTaggedHoleToUndefined(TNode<Object> value);
@@ -1047,6 +1055,12 @@ class V8_EXPORT_PRIVATE JSGraphAssembler : public GraphAssembler {
   TNode<Number> TypedArrayLength(
       TNode<JSTypedArray> typed_array,
       std::set<ElementsKind> elements_kinds_candidates, TNode<Context> context);
+  // Performs the full detached check. This includes fixed-length RABs whos
+  // underlying buffer has been shrunk OOB.
+  void CheckIfTypedArrayWasDetached(
+      TNode<JSTypedArray> typed_array,
+      std::set<ElementsKind> elements_kinds_candidates,
+      const FeedbackSource& feedback);
   TNode<Uint32T> LookupByteShiftForElementsKind(TNode<Uint32T> elements_kind);
   TNode<Uint32T> LookupByteSizeForElementsKind(TNode<Uint32T> elements_kind);
 

@@ -48,8 +48,6 @@ struct NumberFormatSpan {
 V8_EXPORT_PRIVATE std::vector<NumberFormatSpan> FlattenRegionsToParts(
     std::vector<NumberFormatSpan>* regions);
 
-template <typename T>
-class Handle;
 class JSCollator;
 
 class Intl {
@@ -237,6 +235,12 @@ class Intl {
                          Handle<String> additional_property_name,
                          Handle<String> additional_property_value);
 
+  // A helper function to implement formatToParts which add element to array
+  static Maybe<int> AddNumberElements(Isolate* isolate,
+                                      const icu::FormattedValue& formatted,
+                                      Handle<JSArray> result, int start_index,
+                                      Handle<String> unit);
+
   // In ECMA 402 v1, Intl constructors supported a mode of operation
   // where calling them with an existing object as a receiver would
   // transform the receiver into the relevant Intl instance with all
@@ -354,7 +358,8 @@ class Intl {
   static const uint8_t* AsciiCollationWeightsL3();
   static const int kAsciiCollationWeightsLength;
 
-  static String ConvertOneByteToLower(String src, String dst);
+  static Tagged<String> ConvertOneByteToLower(Tagged<String> src,
+                                              Tagged<String> dst);
 
   static const std::set<std::string>& GetAvailableLocales();
 

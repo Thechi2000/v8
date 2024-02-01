@@ -22,10 +22,10 @@ function BasicMemory64Tests(num_pages, use_atomic_ops) {
   builder.addMemory64(num_pages, num_pages);
   builder.exportMemoryAs('memory');
 
-  // A memory operation with alignment (0) and offset (0).
+  // A memory operation with alignment (2) and offset (0).
   let op = (non_atomic, atomic) => use_atomic_ops ?
-      [kAtomicPrefix, atomic, 0, 0] :
-      [non_atomic, 0, 0];
+      [kAtomicPrefix, atomic, 2, 0] :
+      [non_atomic, 2, 0];
   builder.addFunction('load', makeSig([kWasmF64], [kWasmI32]))
       .addBody([
         kExprLocalGet, 0,                           // local.get 0
@@ -48,27 +48,19 @@ function BasicMemory64Tests(num_pages, use_atomic_ops) {
   let store = module.exports.store;
 
   assertEquals(num_bytes, memory.buffer.byteLength);
-  // TODO(v8:4153): Enable for all sizes once the TypedArray size limit is
-  // raised.
-  const kMaxTypedArraySize = Math.pow(2, 32);
-  if (num_bytes > kMaxTypedArraySize) {
-    // TODO(v8:4153): Fix the error message below, if we don't decide to bump
-    // the limit soon.
-    assertThrows(
-        () => new Int8Array(memory.buffer), RangeError,
-        'Invalid typed array length: undefined');
-  } else {
-    let array = new Int8Array(memory.buffer);
-    assertEquals(num_bytes, array.length);
-  }
+  // Test that we can create a TypedArray from that large buffer.
+  let array = new Int8Array(memory.buffer);
+  assertEquals(num_bytes, array.length);
 
   const GB = Math.pow(2, 30);
+  let unalignedAndOobTrap =
+    use_atomic_ops ? kTrapUnalignedAccess : kTrapMemOutOfBounds;
   assertEquals(0, load(num_bytes - 4));
   assertTraps(kTrapMemOutOfBounds, () => load(num_bytes));
-  assertTraps(kTrapMemOutOfBounds, () => load(num_bytes - 3));
+  assertTraps(unalignedAndOobTrap, () => load(num_bytes - 3));
   assertTraps(kTrapMemOutOfBounds, () => load(num_bytes - 4 + 4 * GB));
   assertTraps(kTrapMemOutOfBounds, () => store(num_bytes));
-  assertTraps(kTrapMemOutOfBounds, () => store(num_bytes - 3));
+  assertTraps(unalignedAndOobTrap, () => store(num_bytes - 3));
   assertTraps(kTrapMemOutOfBounds, () => store(num_bytes - 4 + 4 * GB));
   if (use_atomic_ops) {
     assertTraps(kTrapUnalignedAccess, () => load(num_bytes - 7));
@@ -263,7 +255,9 @@ function allowOOM(fn) {
   // Cannot grow by 2^32 pages.
   assertEquals(-1n, instance.exports.grow(1n << 32n));
   // Grow by one more page to the maximum.
-  assertEquals(BigInt(max_pages) - 1n, instance.exports.grow(1n));
+  grow_big_result = instance.exports.grow(1n);
+  if (grow_big_result == -1) return;
+  assertEquals(BigInt(max_pages) - 1n, grow_big_result);
   // Cannot grow further.
   assertEquals(-1n, instance.exports.grow(1n));
 })();
@@ -377,6 +371,52 @@ function allowOOM(fn) {
   assertTraps(kTrapMemOutOfBounds, () => fill(1n << 63n, 0, 1n));
 })();
 
+(function TestBulkMemoryConstOperations() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+  const kMemSizeInPages = 10;
+  builder.addMemory64(kMemSizeInPages, kMemSizeInPages);
+  const kSegmentSize = 1024;
+  // Build a data segment with values [0, kSegmentSize-1].
+  const segment = Array.from({length: kSegmentSize}, (_, idx) => idx)
+  builder.addPassiveDataSegment(segment);
+  builder.exportMemoryAs('memory');
+
+  builder.addFunction('fill', makeSig([kWasmI32, kWasmI64], []))
+      .addBody([
+        kExprI64Const, 15,                  // i64.const 15
+        kExprLocalGet, 0,                   // local.get 0 (value)
+        kExprLocalGet, 1,                   // local.get 1 (size)
+        kNumericPrefix, kExprMemoryFill, 0  // memory.fill mem=0
+      ])
+      .exportFunc();
+
+  builder.addFunction('init', makeSig([kWasmI32, kWasmI32], []))
+      .addBody([
+        kExprI64Const, 5,                      // i64.const 5
+        kExprLocalGet, 0,                      // local.get 0 (offset)
+        kExprLocalGet, 1,                      // local.get 1 (size)
+        kNumericPrefix, kExprMemoryInit, 0, 0  // memory.init seg=0 mem=0
+      ])
+      .exportFunc();
+
+  let instance = builder.instantiate();
+  let fill = instance.exports.fill;
+  let init = instance.exports.init;
+  // {memory(offset,size)} extracts the memory at [offset, offset+size)] into an
+  // Array.
+  let memory = (offset, size) => Array.from(new Uint8Array(
+      instance.exports.memory.buffer.slice(offset, offset + size)));
+
+  // Init memory[5..7] with [10..12].
+  init(10, 3);
+  assertEquals([0, 0, 10, 11, 12, 0, 0], memory(3, 7));
+
+  // Fill memory[15..17] with 3s.
+  fill(3, 3n);
+  assertEquals([0, 3, 3, 3, 0], memory(14, 5));
+})();
+
 (function TestMemory64SharedBasic() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
@@ -397,14 +437,8 @@ function allowOOM(fn) {
 
 (function TestMemory64SharedBetweenWorkers() {
   print(arguments.callee.name);
-  // Generate a shared memory64 by instantiating an module that exports one.
-  // TODO(clemensb): Use the proper API once that's decided.
-  let shared_mem64 = (function() {
-    let builder = new WasmModuleBuilder();
-    builder.addMemory64(1, 10, true);
-    builder.exportMemoryAs('memory');
-    return builder.instantiate().exports.memory;
-  })();
+  let shared_mem64 = new WebAssembly.Memory(
+      {initial: 1, maximum: 10, shared: true, index: 'i64'});
 
   let builder = new WasmModuleBuilder();
   builder.addImportedMemory('imp', 'mem', 1, 10, true, true);
@@ -447,8 +481,9 @@ function allowOOM(fn) {
       }
 
       function workerAssertEquals(expected, actual, message) {
-        if (expected != actual)
+        if (expected != actual) {
           postMessage(`Check failed (${message}): ${expected} != ${actual}`);
+        }
       }
 
       const kOffset1 = 47n;
@@ -521,4 +556,107 @@ function allowOOM(fn) {
   let load = instance.exports.load;
 
   assertTraps(kTrapMemOutOfBounds, () => load(0n));
+})();
+
+(function TestImportMemory64() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory64(1, 1);
+  builder1.exportMemoryAs('mem64');
+  const instance1 = builder1.instantiate();
+  const {mem64} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory(
+      'imp', 'mem', 1, 1, /* shared */ false, /* memory64 */ true);
+  builder2.instantiate({imp: {mem: mem64}});
+})();
+
+(function TestImportMemory64AsMemory32() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory64(1, 1);
+  builder1.exportMemoryAs('mem64');
+  const instance1 = builder1.instantiate();
+  const {mem64} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory('imp', 'mem');
+  assertThrows(
+      () => builder2.instantiate({imp: {mem: mem64}}), WebAssembly.LinkError,
+      'WebAssembly.Instance(): cannot import memory64 as memory32');
+})();
+
+(function TestImportMemory32AsMemory64() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory(1, 1);
+  builder1.exportMemoryAs('mem32');
+  const instance1 = builder1.instantiate();
+  const {mem32} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory(
+      'imp', 'mem', 1, 1, /* shared */ false, /* memory64 */ true);
+  assertThrows(
+      () => builder2.instantiate({imp: {mem: mem32}}), WebAssembly.LinkError,
+      'WebAssembly.Instance(): cannot import memory32 as memory64');
+})();
+
+function InstantiatingWorkerCode() {
+  function workerAssert(condition, message) {
+    if (!condition) postMessage(`Check failed: ${message}`);
+  }
+
+  onmessage = function([mem, module]) {
+    workerAssert(mem instanceof WebAssembly.Memory, 'Wasm memory');
+    workerAssert(mem.buffer instanceof SharedArrayBuffer, 'SAB');
+    try {
+      new WebAssembly.Instance(module, {imp: {mem: mem}});
+      postMessage('Instantiation succeeded');
+    } catch (e) {
+      postMessage(`Exception: ${e}`);
+    }
+  };
+}
+
+(function TestImportMemory64AsMemory32InWorker() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory64(1, 1, /* shared */ true);
+  builder1.exportMemoryAs('mem64');
+  const instance1 = builder1.instantiate();
+  const {mem64} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory('imp', 'mem');
+  let module2 = builder2.toModule();
+
+  let worker = new Worker(InstantiatingWorkerCode, {type: 'function'});
+  worker.postMessage([mem64, module2]);
+  assertEquals(
+      'Exception: LinkError: WebAssembly.Instance(): ' +
+          'cannot import memory64 as memory32',
+      worker.getMessage());
+})();
+
+(function TestImportMemory32AsMemory64InWorker() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory(1, 1, /* shared */ true);
+  builder1.exportMemoryAs('mem32');
+  const instance1 = builder1.instantiate();
+  const {mem32} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory(
+      'imp', 'mem', 1, 1, /* shared */ false, /* memory64 */ true);
+  let module2 = builder2.toModule();
+
+  let worker = new Worker(InstantiatingWorkerCode, {type: 'function'});
+  worker.postMessage([mem32, module2]);
+  assertEquals(
+      'Exception: LinkError: WebAssembly.Instance(): ' +
+          'cannot import memory32 as memory64',
+      worker.getMessage());
 })();

@@ -42,10 +42,10 @@ void StaticCallInterfaceDescriptor<DerivedDescriptor>::
     VerifyArgumentRegisterCount(CallInterfaceDescriptorData* data,
                                 int nof_expected_args) {
   RegList allocatable_regs = data->allocatable_registers();
-  if (nof_expected_args >= 1) DCHECK(allocatable_regs.has(arg_reg_1));
-  if (nof_expected_args >= 2) DCHECK(allocatable_regs.has(arg_reg_2));
-  if (nof_expected_args >= 3) DCHECK(allocatable_regs.has(arg_reg_3));
-  if (nof_expected_args >= 4) DCHECK(allocatable_regs.has(arg_reg_4));
+  if (nof_expected_args >= 1) DCHECK(allocatable_regs.has(kCArgRegs[0]));
+  if (nof_expected_args >= 2) DCHECK(allocatable_regs.has(kCArgRegs[1]));
+  if (nof_expected_args >= 3) DCHECK(allocatable_regs.has(kCArgRegs[2]));
+  if (nof_expected_args >= 4) DCHECK(allocatable_regs.has(kCArgRegs[3]));
   // Additional arguments are passed on the stack.
 }
 #endif  // DEBUG
@@ -62,12 +62,12 @@ constexpr auto WriteBarrierDescriptor::registers() {
 #ifdef V8_IS_TSAN
 // static
 constexpr auto TSANStoreDescriptor::registers() {
-  return RegisterArray(arg_reg_1, arg_reg_2, kReturnRegister0);
+  return RegisterArray(kCArgRegs[0], kCArgRegs[1], kReturnRegister0);
 }
 
 // static
 constexpr auto TSANLoadDescriptor::registers() {
-  return RegisterArray(arg_reg_1, kReturnRegister0);
+  return RegisterArray(kCArgRegs[0], kReturnRegister0);
 }
 #endif  // V8_IS_TSAN
 
@@ -164,6 +164,11 @@ constexpr Register MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::
     FeedbackVectorRegister() {
   return r9;
 }
+// static
+constexpr Register
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::TemporaryRegister() {
+  return r11;
+}
 
 // static
 constexpr Register TypeConversionDescriptor::ArgumentRegister() { return rax; }
@@ -215,6 +220,14 @@ constexpr auto CallFunctionTemplateDescriptor::registers() {
   // rdx: the function template info
   // rcx: number of arguments (on the stack)
   return RegisterArray(rdx, rcx);
+}
+
+// static
+constexpr auto CallFunctionTemplateGenericDescriptor::registers() {
+  // rdx: the function template info
+  // rcx: number of arguments (on the stack)
+  // rdi: topmost script-having context
+  return RegisterArray(rdx, rcx, rdi);
 }
 
 // static
@@ -333,6 +346,11 @@ constexpr Register CallApiCallbackGenericDescriptor::CallHandlerInfoRegister() {
   return rbx;
 }
 // static
+constexpr Register
+CallApiCallbackGenericDescriptor::TopmostScriptHavingContextRegister() {
+  return rdx;
+}
+// static
 constexpr Register CallApiCallbackGenericDescriptor::HolderRegister() {
   return r8;
 }
@@ -362,6 +380,12 @@ constexpr auto InterpreterPushArgsThenConstructDescriptor::registers() {
 }
 
 // static
+constexpr auto ConstructForwardAllArgsDescriptor::registers() {
+  return RegisterArray(rdi,   // constructor to call
+                       rdx);  // new target
+}
+
+// static
 constexpr auto ResumeGeneratorDescriptor::registers() {
   return RegisterArray(
       rax,   // the value to pass to the generator
@@ -370,10 +394,10 @@ constexpr auto ResumeGeneratorDescriptor::registers() {
 
 // static
 constexpr auto RunMicrotasksEntryDescriptor::registers() {
-  return RegisterArray(arg_reg_1, arg_reg_2);
+  return RegisterArray(kCArgRegs[0], kCArgRegs[1]);
 }
 
-constexpr auto WasmNewJSToWasmWrapperDescriptor::registers() {
+constexpr auto WasmJSToWasmWrapperDescriptor::registers() {
   // Arbitrarily picked register.
   return RegisterArray(rdi);
 }

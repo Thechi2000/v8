@@ -29,30 +29,31 @@ enum class SfiState {
   PreparedForDebugExecution,
 };
 
-void ExpectSharedFunctionInfoState(Isolate* isolate, SharedFunctionInfo sfi,
+void ExpectSharedFunctionInfoState(Isolate* isolate,
+                                   Tagged<SharedFunctionInfo> sfi,
                                    SfiState expectedState) {
-  Object function_data = sfi->function_data(kAcquireLoad);
-  HeapObject script = sfi->script(kAcquireLoad);
+  Tagged<Object> function_data = sfi->GetData(isolate);
+  Tagged<HeapObject> script = sfi->script(kAcquireLoad);
   switch (expectedState) {
     case SfiState::Compiled:
-      CHECK(function_data.IsBytecodeArray() ||
-            (function_data.IsCode() &&
+      CHECK(IsBytecodeArray(function_data) ||
+            (IsCode(function_data) &&
              Code::cast(function_data)->kind() == CodeKind::BASELINE));
-      CHECK(script.IsScript());
+      CHECK(IsScript(script));
       break;
     case SfiState::DebugInfo: {
-      CHECK(function_data.IsBytecodeArray() ||
-            (function_data.IsCode() &&
+      CHECK(IsBytecodeArray(function_data) ||
+            (IsCode(function_data) &&
              Code::cast(function_data)->kind() == CodeKind::BASELINE));
-      CHECK(script.IsScript());
-      DebugInfo debug_info = sfi->GetDebugInfo(isolate);
+      CHECK(IsScript(script));
+      Tagged<DebugInfo> debug_info = sfi->GetDebugInfo(isolate);
       CHECK(!debug_info->HasInstrumentedBytecodeArray());
       break;
     }
     case SfiState::PreparedForDebugExecution: {
-      CHECK(function_data.IsBytecodeArray());
-      CHECK(script.IsScript());
-      DebugInfo debug_info = sfi->GetDebugInfo(isolate);
+      CHECK(IsBytecodeArray(function_data));
+      CHECK(IsScript(script));
+      Tagged<DebugInfo> debug_info = sfi->GetDebugInfo(isolate);
       CHECK(debug_info->HasInstrumentedBytecodeArray());
       break;
     }
@@ -177,7 +178,7 @@ TEST(TestConcurrentSharedFunctionInfo) {
 
     // PreparedForDebugExecution ==> DebugInfo
     {
-      DebugInfo debug_info = test_sfi->GetDebugInfo(isolate);
+      Tagged<DebugInfo> debug_info = test_sfi->GetDebugInfo(isolate);
       debug_info->ClearBreakInfo(isolate);
       ExpectSharedFunctionInfoState(isolate, *test_sfi, SfiState::DebugInfo);
     }

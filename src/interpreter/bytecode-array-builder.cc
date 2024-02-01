@@ -94,7 +94,7 @@ Handle<BytecodeArray> BytecodeArrayBuilder::ToBytecodeArray(IsolateT* isolate) {
     register_count = register_optimizer_->maxiumum_register_index() + 1;
   }
 
-  Handle<ByteArray> handler_table =
+  Handle<TrustedByteArray> handler_table =
       handler_table_builder()->ToHandlerTable(isolate);
   return bytecode_array_writer_.ToBytecodeArray(
       isolate, register_count, parameter_count(), handler_table);
@@ -108,7 +108,7 @@ template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
         LocalIsolate* isolate);
 
 #ifdef DEBUG
-int BytecodeArrayBuilder::CheckBytecodeMatches(BytecodeArray bytecode) {
+int BytecodeArrayBuilder::CheckBytecodeMatches(Tagged<BytecodeArray> bytecode) {
   DisallowGarbageCollection no_gc;
   return bytecode_array_writer_.CheckBytecodeMatches(bytecode);
 }
@@ -438,7 +438,7 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::BinaryOperation(Token::Value op,
 }
 
 BytecodeArrayBuilder& BytecodeArrayBuilder::BinaryOperationSmiLiteral(
-    Token::Value op, Smi literal, int feedback_slot) {
+    Token::Value op, Tagged<Smi> literal, int feedback_slot) {
   switch (op) {
     case Token::Value::ADD:
       OutputAddSmi(literal.value(), feedback_slot);
@@ -614,7 +614,7 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LoadConstantPoolEntry(
   return *this;
 }
 
-BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLiteral(Smi smi) {
+BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLiteral(Tagged<Smi> smi) {
   int32_t raw_smi = smi.value();
   if (raw_smi == 0) {
     OutputLdaZero();
@@ -1075,8 +1075,8 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::ToObject(Register out) {
   return *this;
 }
 
-BytecodeArrayBuilder& BytecodeArrayBuilder::ToName(Register out) {
-  OutputToName(out);
+BytecodeArrayBuilder& BytecodeArrayBuilder::ToName() {
+  OutputToName();
   return *this;
 }
 
@@ -1490,6 +1490,12 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::ConstructWithSpread(
     Register constructor, RegisterList args, int feedback_slot_id) {
   OutputConstructWithSpread(constructor, args, args.register_count(),
                             feedback_slot_id);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::ConstructForwardAllArgs(
+    Register constructor, int feedback_slot_id) {
+  OutputConstructForwardAllArgs(constructor, feedback_slot_id);
   return *this;
 }
 

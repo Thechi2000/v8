@@ -5,14 +5,150 @@
 #include "src/compiler/turboshaft/late-load-elimination-reducer.h"
 
 #include "src/compiler/js-heap-broker.h"
+#include "src/compiler/turboshaft/opmasks.h"
+#include "src/compiler/turboshaft/phase.h"
+#include "src/compiler/turboshaft/representations.h"
 #include "src/objects/code-inl.h"
 
 namespace v8::internal::compiler::turboshaft {
+
+void LateLoadEliminationAnalyzer::Run() {
+  LoopFinder loop_finder(phase_zone_, &graph_);
+  AnalyzerIterator iterator(phase_zone_, graph_, loop_finder);
+
+  bool compute_start_snapshot = true;
+  while (iterator.HasNext()) {
+    const Block* block = iterator.Next();
+
+    ProcessBlock(*block, compute_start_snapshot);
+    compute_start_snapshot = true;
+
+    // Consider re-processing for loops.
+    if (const GotoOp* last = block->LastOperation(graph_).TryCast<GotoOp>()) {
+      if (last->destination->IsLoop() &&
+          last->destination->LastPredecessor() == block) {
+        const Block* loop_header = last->destination;
+        // {block} is the backedge of a loop. We recompute the loop header's
+        // initial snapshots, and if they differ from its original snapshot,
+        // then we revisit the loop.
+        if (BeginBlock<true>(loop_header)) {
+          // We set the snapshot of the loop's 1st predecessor to the newly
+          // computed snapshot. It's not quite correct, but this predecessor
+          // is guaranteed to end with a Goto, and we are now visiting the
+          // loop, which means that we don't really care about this
+          // predecessor anymore.
+          // The reason for saving this snapshot is to prevent infinite
+          // looping, since the next time we reach this point, the backedge
+          // snapshot could still invalidate things from the forward edge
+          // snapshot. By restricting the forward edge snapshot, we prevent
+          // this.
+          const Block* loop_1st_pred =
+              loop_header->LastPredecessor()->NeighboringPredecessor();
+          FinishBlock(loop_1st_pred);
+          // And we start a new fresh snapshot from this predecessor.
+          auto pred_snapshots =
+              block_to_snapshot_mapping_[loop_1st_pred->index()];
+          non_aliasing_objects_.StartNewSnapshot(
+              pred_snapshots->alias_snapshot);
+          object_maps_.StartNewSnapshot(pred_snapshots->maps_snapshot);
+          memory_.StartNewSnapshot(pred_snapshots->memory_snapshot);
+
+          iterator.MarkLoopForRevisit();
+          compute_start_snapshot = false;
+        } else {
+          SealAndDiscard();
+        }
+      }
+    }
+  }
+
+  FixedOpIndexSidetable<SaturatedUint8> total_use_counts(graph_.op_id_count(),
+                                                         phase_zone_, &graph_);
+  // Incorpoare load elimination decisions into int32-truncation data.
+  for (auto it = int32_truncated_loads_.begin();
+       it != int32_truncated_loads_.end();) {
+    OpIndex load_idx = it->first;
+    auto& truncations = it->second;
+    Replacement replacement = GetReplacement(load_idx);
+    // We distinguish a few different cases.
+    if (!replacement.IsLoadElimination()) {
+      // Case 1: This load is not going to be eliminated.
+      total_use_counts[load_idx] += graph_.Get(load_idx).saturated_use_count;
+      // Check if all uses we know so far, are all truncating uses.
+      if (total_use_counts[load_idx].IsSaturated() ||
+          total_use_counts[load_idx].Get() > truncations.size()) {
+        // We do know that we cannot int32-truncate this load, so eliminate
+        // it from the candidates.
+        int32_truncated_loads_.erase(it++);
+        continue;
+      }
+      // Otherwise, keep this candidate.
+      ++it;
+      continue;
+    } else {
+      OpIndex replaced_by_idx = replacement.replacement();
+      const Operation& replaced_by = graph_.Get(replaced_by_idx);
+      if (!replaced_by.Is<LoadOp>()) {
+        // Case 2: This load is replaced by a non-load (e.g. by the value
+        // stored that the load would read). This load cannot be truncated
+        // (because we are not going to have a load anymore), so eliminate it
+        // from the candidates.
+        int32_truncated_loads_.erase(it++);
+        continue;
+      } else {
+        // Case 3: This load is replaced by another load, so the truncating
+        // and the total uses have to be merged into the replacing use.
+        auto it2 = int32_truncated_loads_.find(replaced_by_idx);
+        if (it2 == int32_truncated_loads_.end()) {
+          // Case 3a: The replacing load is not tracked, so we assume it has
+          // non-truncating uses, so we can also ignore this load.
+          int32_truncated_loads_.erase(it++);
+          continue;
+        } else {
+          // Case 3b: The replacing load might have be a candidate for int32
+          // truncation, we merge the information into that load.
+          total_use_counts[replaced_by_idx] +=
+              graph_.Get(load_idx).saturated_use_count;
+          it2->second.insert(truncations.begin(), truncations.end());
+          int32_truncated_loads_.erase(it++);
+          continue;
+        }
+      }
+    }
+  }
+
+  // We have prepared everything and now extract the necessary replacement
+  // information.
+  for (const auto& [load_idx, int32_truncations] : int32_truncated_loads_) {
+    if (int32_truncations.empty()) continue;
+    if (!total_use_counts[load_idx].IsSaturated() &&
+        total_use_counts[load_idx].Get() == int32_truncations.size()) {
+      // All uses of this load are int32-truncating loads, so we replace them.
+      DCHECK(GetReplacement(load_idx).IsNone() ||
+             GetReplacement(load_idx).IsTaggedLoadToInt32Load());
+      for (const auto [change_idx, bitcast_idx] : int32_truncations) {
+        replacements_[change_idx] =
+            Replacement::Int32TruncationElimination(load_idx);
+        replacements_[bitcast_idx] = Replacement::TaggedBitcastElimination();
+        replacements_[load_idx] = Replacement::TaggedLoadToInt32Load();
+      }
+    }
+  }
+}
 
 void LateLoadEliminationAnalyzer::ProcessBlock(const Block& block,
                                                bool compute_start_snapshot) {
   if (compute_start_snapshot) {
     BeginBlock(&block);
+  }
+  if (block.IsLoop() && BackedgeHasSnapshot(block)) {
+    // Update the associated snapshot for the forward edge with the merged
+    // snapshot information from the forward- and backward edge.
+    // This will make sure that when evaluating whether a loop needs to be
+    // revisited, the inner loop compares the merged state with the backedge
+    // preventing us from exponential revisits for loops where the backedge
+    // invalidates loads which are eliminatable on the forward edge.
+    StoreLoopSnapshotInForwardPredecessor(block);
   }
 
   for (OpIndex op_idx : graph_.OperationIndices(block)) {
@@ -33,9 +169,8 @@ void LateLoadEliminationAnalyzer::ProcessBlock(const Block& block,
         ProcessAllocate(op_idx, op.Cast<AllocateOp>());
         break;
       case Opcode::kCall:
-      case Opcode::kCallAndCatchException:
         // Invalidate state (+ maybe invalidate aliases)
-        ProcessCall(op_idx, op);
+        ProcessCall(op_idx, op.Cast<CallOp>());
         break;
       case Opcode::kPhi:
         // Invalidate aliases
@@ -45,10 +180,29 @@ void LateLoadEliminationAnalyzer::ProcessBlock(const Block& block,
         // Update known maps
         ProcessAssumeMap(op_idx, op.Cast<AssumeMapOp>());
         break;
-      case Opcode::kLoadException:
+      case Opcode::kChange:
+        // Check for tagged -> word32 load replacement
+        ProcessChange(op_idx, op.Cast<ChangeOp>());
+        break;
+      case Opcode::kCatchBlockBegin:
       case Opcode::kRetain:
+      case Opcode::kDidntThrow:
+      case Opcode::kCheckException:
+      case Opcode::kAtomicRMW:
+      case Opcode::kAtomicWord32Pair:
+      case Opcode::kMemoryBarrier:
+      case Opcode::kStackCheck:
+      case Opcode::kParameter:
+      case Opcode::kDebugBreak:
+#ifdef V8_ENABLE_WEBASSEMBLY
+      case Opcode::kSimd128LaneMemory:
+      case Opcode::kGlobalSet:
+      case Opcode::kArraySet:
+      case Opcode::kStructSet:
+      case Opcode::kSetStackPointer:
+#endif  // V8_ENABLE_WEBASSEMBLY
         // We explicitely break for those operations that have can_write effects
-        // but don't actually write.
+        // but don't actually write, or cannot interfere with load elimination.
         break;
       default:
         // Operations that `can_write` should invalidate the state. All such
@@ -64,24 +218,54 @@ void LateLoadEliminationAnalyzer::ProcessBlock(const Block& block,
 
 namespace {
 
-// Returns true if replacing an operation of type {expected} by an operation of
-// type {got} is valid. (for instance, replacing a operation that returns a
-// Float64 by one that returns a Word64 is not valid)
-bool RepIsCompatible(RegisterRepresentation expected,
-                     RegisterRepresentation actual) {
-  if (expected == actual) return true;
-  if (expected == RegisterRepresentation::Tagged()) {
-    return actual == any_of(RegisterRepresentation::Word32(),
-                            RegisterRepresentation::Word64());
+// Returns true if replacing a Load with a RegisterRepresentation
+// {expected_reg_rep} and MemoryRepresentation of {expected_loaded_repr} with an
+// operation with RegisterRepresentation {actual} is valid. For instance,
+// replacing an operation that returns a Float64 by one that returns a Word64 is
+// not valid. Similarly, replacing a Tagged with an untagged value is probably
+// not valid because of the GC.
+bool RepIsCompatible(RegisterRepresentation actual,
+                     RegisterRepresentation expected_reg_repr,
+                     MemoryRepresentation expected_loaded_repr) {
+  if (expected_loaded_repr.SizeInBytes() !=
+      MemoryRepresentation::FromRegisterRepresentation(actual, true)
+          .SizeInBytes()) {
+    // The replacement was truncated when being stored or should be truncated
+    // (or sign-extended) during the load. Since we don't have enough
+    // truncations operators in Turboshaft (eg, we don't have Int32 to Int8
+    // truncation), we just prevent load elimination in this case.
+
+    // TODO(dmercadier): add more truncations operators to Turboshaft, and
+    // insert the correct truncation when there is a mismatch between
+    // {expected_loaded_repr} and {actual}.
+
+    return false;
   }
-  return false;
+
+  return expected_reg_repr == actual;
 }
 
 }  // namespace
 
 void LateLoadEliminationAnalyzer::ProcessLoad(OpIndex op_idx,
                                               const LoadOp& load) {
-  if (OpIndex existing = memory_content_.Find(load); existing.valid()) {
+  if (!load.kind.load_eliminable) {
+    // We don't optimize Loads/Stores to addresses that could be accessed
+    // non-canonically.
+    return;
+  }
+  if (load.kind.is_atomic) {
+    // Atomic loads cannot be eliminated away, but potential concurrency
+    // invalidates known stored values.
+    memory_.Invalidate(load.base(), load.index(), load.offset);
+    return;
+  }
+
+  // We need to insert the load into the truncation mapping as a key, because
+  // all loads need to be revisited during processing.
+  int32_truncated_loads_[op_idx];
+
+  if (OpIndex existing = memory_.Find(load); existing.valid()) {
     const Operation& replacement = graph_.Get(existing);
     // We need to make sure that {load} and {replacement} have the same output
     // representation. In particular, in unreachable code, it's possible that
@@ -89,14 +273,15 @@ void LateLoadEliminationAnalyzer::ProcessLoad(OpIndex op_idx,
     // Tagged and the other one Float64).
     DCHECK_EQ(replacement.outputs_rep().size(), 1);
     DCHECK_EQ(load.outputs_rep().size(), 1);
-    if (RepIsCompatible(load.outputs_rep()[0], replacement.outputs_rep()[0])) {
-      replacements_[op_idx] = existing;
+    if (RepIsCompatible(replacement.outputs_rep()[0], load.outputs_rep()[0],
+                        load.loaded_rep)) {
+      replacements_[op_idx] = Replacement::LoadElimination(existing);
       return;
     }
   }
   // Reset the replacement of {op_idx} to Invalid, in case a previous visit of a
   // loop has set it to something else.
-  replacements_[op_idx] = OpIndex::Invalid();
+  replacements_[op_idx] = Replacement::None();
 
   // TODO(dmercadier): if we precisely track maps, then we could know from the
   // map what we are loading in some cases. For instance, if the elements_kind
@@ -111,16 +296,31 @@ void LateLoadEliminationAnalyzer::ProcessLoad(OpIndex op_idx,
     return;
   }
 
-  memory_content_.Insert(load, op_idx);
+  memory_.Insert(load, op_idx);
 }
 
 void LateLoadEliminationAnalyzer::ProcessStore(OpIndex op_idx,
                                                const StoreOp& store) {
+  // If we have a raw base and we allow those to be inner pointers, we can
+  // overwrite arbitrary values and need to invalidate anything that is
+  // potentially aliasing.
+  const bool invalidate_maybe_aliasing =
+      !store.kind.tagged_base &&
+      raw_base_assumption_ == RawBaseAssumption::kMaybeInnerPointer;
+
+  if (invalidate_maybe_aliasing) memory_.InvalidateMaybeAliasing();
+
+  if (!store.kind.load_eliminable) {
+    // We don't optimize Loads/Stores to addresses that could be accessed
+    // non-canonically.
+    return;
+  }
+
   OpIndex value = store.value();
 
-  // Updating the known stored values
-  memory_content_.Invalidate(store);
-  memory_content_.Insert(store);
+  // Updating the known stored values.
+  if (!invalidate_maybe_aliasing) memory_.Invalidate(store);
+  memory_.Insert(store);
 
   // Updating aliases if the value stored was known as non-aliasing.
   if (non_aliasing_objects_.HasKeyFor(value)) {
@@ -128,72 +328,50 @@ void LateLoadEliminationAnalyzer::ProcessStore(OpIndex op_idx,
   }
 }
 
-namespace {
-
-// If {target} is a HeapObject representing a builtin, return that builtin's ID.
-base::Optional<Builtin> TryGetBuiltinId(ConstantOp* target,
-                                        JSHeapBroker* broker) {
-  if (!target) return base::nullopt;
-  if (target->kind != ConstantOp::Kind::kHeapObject) return base::nullopt;
-  HeapObjectRef ref = MakeRef(broker, target->handle());
-  if (ref.IsCode()) {
-    CodeRef code = ref.AsCode();
-    if (code.object()->is_builtin()) {
-      return code.object()->builtin_id();
-    }
-  }
-  return base::nullopt;
-}
-
-}  // namespace
-
 // Since we only loosely keep track of what can or can't alias, we assume that
 // anything that was guaranteed to not alias with anything (because it's in
 // {non_aliasing_objects_}) can alias with anything when coming back from the
 // call if it was an argument of the call.
 void LateLoadEliminationAnalyzer::ProcessCall(OpIndex op_idx,
-                                              const Operation& op) {
-  DCHECK(op.Is<CallOp>() || op.Is<CallAndCatchExceptionOp>());
-
-  if (const CallOp* call = op.TryCast<CallOp>()) {
-    // Some builtins do not create aliases and do not invalidate existing
-    // memory, and some even return fresh objects. For such cases, we don't
-    // invalidate the state, and record the non-alias if any.
-    if (!call->Effects().can_write()) {
+                                              const CallOp& op) {
+  const Operation& callee = graph_.Get(op.callee());
+#ifdef DEBUG
+  if (const ConstantOp* external_constant =
+          callee.template TryCast<Opmask::kExternalConstant>()) {
+    if (external_constant->external_reference() ==
+        ExternalReference::check_object_type()) {
       return;
     }
-    if (auto builtin_id = TryGetBuiltinId(
-            graph_.Get(call->callee()).TryCast<ConstantOp>(), broker_)) {
-      switch (*builtin_id) {
-        // TODO(dmercadier): extend this list.
-        case Builtin::kCopyFastSmiOrObjectElements:
-          // This function just replaces the Elements array of an object.
-          // It doesn't invalidate any alias or any other memory than this
-          // Elements array.
-          memory_content_.Invalidate(call->arguments()[0], OpIndex::Invalid(),
-                                     JSObject::kElementsOffset);
-          return;
-        case Builtin::kCEntry_Return1_ArgvOnStack_NoBuiltinExit: {
-          DCHECK_GE(op.input_count, 3);
-          if (const ConstantOp* real_callee =
-                  graph_.Get(op.input(2)).TryCast<ConstantOp>();
-              real_callee != nullptr &&
-              real_callee->kind == ConstantOp::Kind::kExternal &&
-              real_callee->external_reference() ==
-                  ExternalReference::Create(
-                      Runtime::kHandleNoHeapWritesInterrupts)) {
-            // This is a stack check that cannot write heap memory.
-            return;
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    }
-    // Not a builtin call, or not a builtin that we know doesn't invalidate
-    // memory.
   }
+#endif
+
+  // Some builtins do not create aliases and do not invalidate existing
+  // memory, and some even return fresh objects. For such cases, we don't
+  // invalidate the state, and record the non-alias if any.
+  if (!op.Effects().can_write()) return;
+  // Note: This does not detect wasm stack checks, but those are detected by the
+  // check just above.
+  if (op.IsStackCheck(graph_, broker_, StackCheckKind::kJSIterationBody)) {
+    // This is a stack check that cannot write heap memory.
+    return;
+  }
+  if (auto builtin_id =
+          TryGetBuiltinId(callee.TryCast<ConstantOp>(), broker_)) {
+    switch (*builtin_id) {
+      // TODO(dmercadier): extend this list.
+      case Builtin::kCopyFastSmiOrObjectElements:
+        // This function just replaces the Elements array of an object.
+        // It doesn't invalidate any alias or any other memory than this
+        // Elements array.
+        memory_.Invalidate(op.arguments()[0], OpIndex::Invalid(),
+                           JSObject::kElementsOffset);
+        return;
+      default:
+        break;
+    }
+  }
+  // Not a builtin call, or not a builtin that we know doesn't invalidate
+  // memory.
 
   for (OpIndex input : op.inputs()) {
     InvalidateIfAlias(input);
@@ -201,7 +379,7 @@ void LateLoadEliminationAnalyzer::ProcessCall(OpIndex op_idx,
 
   // The call could modify arbitrary memory, so we invalidate every
   // potentially-aliasing object.
-  memory_content_.InvalidateMaybeAliasing();
+  memory_.InvalidateMaybeAliasing();
 }
 
 void LateLoadEliminationAnalyzer::InvalidateIfAlias(OpIndex op_idx) {
@@ -211,6 +389,18 @@ void LateLoadEliminationAnalyzer::InvalidateIfAlias(OpIndex op_idx) {
     // could create aliases, so we have to consider going forward that this
     // object could actually have aliases.
     non_aliasing_objects_.Set(*key, false);
+  }
+  if (const FrameStateOp* frame_state =
+          graph_.Get(op_idx).TryCast<FrameStateOp>()) {
+    // We also mark the arguments of FrameState passed on to calls as
+    // potentially-aliasing, because they could be accessed by the caller with a
+    // function_name.arguments[index].
+    // TODO(dmercadier): this is more conservative that we'd like, since only a
+    // few functions use .arguments. Using a native-context-specific protector
+    // for .arguments might allow to avoid invalidating frame states' content.
+    for (OpIndex input : frame_state->inputs()) {
+      InvalidateIfAlias(input);
+    }
   }
 }
 
@@ -238,16 +428,77 @@ void LateLoadEliminationAnalyzer::ProcessAssumeMap(
                                          ComputeMinMaxHash(assume_map.maps)));
 }
 
+bool IsInt32TruncatedLoadPattern(const Graph& graph, OpIndex change_idx,
+                                 const ChangeOp& change, OpIndex* bitcast_idx,
+                                 OpIndex* load_idx) {
+  DCHECK_EQ(change_idx, graph.Index(change));
+
+  if (!change.Is<Opmask::kTruncateWord64ToWord32>()) return false;
+  const TaggedBitcastOp* bitcast =
+      graph.Get(change.input())
+          .TryCast<Opmask::kBitcastTaggedToWordPtrForTagAndSmiBits>();
+  if (bitcast == nullptr) return false;
+  // We require that the bitcast has no other uses. This could be slightly
+  // generalized by allowing multiple int32-truncating uses, but that is more
+  // expensive to detect and it is very unlikely that we ever see such a case
+  // (e.g. because of GVN).
+  if (!bitcast->saturated_use_count.IsOne()) return false;
+  const LoadOp* load = graph.Get(bitcast->input()).TryCast<LoadOp>();
+  if (load == nullptr) return false;
+  if (load->loaded_rep.SizeInBytesLog2() !=
+      MemoryRepresentation::Int32().SizeInBytesLog2()) {
+    return false;
+  }
+  if (bitcast_idx) *bitcast_idx = change.input();
+  if (load_idx) *load_idx = bitcast->input();
+  return true;
+}
+
+void LateLoadEliminationAnalyzer::ProcessChange(OpIndex op_idx,
+                                                const ChangeOp& change) {
+  // We look for this special case:
+  // TruncateWord64ToWord32(BitcastTaggedToWordPtrForTagAndSmiBits(Load(x))) =>
+  // Load(x)
+  // where the new Load uses Int32 rather than the tagged representation.
+  OpIndex bitcast_idx, load_idx;
+  if (IsInt32TruncatedLoadPattern(graph_, op_idx, change, &bitcast_idx,
+                                  &load_idx)) {
+    int32_truncated_loads_[load_idx][op_idx] = bitcast_idx;
+  }
+}
+
 void LateLoadEliminationAnalyzer::FinishBlock(const Block* block) {
-  block_to_snapshot_mapping_[block->index()] =
-      std::tuple{non_aliasing_objects_.Seal(), object_maps_.Seal(),
-                 memory_content_.Seal()};
+  block_to_snapshot_mapping_[block->index()] = Snapshot{
+      non_aliasing_objects_.Seal(), object_maps_.Seal(), memory_.Seal()};
 }
 
 void LateLoadEliminationAnalyzer::SealAndDiscard() {
   non_aliasing_objects_.Seal();
   object_maps_.Seal();
-  memory_content_.Seal();
+  memory_.Seal();
+}
+
+void LateLoadEliminationAnalyzer::StoreLoopSnapshotInForwardPredecessor(
+    const Block& loop_header) {
+  auto non_aliasing_snapshot = non_aliasing_objects_.Seal();
+  auto object_maps_snapshot = object_maps_.Seal();
+  auto memory_snapshot = memory_.Seal();
+
+  block_to_snapshot_mapping_
+      [loop_header.LastPredecessor()->NeighboringPredecessor()->index()] =
+          Snapshot{non_aliasing_snapshot, object_maps_snapshot,
+                   memory_snapshot};
+
+  non_aliasing_objects_.StartNewSnapshot(non_aliasing_snapshot);
+  object_maps_.StartNewSnapshot(object_maps_snapshot);
+  memory_.StartNewSnapshot(memory_snapshot);
+}
+
+bool LateLoadEliminationAnalyzer::BackedgeHasSnapshot(
+    const Block& loop_header) const {
+  DCHECK(loop_header.IsLoop());
+  return block_to_snapshot_mapping_[loop_header.LastPredecessor()->index()]
+      .has_value();
 }
 
 template <bool for_loop_revisit>
@@ -263,8 +514,7 @@ bool LateLoadEliminationAnalyzer::BeginBlock(const Block* block) {
     predecessor_alias_snapshots_.clear();
     predecessor_maps_snapshots_.clear();
     predecessor_memory_snapshots_.clear();
-    for (const Block* p = block->LastPredecessor(); p != nullptr;
-         p = p->NeighboringPredecessor()) {
+    for (const Block* p : block->PredecessorsIterable()) {
       auto pred_snapshots = block_to_snapshot_mapping_[p->index()];
       // When we visit the loop for the first time, the loop header hasn't
       // been visited yet, so we ignore it.
@@ -280,14 +530,14 @@ bool LateLoadEliminationAnalyzer::BeginBlock(const Block* block) {
       // is, then it's fine: if the backedge of the outer-loop was more
       // restrictive than its forward incoming edge, then the forward incoming
       // edge of the inner loop should reflect this restriction.
-      predecessor_alias_snapshots_.push_back(std::get<0>(*pred_snapshots));
-      predecessor_memory_snapshots_.push_back(std::get<2>(*pred_snapshots));
+      predecessor_alias_snapshots_.push_back(pred_snapshots->alias_snapshot);
+      predecessor_memory_snapshots_.push_back(pred_snapshots->memory_snapshot);
       if (p->NeighboringPredecessor() != nullptr || !block->IsLoop() ||
           block->LastPredecessor() != p) {
         // We only add a MapSnapshot predecessor for non-backedge predecessor.
         // This is because maps coming from inside of the loop may be wrong
         // until a specific check has been executed.
-        predecessor_maps_snapshots_.push_back(std::get<1>(*pred_snapshots));
+        predecessor_maps_snapshots_.push_back(pred_snapshots->maps_snapshot);
       }
     }
   }
@@ -330,12 +580,12 @@ bool LateLoadEliminationAnalyzer::BeginBlock(const Block* block) {
   object_maps_.StartNewSnapshot(base::VectorOf(predecessor_maps_snapshots_),
                                 merge_maps);
 
-  // Merging for {memory_content_} means setting values to Invalid unless all
+  // Merging for {memory_} means setting values to Invalid unless all
   // predecessors have the same value.
   // TODO(dmercadier): we could insert of Phis during the pass to merge existing
   // information. This is a bit hard, because we are currently in an analyzer
   // rather than a reducer. Still, we could "prepare" the insertion now and then
-  // really insert them during the Reduce phase of the OptimizationPhase.
+  // really insert them during the Reduce phase of the CopyingPhase.
   auto merge_memory = [&](MemoryKey key,
                           base::Vector<const OpIndex> predecessors) -> OpIndex {
     if (for_loop_revisit && predecessors[kForwardEdgeOffset].valid() &&
@@ -347,8 +597,8 @@ bool LateLoadEliminationAnalyzer::BeginBlock(const Block* block) {
     }
     return base::all_equal(predecessors) ? predecessors[0] : OpIndex::Invalid();
   };
-  memory_content_.StartNewSnapshot(
-      base::VectorOf(predecessor_memory_snapshots_), merge_memory);
+  memory_.StartNewSnapshot(base::VectorOf(predecessor_memory_snapshots_),
+                           merge_memory);
 
   if (block->IsLoop()) return loop_needs_revisit;
   return false;

@@ -9,7 +9,6 @@
 
 #include "src/base/macros.h"
 #include "src/codegen/bailout-reason.h"
-#include "src/codegen/code-factory.h"
 #include "src/codegen/tnode.h"
 #include "src/common/globals.h"
 #include "src/common/message-template.h"
@@ -32,6 +31,7 @@
 #include "src/objects/string.h"
 #include "src/objects/swiss-name-dictionary.h"
 #include "src/objects/tagged-index.h"
+#include "src/objects/tagged.h"
 #include "src/roots/roots.h"
 #include "torque-generated/exported-macros-assembler.h"
 
@@ -50,143 +50,29 @@ class StubCache;
 
 enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
 
-#define HEAP_MUTABLE_IMMOVABLE_OBJECT_LIST(V)                                 \
-  V(ArrayIteratorProtector, array_iterator_protector, ArrayIteratorProtector) \
-  V(ArraySpeciesProtector, array_species_protector, ArraySpeciesProtector)    \
-  V(IsConcatSpreadableProtector, is_concat_spreadable_protector,              \
-    IsConcatSpreadableProtector)                                              \
-  V(MapIteratorProtector, map_iterator_protector, MapIteratorProtector)       \
-  V(NoElementsProtector, no_elements_protector, NoElementsProtector)          \
-  V(MegaDOMProtector, mega_dom_protector, MegaDOMProtector)                   \
-  V(NumberStringCache, number_string_cache, NumberStringCache)                \
-  V(NumberStringNotRegexpLikeProtector,                                       \
-    number_string_not_regexp_like_protector,                                  \
-    NumberStringNotRegexpLikeProtector)                                       \
-  V(PromiseResolveProtector, promise_resolve_protector,                       \
-    PromiseResolveProtector)                                                  \
-  V(PromiseSpeciesProtector, promise_species_protector,                       \
-    PromiseSpeciesProtector)                                                  \
-  V(PromiseThenProtector, promise_then_protector, PromiseThenProtector)       \
-  V(RegExpSpeciesProtector, regexp_species_protector, RegExpSpeciesProtector) \
-  V(SetIteratorProtector, set_iterator_protector, SetIteratorProtector)       \
-  V(StringIteratorProtector, string_iterator_protector,                       \
-    StringIteratorProtector)                                                  \
-  V(TypedArraySpeciesProtector, typed_array_species_protector,                \
-    TypedArraySpeciesProtector)
-
-#define UNIQUE_INSTANCE_TYPE_IMMUTABLE_IMMOVABLE_MAP_ADAPTER( \
-    V, rootIndexName, rootAccessorName, class_name)           \
-  V(rootIndexName, rootAccessorName, class_name##Map)
-
-#define HEAP_IMMUTABLE_IMMOVABLE_OBJECT_LIST(V)                                \
-  V(AllocationSiteWithoutWeakNextMap, allocation_site_without_weaknext_map,    \
-    AllocationSiteWithoutWeakNextMap)                                          \
-  V(AllocationSiteWithWeakNextMap, allocation_site_map, AllocationSiteMap)     \
-  V(arguments_to_string, arguments_to_string, ArgumentsToString)               \
-  V(ArrayListMap, array_list_map, ArrayListMap)                                \
-  V(Array_string, Array_string, ArrayString)                                   \
-  V(array_to_string, array_to_string, ArrayToString)                           \
-  V(BooleanMap, boolean_map, BooleanMap)                                       \
-  V(boolean_to_string, boolean_to_string, BooleanToString)                     \
-  V(class_fields_symbol, class_fields_symbol, ClassFieldsSymbol)               \
-  V(ConsOneByteStringMap, cons_one_byte_string_map, ConsOneByteStringMap)      \
-  V(ConsStringMap, cons_string_map, ConsStringMap)                             \
-  V(constructor_string, constructor_string, ConstructorString)                 \
-  V(date_to_string, date_to_string, DateToString)                              \
-  V(default_string, default_string, DefaultString)                             \
-  V(EmptyArrayList, empty_array_list, EmptyArrayList)                          \
-  V(EmptyByteArray, empty_byte_array, EmptyByteArray)                          \
-  V(EmptyFixedArray, empty_fixed_array, EmptyFixedArray)                       \
-  V(EmptyScopeInfo, empty_scope_info, EmptyScopeInfo)                          \
-  V(EmptyPropertyDictionary, empty_property_dictionary,                        \
-    EmptyPropertyDictionary)                                                   \
-  V(EmptyOrderedPropertyDictionary, empty_ordered_property_dictionary,         \
-    EmptyOrderedPropertyDictionary)                                            \
-  V(EmptySwissPropertyDictionary, empty_swiss_property_dictionary,             \
-    EmptySwissPropertyDictionary)                                              \
-  V(EmptySlowElementDictionary, empty_slow_element_dictionary,                 \
-    EmptySlowElementDictionary)                                                \
-  V(empty_string, empty_string, EmptyString)                                   \
-  V(error_to_string, error_to_string, ErrorToString)                           \
-  V(errors_string, errors_string, ErrorsString)                                \
-  V(FalseValue, false_value, False)                                            \
-  V(FixedArrayMap, fixed_array_map, FixedArrayMap)                             \
-  V(FixedCOWArrayMap, fixed_cow_array_map, FixedCOWArrayMap)                   \
-  V(Function_string, function_string, FunctionString)                          \
-  V(function_to_string, function_to_string, FunctionToString)                  \
-  V(get_string, get_string, GetString)                                         \
-  V(has_instance_symbol, has_instance_symbol, HasInstanceSymbol)               \
-  V(has_string, has_string, HasString)                                         \
-  V(Infinity_string, Infinity_string, InfinityString)                          \
-  V(is_concat_spreadable_symbol, is_concat_spreadable_symbol,                  \
-    IsConcatSpreadableSymbol)                                                  \
-  V(iterator_symbol, iterator_symbol, IteratorSymbol)                          \
-  V(keys_string, keys_string, KeysString)                                      \
-  V(length_string, length_string, LengthString)                                \
-  V(ManyClosuresCellMap, many_closures_cell_map, ManyClosuresCellMap)          \
-  V(match_symbol, match_symbol, MatchSymbol)                                   \
-  V(megamorphic_symbol, megamorphic_symbol, MegamorphicSymbol)                 \
-  V(mega_dom_symbol, mega_dom_symbol, MegaDOMSymbol)                           \
-  V(message_string, message_string, MessageString)                             \
-  V(minus_Infinity_string, minus_Infinity_string, MinusInfinityString)         \
-  V(MinusZeroValue, minus_zero_value, MinusZero)                               \
-  V(name_string, name_string, NameString)                                      \
-  V(NanValue, nan_value, Nan)                                                  \
-  V(NaN_string, NaN_string, NaNString)                                         \
-  V(next_string, next_string, NextString)                                      \
-  V(NoClosuresCellMap, no_closures_cell_map, NoClosuresCellMap)                \
-  V(null_to_string, null_to_string, NullToString)                              \
-  V(NullValue, null_value, Null)                                               \
-  IF_WASM(V, WasmNull, wasm_null, WasmNull)                                    \
-  V(number_string, number_string, NumberString)                                \
-  V(number_to_string, number_to_string, NumberToString)                        \
-  V(Object_string, Object_string, ObjectString)                                \
-  V(object_to_string, object_to_string, ObjectToString)                        \
-  V(OneByteStringMap, one_byte_string_map, OneByteStringMap)                   \
-  V(OneClosureCellMap, one_closure_cell_map, OneClosureCellMap)                \
-  V(OnePointerFillerMap, one_pointer_filler_map, OnePointerFillerMap)          \
-  V(PromiseCapabilityMap, promise_capability_map, PromiseCapabilityMap)        \
-  V(promise_forwarding_handler_symbol, promise_forwarding_handler_symbol,      \
-    PromiseForwardingHandlerSymbol)                                            \
-  V(PromiseFulfillReactionJobTaskMap, promise_fulfill_reaction_job_task_map,   \
-    PromiseFulfillReactionJobTaskMap)                                          \
-  V(promise_handled_by_symbol, promise_handled_by_symbol,                      \
-    PromiseHandledBySymbol)                                                    \
-  V(PromiseReactionMap, promise_reaction_map, PromiseReactionMap)              \
-  V(PromiseRejectReactionJobTaskMap, promise_reject_reaction_job_task_map,     \
-    PromiseRejectReactionJobTaskMap)                                           \
-  V(PromiseResolveThenableJobTaskMap, promise_resolve_thenable_job_task_map,   \
-    PromiseResolveThenableJobTaskMap)                                          \
-  V(prototype_string, prototype_string, PrototypeString)                       \
-  V(replace_symbol, replace_symbol, ReplaceSymbol)                             \
-  V(regexp_to_string, regexp_to_string, RegexpToString)                        \
-  V(resolve_string, resolve_string, ResolveString)                             \
-  V(return_string, return_string, ReturnString)                                \
-  V(search_symbol, search_symbol, SearchSymbol)                                \
-  V(SingleCharacterStringTable, single_character_string_table,                 \
-    SingleCharacterStringTable)                                                \
-  V(size_string, size_string, SizeString)                                      \
-  V(species_symbol, species_symbol, SpeciesSymbol)                             \
-  V(StaleRegister, stale_register, StaleRegister)                              \
-  V(StoreHandler0Map, store_handler0_map, StoreHandler0Map)                    \
-  V(string_string, string_string, StringString)                                \
-  V(string_to_string, string_to_string, StringToString)                        \
-  V(StringMap, string_map, StringMap)                                          \
-  V(TheHoleValue, the_hole_value, TheHole)                                     \
-  V(PropertyCellHoleValue, property_cell_hole_value, PropertyCellHole)         \
-  V(then_string, then_string, ThenString)                                      \
-  V(toJSON_string, toJSON_string, ToJSONString)                                \
-  V(toString_string, toString_string, ToStringString)                          \
-  V(to_primitive_symbol, to_primitive_symbol, ToPrimitiveSymbol)               \
-  V(to_string_tag_symbol, to_string_tag_symbol, ToStringTagSymbol)             \
-  V(TrueValue, true_value, True)                                               \
-  V(undefined_to_string, undefined_to_string, UndefinedToString)               \
-  V(UndefinedValue, undefined_value, Undefined)                                \
-  V(uninitialized_symbol, uninitialized_symbol, UninitializedSymbol)           \
-  V(valueOf_string, valueOf_string, ValueOfString)                             \
-  V(wasm_wrapped_object_symbol, wasm_wrapped_object_symbol,                    \
-    WasmWrappedObjectSymbol)                                                   \
-  V(zero_string, zero_string, ZeroString)                                      \
+#define HEAP_MUTABLE_IMMOVABLE_OBJECT_LIST(V)                                  \
+  V(ArrayIteratorProtector, array_iterator_protector, ArrayIteratorProtector)  \
+  V(ArraySpeciesProtector, array_species_protector, ArraySpeciesProtector)     \
+  V(IsConcatSpreadableProtector, is_concat_spreadable_protector,               \
+    IsConcatSpreadableProtector)                                               \
+  V(MapIteratorProtector, map_iterator_protector, MapIteratorProtector)        \
+  V(NoElementsProtector, no_elements_protector, NoElementsProtector)           \
+  V(MegaDOMProtector, mega_dom_protector, MegaDOMProtector)                    \
+  V(NumberStringCache, number_string_cache, NumberStringCache)                 \
+  V(NumberStringNotRegexpLikeProtector,                                        \
+    number_string_not_regexp_like_protector,                                   \
+    NumberStringNotRegexpLikeProtector)                                        \
+  V(PromiseResolveProtector, promise_resolve_protector,                        \
+    PromiseResolveProtector)                                                   \
+  V(PromiseSpeciesProtector, promise_species_protector,                        \
+    PromiseSpeciesProtector)                                                   \
+  V(PromiseThenProtector, promise_then_protector, PromiseThenProtector)        \
+  V(RegExpSpeciesProtector, regexp_species_protector, RegExpSpeciesProtector)  \
+  V(SetIteratorProtector, set_iterator_protector, SetIteratorProtector)        \
+  V(StringIteratorProtector, string_iterator_protector,                        \
+    StringIteratorProtector)                                                   \
+  V(TypedArraySpeciesProtector, typed_array_species_protector,                 \
+    TypedArraySpeciesProtector)                                                \
   V(AsyncFunctionAwaitRejectSharedFun, async_function_await_reject_shared_fun, \
     AsyncFunctionAwaitRejectSharedFun)                                         \
   V(AsyncFunctionAwaitResolveSharedFun,                                        \
@@ -243,7 +129,141 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(ShadowRealmImportValueFulfilledSFI,                                        \
     shadow_realm_import_value_fulfilled_sfi,                                   \
     ShadowRealmImportValueFulfilledSFI)                                        \
-  UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(                                     \
+  V(ArrayFromAsyncIterableOnFulfilledSharedFun,                                \
+    array_from_async_iterable_on_fulfilled_shared_fun,                         \
+    ArrayFromAsyncIterableOnFulfilledSharedFun)                                \
+  V(ArrayFromAsyncIterableOnRejectedSharedFun,                                 \
+    array_from_async_iterable_on_rejected_shared_fun,                          \
+    ArrayFromAsyncIterableOnRejectedSharedFun)                                 \
+  V(ArrayFromAsyncArrayLikeOnFulfilledSharedFun,                               \
+    array_from_async_array_like_on_fulfilled_shared_fun,                       \
+    ArrayFromAsyncArrayLikeOnFulfilledSharedFun)                               \
+  V(ArrayFromAsyncArrayLikeOnRejectedSharedFun,                                \
+    array_from_async_array_like_on_rejected_shared_fun,                        \
+    ArrayFromAsyncArrayLikeOnRejectedSharedFun)
+
+#define UNIQUE_INSTANCE_TYPE_IMMUTABLE_IMMOVABLE_MAP_ADAPTER( \
+    V, rootIndexName, rootAccessorName, class_name)           \
+  V(rootIndexName, rootAccessorName, class_name##Map)
+
+#define HEAP_IMMUTABLE_IMMOVABLE_OBJECT_LIST(V)                              \
+  V(AllocationSiteWithoutWeakNextMap, allocation_site_without_weaknext_map,  \
+    AllocationSiteWithoutWeakNextMap)                                        \
+  V(AllocationSiteWithWeakNextMap, allocation_site_map, AllocationSiteMap)   \
+  V(arguments_to_string, arguments_to_string, ArgumentsToString)             \
+  V(ArrayListMap, array_list_map, ArrayListMap)                              \
+  V(Array_string, Array_string, ArrayString)                                 \
+  V(array_to_string, array_to_string, ArrayToString)                         \
+  V(BooleanMap, boolean_map, BooleanMap)                                     \
+  V(boolean_to_string, boolean_to_string, BooleanToString)                   \
+  V(class_fields_symbol, class_fields_symbol, ClassFieldsSymbol)             \
+  V(ConsOneByteStringMap, cons_one_byte_string_map, ConsOneByteStringMap)    \
+  V(ConsTwoByteStringMap, cons_two_byte_string_map, ConsTwoByteStringMap)    \
+  V(constructor_string, constructor_string, ConstructorString)               \
+  V(date_to_string, date_to_string, DateToString)                            \
+  V(default_string, default_string, DefaultString)                           \
+  V(EmptyArrayList, empty_array_list, EmptyArrayList)                        \
+  V(EmptyByteArray, empty_byte_array, EmptyByteArray)                        \
+  V(EmptyFixedArray, empty_fixed_array, EmptyFixedArray)                     \
+  V(EmptyOrderedHashSet, empty_ordered_hash_set, EmptyOrderedHashSet)        \
+  V(EmptyScopeInfo, empty_scope_info, EmptyScopeInfo)                        \
+  V(EmptyPropertyDictionary, empty_property_dictionary,                      \
+    EmptyPropertyDictionary)                                                 \
+  V(EmptyOrderedPropertyDictionary, empty_ordered_property_dictionary,       \
+    EmptyOrderedPropertyDictionary)                                          \
+  V(EmptySwissPropertyDictionary, empty_swiss_property_dictionary,           \
+    EmptySwissPropertyDictionary)                                            \
+  V(EmptySlowElementDictionary, empty_slow_element_dictionary,               \
+    EmptySlowElementDictionary)                                              \
+  V(empty_string, empty_string, EmptyString)                                 \
+  V(error_to_string, error_to_string, ErrorToString)                         \
+  V(error_string, error_string, ErrorString)                                 \
+  V(errors_string, errors_string, ErrorsString)                              \
+  V(FalseValue, false_value, False)                                          \
+  V(FixedArrayMap, fixed_array_map, FixedArrayMap)                           \
+  V(FixedCOWArrayMap, fixed_cow_array_map, FixedCOWArrayMap)                 \
+  V(Function_string, function_string, FunctionString)                        \
+  V(function_to_string, function_to_string, FunctionToString)                \
+  V(get_string, get_string, GetString)                                       \
+  V(has_instance_symbol, has_instance_symbol, HasInstanceSymbol)             \
+  V(has_string, has_string, HasString)                                       \
+  V(Infinity_string, Infinity_string, InfinityString)                        \
+  V(is_concat_spreadable_symbol, is_concat_spreadable_symbol,                \
+    IsConcatSpreadableSymbol)                                                \
+  V(Iterator_string, Iterator_string, IteratorString)                        \
+  V(iterator_symbol, iterator_symbol, IteratorSymbol)                        \
+  V(keys_string, keys_string, KeysString)                                    \
+  V(async_iterator_symbol, async_iterator_symbol, AsyncIteratorSymbol)       \
+  V(length_string, length_string, LengthString)                              \
+  V(ManyClosuresCellMap, many_closures_cell_map, ManyClosuresCellMap)        \
+  V(match_symbol, match_symbol, MatchSymbol)                                 \
+  V(megamorphic_symbol, megamorphic_symbol, MegamorphicSymbol)               \
+  V(mega_dom_symbol, mega_dom_symbol, MegaDOMSymbol)                         \
+  V(message_string, message_string, MessageString)                           \
+  V(minus_Infinity_string, minus_Infinity_string, MinusInfinityString)       \
+  V(MinusZeroValue, minus_zero_value, MinusZero)                             \
+  V(name_string, name_string, NameString)                                    \
+  V(NanValue, nan_value, Nan)                                                \
+  V(NaN_string, NaN_string, NaNString)                                       \
+  V(next_string, next_string, NextString)                                    \
+  V(NoClosuresCellMap, no_closures_cell_map, NoClosuresCellMap)              \
+  V(null_to_string, null_to_string, NullToString)                            \
+  V(NullValue, null_value, Null)                                             \
+  IF_WASM(V, WasmNull, wasm_null, WasmNull)                                  \
+  V(number_string, number_string, NumberString)                              \
+  V(number_to_string, number_to_string, NumberToString)                      \
+  V(Object_string, Object_string, ObjectString)                              \
+  V(object_string, object_string, objectString)                              \
+  V(object_to_string, object_to_string, ObjectToString)                      \
+  V(SeqOneByteStringMap, seq_one_byte_string_map, SeqOneByteStringMap)       \
+  V(OneClosureCellMap, one_closure_cell_map, OneClosureCellMap)              \
+  V(OnePointerFillerMap, one_pointer_filler_map, OnePointerFillerMap)        \
+  V(PromiseCapabilityMap, promise_capability_map, PromiseCapabilityMap)      \
+  V(promise_forwarding_handler_symbol, promise_forwarding_handler_symbol,    \
+    PromiseForwardingHandlerSymbol)                                          \
+  V(PromiseFulfillReactionJobTaskMap, promise_fulfill_reaction_job_task_map, \
+    PromiseFulfillReactionJobTaskMap)                                        \
+  V(promise_handled_by_symbol, promise_handled_by_symbol,                    \
+    PromiseHandledBySymbol)                                                  \
+  V(PromiseReactionMap, promise_reaction_map, PromiseReactionMap)            \
+  V(PromiseRejectReactionJobTaskMap, promise_reject_reaction_job_task_map,   \
+    PromiseRejectReactionJobTaskMap)                                         \
+  V(PromiseResolveThenableJobTaskMap, promise_resolve_thenable_job_task_map, \
+    PromiseResolveThenableJobTaskMap)                                        \
+  V(prototype_string, prototype_string, PrototypeString)                     \
+  V(replace_symbol, replace_symbol, ReplaceSymbol)                           \
+  V(regexp_to_string, regexp_to_string, RegexpToString)                      \
+  V(resolve_string, resolve_string, ResolveString)                           \
+  V(return_string, return_string, ReturnString)                              \
+  V(search_symbol, search_symbol, SearchSymbol)                              \
+  V(SingleCharacterStringTable, single_character_string_table,               \
+    SingleCharacterStringTable)                                              \
+  V(size_string, size_string, SizeString)                                    \
+  V(species_symbol, species_symbol, SpeciesSymbol)                           \
+  V(StaleRegister, stale_register, StaleRegister)                            \
+  V(StoreHandler0Map, store_handler0_map, StoreHandler0Map)                  \
+  V(string_string, string_string, StringString)                              \
+  V(string_to_string, string_to_string, StringToString)                      \
+  V(suppressed_string, suppressed_string, SuppressedString)                  \
+  V(SeqTwoByteStringMap, seq_two_byte_string_map, SeqTwoByteStringMap)       \
+  V(TheHoleValue, the_hole_value, TheHole)                                   \
+  V(PropertyCellHoleValue, property_cell_hole_value, PropertyCellHole)       \
+  V(HashTableHoleValue, hash_table_hole_value, HashTableHole)                \
+  V(PromiseHoleValue, promise_hole_value, PromiseHole)                       \
+  V(then_string, then_string, ThenString)                                    \
+  V(toJSON_string, toJSON_string, ToJSONString)                              \
+  V(toString_string, toString_string, ToStringString)                        \
+  V(to_primitive_symbol, to_primitive_symbol, ToPrimitiveSymbol)             \
+  V(to_string_tag_symbol, to_string_tag_symbol, ToStringTagSymbol)           \
+  V(TrueValue, true_value, True)                                             \
+  V(undefined_to_string, undefined_to_string, UndefinedToString)             \
+  V(UndefinedValue, undefined_value, Undefined)                              \
+  V(uninitialized_symbol, uninitialized_symbol, UninitializedSymbol)         \
+  V(valueOf_string, valueOf_string, ValueOfString)                           \
+  V(wasm_wrapped_object_symbol, wasm_wrapped_object_symbol,                  \
+    WasmWrappedObjectSymbol)                                                 \
+  V(zero_string, zero_string, ZeroString)                                    \
+  UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(                                   \
       UNIQUE_INSTANCE_TYPE_IMMUTABLE_IMMOVABLE_MAP_ADAPTER, V)
 
 #define HEAP_IMMOVABLE_OBJECT_LIST(V)   \
@@ -256,6 +276,13 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
 #else
 #define CSA_CHECK(csa, x) (csa)->FastCheck(x)
 #endif
+
+#define CSA_CHECK_WITH_ABORT(csa, x) \
+  (csa)->Check([&]() -> TNode<BoolT> { return x; }, #x, __FILE__, __LINE__)
+
+// This is a check that always calls into the runtime if it aborts.
+// This also exits silently when --hole-fuzzing is enabled.
+#define CSA_HOLE_SECURITY_CHECK(csa, x) CSA_CHECK_WITH_ABORT(csa, x)
 
 #ifdef DEBUG
 // CSA_DCHECK_ARGS generates an
@@ -331,6 +358,14 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
 #define CSA_SLOW_DCHECK(csa, ...) ((void)0)
 #endif
 
+// Similar to SBXCHECK in C++, these become a CSA_CHECK in sandbox-enabled
+// builds, otherwise a CSA_DCHECK.
+#ifdef V8_ENABLE_SANDBOX
+#define CSA_SBXCHECK(csa, ...) CSA_CHECK(csa, __VA_ARGS__)
+#else
+#define CSA_SBXCHECK(csa, ...) CSA_DCHECK(csa, __VA_ARGS__)
+#endif
+
 // Provides JavaScript-specific "macro-assembler" functionality on top of the
 // CodeAssembler. By factoring the JavaScript-isms out of the CodeAssembler,
 // it's possible to add JavaScript-specific useful CodeAssembler "macros"
@@ -350,8 +385,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   enum class AllocationFlag : uint8_t {
     kNone = 0,
     kDoubleAlignment = 1,
-    kPretenured = 1 << 1,
-    kAllowLargeObjectAllocation = 1 << 2,
+    kPretenured = 1 << 1
   };
 
   enum SlackTrackingMode {
@@ -566,6 +600,17 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<Smi> NoContextConstant();
 
+  TNode<IntPtrT> StackAlignmentInBytes() {
+    // This node makes the graph platform-specific. To make sure that the graph
+    // structure is still platform independent, UniqueIntPtrConstants are used
+    // here.
+#if V8_TARGET_ARCH_ARM64
+    return UniqueIntPtrConstant(16);
+#else
+    return UniqueIntPtrConstant(kSystemPointerSize);
+#endif
+  }
+
 #define HEAP_CONSTANT_ACCESSOR(rootIndexName, rootAccessorName, name)    \
   TNode<RemoveTagged<                                                    \
       decltype(std::declval<ReadOnlyRoots>().rootAccessorName())>::type> \
@@ -641,6 +686,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Smi> SmiFromUint32(TNode<Uint32T> value);
   TNode<IntPtrT> SmiToIntPtr(TNode<Smi> value) { return SmiUntag(value); }
   TNode<Int32T> SmiToInt32(TNode<Smi> value);
+  TNode<Uint32T> PositiveSmiToUint32(TNode<Smi> value);
 
   // Smi operations.
 #define SMI_ARITHMETIC_BINOP(SmiOpName, IntPtrOpName, Int32OpName)          \
@@ -855,25 +901,32 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   void Dcheck(const BranchGenerator& branch, const char* message,
               const char* file, int line,
-              std::initializer_list<ExtraNode> extra_nodes = {});
+              std::initializer_list<ExtraNode> extra_nodes = {},
+              SourceLocation loc = SourceLocation::Current());
   void Dcheck(const NodeGenerator<BoolT>& condition_body, const char* message,
               const char* file, int line,
-              std::initializer_list<ExtraNode> extra_nodes = {});
+              std::initializer_list<ExtraNode> extra_nodes = {},
+              SourceLocation loc = SourceLocation::Current());
   void Dcheck(TNode<Word32T> condition_node, const char* message,
               const char* file, int line,
-              std::initializer_list<ExtraNode> extra_nodes = {});
+              std::initializer_list<ExtraNode> extra_nodes = {},
+              SourceLocation loc = SourceLocation::Current());
   void Check(const BranchGenerator& branch, const char* message,
              const char* file, int line,
-             std::initializer_list<ExtraNode> extra_nodes = {});
+             std::initializer_list<ExtraNode> extra_nodes = {},
+             SourceLocation loc = SourceLocation::Current());
   void Check(const NodeGenerator<BoolT>& condition_body, const char* message,
              const char* file, int line,
-             std::initializer_list<ExtraNode> extra_nodes = {});
+             std::initializer_list<ExtraNode> extra_nodes = {},
+             SourceLocation loc = SourceLocation::Current());
   void Check(TNode<Word32T> condition_node, const char* message,
              const char* file, int line,
-             std::initializer_list<ExtraNode> extra_nodes = {});
+             std::initializer_list<ExtraNode> extra_nodes = {},
+             SourceLocation loc = SourceLocation::Current());
   void FailAssert(const char* message,
                   const std::vector<FileAndLine>& files_and_lines,
-                  std::initializer_list<ExtraNode> extra_nodes = {});
+                  std::initializer_list<ExtraNode> extra_nodes = {},
+                  SourceLocation loc = SourceLocation::Current());
 
   void FastCheck(TNode<BoolT> condition);
 
@@ -884,23 +937,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // one finds in the EcmaScript spec, operating on an Callable (e.g. a
   // JSFunction or proxy) rather than a InstructionStream object.
   template <class... TArgs>
-  TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
-                     TNode<JSReceiver> receiver, TArgs... args) {
-    return CallJS(
-        CodeFactory::Call(isolate(), ConvertReceiverMode::kNotNullOrUndefined),
-        context, callable, receiver, args...);
-  }
+  inline TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
+                            TNode<JSReceiver> receiver, TArgs... args);
   template <class... TArgs>
-  TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
-                     TNode<Object> receiver, TArgs... args) {
-    if (IsUndefinedConstant(receiver) || IsNullConstant(receiver)) {
-      return CallJS(
-          CodeFactory::Call(isolate(), ConvertReceiverMode::kNullOrUndefined),
-          context, callable, receiver, args...);
-    }
-    return CallJS(CodeFactory::Call(isolate()), context, callable, receiver,
-                  args...);
-  }
+  inline TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
+                            TNode<Object> receiver, TArgs... args);
 
   TNode<Object> CallApiCallback(TNode<Object> context, TNode<RawPtrT> callback,
                                 TNode<Int32T> argc, TNode<Object> data,
@@ -926,8 +967,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                         TNode<JSReceiver> target,
                                         TNode<JSReceiver> new_target,
                                         TArgs... args) {
-    return CAST(ConstructJSWithTarget(CodeFactory::Construct(isolate()),
-                                      context, target, new_target,
+    return CAST(ConstructJSWithTarget(Builtin::kConstruct, context, target,
+                                      new_target,
                                       implicit_cast<TNode<Object>>(args)...));
   }
   template <class... TArgs>
@@ -970,13 +1011,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<IntPtrT> SelectIntPtrConstant(TNode<BoolT> condition, int true_value,
                                       int false_value);
   TNode<Boolean> SelectBooleanConstant(TNode<BoolT> condition);
-  TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, Smi true_value,
-                               Smi false_value);
+  TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, Tagged<Smi> true_value,
+                               Tagged<Smi> false_value);
   TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, int true_value,
-                               Smi false_value) {
+                               Tagged<Smi> false_value) {
     return SelectSmiConstant(condition, Smi::FromInt(true_value), false_value);
   }
-  TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, Smi true_value,
+  TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, Tagged<Smi> true_value,
                                int false_value) {
     return SelectSmiConstant(condition, true_value, Smi::FromInt(false_value));
   }
@@ -988,7 +1029,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<String> SingleCharacterStringConstant(char const* single_char) {
     DCHECK_EQ(strlen(single_char), 1);
-    return HeapConstant(
+    return HeapConstantNoHole(
         isolate()->factory()->LookupSingleCharacterStringFromCode(
             single_char[0]));
   }
@@ -1157,14 +1198,56 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                     TNode<RawPtrT> pointer,
                                     ExternalPointerTag tag);
 
-  // Load a code pointer from an object.
-  TNode<RawPtrT> LoadCodePointerFromObject(TNode<HeapObject> object,
-                                           int offset) {
-    return LoadCodePointerFromObject(object, IntPtrConstant(offset));
-  }
+  // Load a trusted pointer field.
+  // When the sandbox is enabled, these are indirect pointers using the trusted
+  // pointer table. Otherwise they are regular tagged fields.
+  TNode<HeapObject> LoadTrustedPointerFromObject(TNode<HeapObject> object,
+                                                 int offset,
+                                                 IndirectPointerTag tag);
 
-  TNode<RawPtrT> LoadCodePointerFromObject(TNode<HeapObject> object,
-                                           TNode<IntPtrT> offset);
+  // Load a code pointer field.
+  // These are special versions of trusted pointers that, when the sandbox is
+  // enabled, reference code objects through the code pointer table.
+  TNode<Code> LoadCodePointerFromObject(TNode<HeapObject> object, int offset);
+
+#ifdef V8_ENABLE_SANDBOX
+  // Load an indirect pointer field.
+  TNode<HeapObject> LoadIndirectPointerFromObject(TNode<HeapObject> object,
+                                                  int offset,
+                                                  IndirectPointerTag tag);
+
+  // Determines whether the given indirect pointer handle is a trusted pointer
+  // handle or a code pointer handle.
+  TNode<BoolT> IsTrustedPointerHandle(TNode<IndirectPointerHandleT> handle);
+
+  // Retrieve the heap object referenced by the given indirect pointer handle,
+  // which can either be a trusted pointer handle or a code pointer handle.
+  TNode<HeapObject> ResolveIndirectPointerHandle(
+      TNode<IndirectPointerHandleT> handle, IndirectPointerTag tag);
+
+  // Retrieve the Code object referenced by the given trusted pointer handle.
+  TNode<Code> ResolveCodePointerHandle(TNode<IndirectPointerHandleT> handle);
+
+  // Retrieve the heap object referenced by the given trusted pointer handle.
+  TNode<HeapObject> ResolveTrustedPointerHandle(
+      TNode<IndirectPointerHandleT> handle, IndirectPointerTag tag);
+
+  // Helper function to compute the offset into the code pointer table from a
+  // code pointer handle.
+  TNode<UintPtrT> ComputeCodePointerTableEntryOffset(
+      TNode<IndirectPointerHandleT> handle);
+
+  // Load the pointer to a Code's entrypoint via code pointer.
+  // Only available when the sandbox is enabled as it requires the code pointer
+  // table.
+  TNode<RawPtrT> LoadCodeEntrypointViaCodePointerField(TNode<HeapObject> object,
+                                                       int offset) {
+    return LoadCodeEntrypointViaCodePointerField(object,
+                                                 IntPtrConstant(offset));
+  }
+  TNode<RawPtrT> LoadCodeEntrypointViaCodePointerField(TNode<HeapObject> object,
+                                                       TNode<IntPtrT> offset);
+#endif
 
   TNode<RawPtrT> LoadForeignForeignAddressPtr(TNode<Foreign> object) {
     return LoadExternalPointerFromObject(object, Foreign::kForeignAddressOffset,
@@ -1179,8 +1262,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   }
 
   TNode<RawPtrT> LoadExternalStringResourcePtr(TNode<ExternalString> object) {
-    return LoadExternalPointerFromObject(
-        object, ExternalString::kResourceOffset, kExternalStringResourceTag);
+    return LoadExternalPointerFromObject(object,
+                                         offsetof(ExternalString, resource_),
+                                         kExternalStringResourceTag);
   }
 
   TNode<RawPtrT> LoadExternalStringResourceDataPtr(
@@ -1191,9 +1275,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                          Word32And(LoadInstanceType(object),
                                    Int32Constant(kUncachedExternalStringMask)),
                          Int32Constant(kUncachedExternalStringTag)));
-    return LoadExternalPointerFromObject(object,
-                                         ExternalString::kResourceDataOffset,
-                                         kExternalStringResourceDataTag);
+    return LoadExternalPointerFromObject(
+        object, offsetof(ExternalString, resource_data_),
+        kExternalStringResourceDataTag);
   }
 
   TNode<RawPtr<Uint64T>> Log10OffsetTable() {
@@ -1207,6 +1291,18 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return LoadExternalPointerFromObject(
         object, WasmInternalFunction::kCallTargetOffset,
         kWasmInternalFunctionCallTargetTag);
+  }
+
+  TNode<RawPtrT> LoadWasmInternalFunctionInstructionStart(
+      TNode<WasmInternalFunction> object) {
+#ifdef V8_ENABLE_SANDBOX
+    return LoadCodeEntrypointViaCodePointerField(
+        object, WasmInternalFunction::kCodeOffset);
+#else
+    TNode<Code> code =
+        LoadObjectField<Code>(object, WasmInternalFunction::kCodeOffset);
+    return LoadCodeInstructionStart(code);
+#endif  // V8_ENABLE_SANDBOX
   }
 
   TNode<RawPtrT> LoadWasmTypeInfoNativeTypePtr(TNode<WasmTypeInfo> object) {
@@ -1442,6 +1538,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Smi> LoadFastJSArrayLength(TNode<JSArray> array);
   // Load the length of a fixed array base instance.
   TNode<Smi> LoadFixedArrayBaseLength(TNode<FixedArrayBase> array);
+  template <typename Array>
+  TNode<Smi> LoadArrayCapacity(TNode<Array> array) {
+    return LoadObjectField<Smi>(array, Array::Shape::kCapacityOffset);
+  }
   // Load the length of a fixed array base instance.
   TNode<IntPtrT> LoadAndUntagFixedArrayBaseLength(TNode<FixedArrayBase> array);
   TNode<Uint32T> LoadAndUntagFixedArrayBaseLengthAsUint32(
@@ -1451,6 +1551,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<IntPtrT> LoadAndUntagWeakFixedArrayLength(TNode<WeakFixedArray> array);
   TNode<Uint32T> LoadAndUntagWeakFixedArrayLengthAsUint32(
       TNode<WeakFixedArray> array);
+  // Load the length of a BytecodeArray.
+  TNode<Uint32T> LoadAndUntagBytecodeArrayLength(TNode<BytecodeArray> array);
   // Load the number of descriptors in DescriptorArray.
   TNode<Int32T> LoadNumberOfDescriptors(TNode<DescriptorArray> array);
   // Load the number of own descriptors of a map.
@@ -1491,7 +1593,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                                TNode<Int32T> instance_type,
                                                Label* bailout);
   // Load the identity hash of a JSRececiver.
-  TNode<IntPtrT> LoadJSReceiverIdentityHash(TNode<JSReceiver> receiver,
+  TNode<Uint32T> LoadJSReceiverIdentityHash(TNode<JSReceiver> receiver,
                                             Label* if_no_hash = nullptr);
 
   // This is only used on a newly allocated PropertyArray which
@@ -1569,9 +1671,19 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   void FixedArrayBoundsCheck(TNode<FixedArrayBase> array, TNode<Smi> index,
                              int additional_offset);
+  void FixedArrayBoundsCheck(TNode<FixedArray> array, TNode<Smi> index,
+                             int additional_offset) {
+    FixedArrayBoundsCheck(UncheckedCast<FixedArrayBase>(array), index,
+                          additional_offset);
+  }
 
   void FixedArrayBoundsCheck(TNode<FixedArrayBase> array, TNode<IntPtrT> index,
                              int additional_offset);
+  void FixedArrayBoundsCheck(TNode<FixedArray> array, TNode<IntPtrT> index,
+                             int additional_offset) {
+    FixedArrayBoundsCheck(UncheckedCast<FixedArrayBase>(array), index,
+                          additional_offset);
+  }
 
   void FixedArrayBoundsCheck(TNode<FixedArrayBase> array, TNode<UintPtrT> index,
                              int additional_offset) {
@@ -1589,6 +1701,12 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<TValue> LoadArrayElement(TNode<Array> array, int array_header_size,
                                  TNode<TIndex> index,
                                  int additional_offset = 0);
+  template <typename Array, typename TIndex>
+  TNode<typename Array::Shape::ElementT> LoadArrayElement(
+      TNode<Array> array, TNode<TIndex> index, int additional_offset = 0) {
+    return LoadArrayElement<Array, TIndex, typename Array::Shape::ElementT>(
+        array, Array::Shape::kHeaderSize, index, additional_offset);
+  }
 
   template <typename TIndex>
   TNode<Object> LoadFixedArrayElement(
@@ -1738,8 +1856,20 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<HeapObject> LoadJSFunctionPrototype(TNode<JSFunction> function,
                                             Label* if_bailout);
 
+  // Load the "code" property of a JSFunction.
+  TNode<Code> LoadJSFunctionCode(TNode<JSFunction> function);
+
+  // Load the data object associated with a SFI.
+  // If the (expected) data type is known, prefer using one of the specialized
+  // accessors (e.g. LoadSharedFunctionInfoBuiltinId).
+  TNode<Object> LoadSharedFunctionInfoData(TNode<SharedFunctionInfo> sfi);
+
+  TNode<BoolT> SharedFunctionInfoHasBaselineCode(TNode<SharedFunctionInfo> sfi);
+
+  TNode<Smi> LoadSharedFunctionInfoBuiltinId(TNode<SharedFunctionInfo> sfi);
+
   TNode<BytecodeArray> LoadSharedFunctionInfoBytecodeArray(
-      TNode<SharedFunctionInfo> shared);
+      TNode<SharedFunctionInfo> sfi);
 
   void StoreObjectByteNoWriteBarrier(TNode<HeapObject> object, int offset,
                                      TNode<Word32T> value);
@@ -1755,6 +1885,42 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                         TNode<Object> value);
   void StoreObjectField(TNode<HeapObject> object, TNode<IntPtrT> offset,
                         TNode<Object> value);
+
+  // Store to an indirect pointer field. This involves loading the index for
+  // the pointer table entry owned by the pointed-to object (which points back
+  // to it) and storing that into the specified field.
+  // Stores that may require a write barrier also need to know the indirect
+  // pointer tag for the field. Otherwise, it is not needed
+  void StoreIndirectPointerField(TNode<HeapObject> object, int offset,
+                                 IndirectPointerTag tag,
+                                 TNode<ExposedTrustedObject> value);
+  void StoreIndirectPointerFieldNoWriteBarrier(
+      TNode<HeapObject> object, int offset, IndirectPointerTag tag,
+      TNode<ExposedTrustedObject> value);
+
+  // Store a trusted pointer field.
+  // When the sandbox is enabled, these are indirect pointers using the trusted
+  // pointer table. Otherwise they are regular tagged fields.
+  void StoreTrustedPointerField(TNode<HeapObject> object, int offset,
+                                IndirectPointerTag tag,
+                                TNode<ExposedTrustedObject> value);
+  void StoreTrustedPointerFieldNoWriteBarrier(
+      TNode<HeapObject> object, int offset, IndirectPointerTag tag,
+      TNode<ExposedTrustedObject> value);
+
+  // Store a code pointer field.
+  // These are special versions of trusted pointers that, when the sandbox is
+  // enabled, reference code objects through the code pointer table.
+  void StoreCodePointerField(TNode<HeapObject> object, int offset,
+                             TNode<Code> value) {
+    StoreTrustedPointerField(object, offset, kCodeIndirectPointerTag, value);
+  }
+  void StoreCodePointerFieldNoWriteBarrier(TNode<HeapObject> object, int offset,
+                                           TNode<Code> value) {
+    StoreTrustedPointerFieldNoWriteBarrier(object, offset,
+                                           kCodeIndirectPointerTag, value);
+  }
+
   template <class T>
   void StoreObjectFieldNoWriteBarrier(TNode<HeapObject> object,
                                       TNode<IntPtrT> offset, TNode<T> value) {
@@ -1841,6 +2007,48 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       WriteBarrierMode barrier_mode = UPDATE_WRITE_BARRIER) {
     return StoreFixedArrayElement(object, IntPtrConstant(index), value,
                                   barrier_mode, 0, CheckBounds::kDebugOnly);
+  }
+  template <typename Array>
+  void UnsafeStoreArrayElement(
+      TNode<Array> object, int index,
+      TNode<typename Array::Shape::ElementT> value,
+      WriteBarrierMode barrier_mode = UPDATE_WRITE_BARRIER) {
+    DCHECK(barrier_mode == SKIP_WRITE_BARRIER ||
+           barrier_mode == UNSAFE_SKIP_WRITE_BARRIER ||
+           barrier_mode == UPDATE_WRITE_BARRIER);
+    // TODO(jgruber): This is just a barebones implementation taken from
+    // StoreFixedArrayOrPropertyArrayElement. We can make it more robust and
+    // generic if needed.
+    int offset = Array::OffsetOfElementAt(index);
+    if (barrier_mode == UNSAFE_SKIP_WRITE_BARRIER) {
+      UnsafeStoreObjectFieldNoWriteBarrier(object, offset, value);
+    } else if (barrier_mode == SKIP_WRITE_BARRIER) {
+      StoreObjectFieldNoWriteBarrier(object, offset, value);
+    } else if (barrier_mode == UPDATE_WRITE_BARRIER) {
+      StoreObjectField(object, offset, value);
+    } else {
+      UNREACHABLE();
+    }
+  }
+  template <typename Array>
+  void UnsafeStoreArrayElement(
+      TNode<Array> object, TNode<Smi> index,
+      TNode<typename Array::Shape::ElementT> value,
+      WriteBarrierMode barrier_mode = UPDATE_WRITE_BARRIER) {
+    DCHECK(barrier_mode == SKIP_WRITE_BARRIER ||
+           barrier_mode == UPDATE_WRITE_BARRIER);
+    // TODO(jgruber): This is just a barebones implementation taken from
+    // StoreFixedArrayOrPropertyArrayElement. We can make it more robust and
+    // generic if needed.
+    TNode<IntPtrT> offset = ElementOffsetFromIndex(index, PACKED_ELEMENTS,
+                                                   Array::Shape::kHeaderSize);
+    if (barrier_mode == SKIP_WRITE_BARRIER) {
+      StoreObjectFieldNoWriteBarrier(object, offset, value);
+    } else if (barrier_mode == UPDATE_WRITE_BARRIER) {
+      StoreObjectField(object, offset, value);
+    } else {
+      UNREACHABLE();
+    }
   }
 
   void UnsafeStoreFixedArrayElement(TNode<FixedArray> object, int index,
@@ -1957,8 +2165,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                   TNode<IntPtrT> digit_index);
 
   // Allocate a ByteArray with the given non-zero length.
-  TNode<ByteArray> AllocateNonEmptyByteArray(TNode<UintPtrT> length,
-                                             AllocationFlags flags);
+  TNode<ByteArray> AllocateNonEmptyByteArray(
+      TNode<UintPtrT> length, AllocationFlags flags = AllocationFlag::kNone);
 
   // Allocate a ByteArray with the given length.
   TNode<ByteArray> AllocateByteArray(
@@ -1996,6 +2204,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                            Label* large_object_fallback);
 
   TNode<OrderedHashSet> AllocateOrderedHashSet();
+  TNode<OrderedHashSet> AllocateOrderedHashSet(TNode<IntPtrT> capacity);
 
   TNode<OrderedHashMap> AllocateOrderedHashMap();
 
@@ -2097,6 +2306,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       AllocationFlags flags = AllocationFlag::kNone,
       base::Optional<TNode<Map>> fixed_array_map = base::nullopt);
 
+  TNode<NativeContext> GetCreationContextFromMap(TNode<Map> map,
+                                                 Label* if_bailout);
   TNode<NativeContext> GetCreationContext(TNode<JSReceiver> receiver,
                                           Label* if_bailout);
   TNode<NativeContext> GetFunctionRealm(TNode<Context> context,
@@ -2118,8 +2329,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<FixedArray> AllocateZeroedFixedArray(TNode<IntPtrT> capacity) {
     TNode<FixedArray> result = UncheckedCast<FixedArray>(
-        AllocateFixedArray(PACKED_ELEMENTS, capacity,
-                           AllocationFlag::kAllowLargeObjectAllocation));
+        AllocateFixedArray(PACKED_ELEMENTS, capacity));
     FillEntireFixedArrayWithSmiZero(PACKED_ELEMENTS, result, capacity);
     return result;
   }
@@ -2127,14 +2337,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<FixedDoubleArray> AllocateZeroedFixedDoubleArray(
       TNode<IntPtrT> capacity) {
     TNode<FixedDoubleArray> result = UncheckedCast<FixedDoubleArray>(
-        AllocateFixedArray(PACKED_DOUBLE_ELEMENTS, capacity,
-                           AllocationFlag::kAllowLargeObjectAllocation));
+        AllocateFixedArray(PACKED_DOUBLE_ELEMENTS, capacity));
     FillEntireFixedDoubleArrayWithZero(result, capacity);
     return result;
   }
 
-  TNode<FixedArray> AllocateFixedArrayWithHoles(TNode<IntPtrT> capacity,
-                                                AllocationFlags flags) {
+  TNode<FixedArray> AllocateFixedArrayWithHoles(
+      TNode<IntPtrT> capacity, AllocationFlags flags = AllocationFlag::kNone) {
     TNode<FixedArray> result = UncheckedCast<FixedArray>(
         AllocateFixedArray(PACKED_ELEMENTS, capacity, flags));
     FillFixedArrayWithValue(PACKED_ELEMENTS, result, IntPtrConstant(0),
@@ -2143,7 +2352,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   }
 
   TNode<FixedDoubleArray> AllocateFixedDoubleArrayWithHoles(
-      TNode<IntPtrT> capacity, AllocationFlags flags) {
+      TNode<IntPtrT> capacity, AllocationFlags flags = AllocationFlag::kNone) {
     TNode<FixedDoubleArray> result = UncheckedCast<FixedDoubleArray>(
         AllocateFixedArray(PACKED_DOUBLE_ELEMENTS, capacity, flags));
     FillFixedArrayWithValue(PACKED_DOUBLE_ELEMENTS, result, IntPtrConstant(0),
@@ -2163,6 +2372,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                                    TNode<Object> key,
                                                    TNode<Object> value);
 
+  TNode<JSObject> AllocatePromiseWithResolversResult(TNode<Context> context,
+                                                     TNode<Object> promise,
+                                                     TNode<Object> resolve,
+                                                     TNode<Object> reject);
+
   TNode<JSReceiver> ArraySpeciesCreate(TNode<Context> context,
                                        TNode<Object> originalArray,
                                        TNode<Number> len);
@@ -2171,6 +2385,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void FillFixedArrayWithValue(ElementsKind kind, TNode<FixedArrayBase> array,
                                TNode<TIndex> from_index, TNode<TIndex> to_index,
                                RootIndex value_root_index);
+  template <typename TIndex>
+  void FillFixedArrayWithValue(ElementsKind kind, TNode<FixedArray> array,
+                               TNode<TIndex> from_index, TNode<TIndex> to_index,
+                               RootIndex value_root_index) {
+    FillFixedArrayWithValue(kind, UncheckedCast<FixedArrayBase>(array),
+                            from_index, to_index, value_root_index);
+  }
 
   // Uses memset to effectively initialize the given FixedArray with zeroes.
   void FillFixedArrayWithSmiZero(ElementsKind kind, TNode<FixedArray> array,
@@ -2285,6 +2506,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                     TNode<IntPtrT> src_index, TNode<IntPtrT> length,
                     WriteBarrierMode write_barrier = UPDATE_WRITE_BARRIER);
 
+  void CopyRange(TNode<HeapObject> dst_object, int dst_offset,
+                 TNode<HeapObject> src_object, int src_offset,
+                 TNode<IntPtrT> length_in_tagged,
+                 WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
   TNode<FixedArray> HeapObjectToFixedArray(TNode<HeapObject> base,
                                            Label* cast_fail);
 
@@ -2296,19 +2522,14 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   }
 
   TNode<ArrayList> AllocateArrayList(TNode<Smi> size);
-
   TNode<ArrayList> ArrayListEnsureSpace(TNode<ArrayList> array,
-                                        TNode<Smi> size);
-
+                                        TNode<Smi> length);
   TNode<ArrayList> ArrayListAdd(TNode<ArrayList> array, TNode<Object> object);
-
   void ArrayListSet(TNode<ArrayList> array, TNode<Smi> index,
                     TNode<Object> object);
-
   TNode<Smi> ArrayListGetLength(TNode<ArrayList> array);
-
   void ArrayListSetLength(TNode<ArrayList> array, TNode<Smi> length);
-
+  // TODO(jgruber): Rename to ArrayListToFixedArray.
   TNode<FixedArray> ArrayListElements(TNode<ArrayList> array);
 
   template <typename T>
@@ -2628,6 +2849,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void SetPendingMessage(TNode<HeapObject> message);
   TNode<BoolT> IsExecutionTerminating();
 
+  TNode<Object> GetContinuationPreservedEmbedderData();
+  void SetContinuationPreservedEmbedderData(TNode<Object> value);
+
   // Type checks.
   // Check whether the map is for an object with special properties, such as a
   // JSProxy or an object with interceptors.
@@ -2643,6 +2867,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsCallableMap(TNode<Map> map);
   TNode<BoolT> IsCallable(TNode<HeapObject> object);
   TNode<BoolT> TaggedIsCallable(TNode<Object> object);
+  TNode<BoolT> IsCode(TNode<HeapObject> object);
+  TNode<BoolT> TaggedIsCode(TNode<Object> object);
   TNode<BoolT> IsConsStringInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsConstructorMap(TNode<Map> map);
   TNode<BoolT> IsConstructor(TNode<HeapObject> object);
@@ -2838,8 +3064,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <typename TIndex>
   TNode<BoolT> FixedArraySizeDoesntFitInNewSpace(TNode<TIndex> element_count,
                                                  int base_size);
-
-  TNode<BoolT> IsMetaMap(TNode<HeapObject> o) { return IsMapMap(o); }
 
   // ElementsKind helpers:
   TNode<BoolT> ElementsKindEqual(TNode<Int32T> a, TNode<Int32T> b) {
@@ -3295,24 +3519,40 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <class Dictionary>
   void SetNameDictionaryFlags(TNode<Dictionary>, TNode<Smi> flags);
 
-  // Looks up an entry in a NameDictionaryBase successor. If the entry is found
-  // control goes to {if_found} and {var_name_index} contains an index of the
-  // key field of the entry found. If the key is not found control goes to
-  // {if_not_found}.
   enum LookupMode { kFindExisting, kFindInsertionIndex };
 
   template <typename Dictionary>
   TNode<HeapObject> LoadName(TNode<HeapObject> key);
 
+  // Looks up an entry in a NameDictionaryBase successor.
+  // For {mode} == kFindExisting:
+  //   If the entry is found control goes to {if_found} and {var_name_index}
+  //   contains an index of the key field of the entry found.
+  //   If the key is not found and {if_not_found_with_insertion_index} is
+  //   provided, control goes to {if_not_found_with_insertion_index} and
+  //   {var_name_index} contains the index of the key field to insert the given
+  //   name at.
+  //   Otherwise control goes to {if_not_found_no_insertion_index}.
+  // For {mode} == kFindInsertionIndex:
+  //   {if_not_found_no_insertion_index} and {if_not_found_with_insertion_index}
+  //   are treated equally. If {if_not_found_with_insertion_index} is provided,
+  //   control goes to {if_not_found_with_insertion_index}, otherwise control
+  //   goes to {if_not_found_no_insertion_index}. In both cases {var_name_index}
+  //   contains the index of the key field to insert the given name at.
   template <typename Dictionary>
   void NameDictionaryLookup(TNode<Dictionary> dictionary,
                             TNode<Name> unique_name, Label* if_found,
                             TVariable<IntPtrT>* var_name_index,
-                            Label* if_not_found,
-                            LookupMode mode = kFindExisting);
+                            Label* if_not_found_no_insertion_index,
+                            LookupMode mode = kFindExisting,
+                            Label* if_not_found_with_insertion_index = nullptr);
 
   TNode<Word32T> ComputeSeededHash(TNode<IntPtrT> key);
 
+  // Looks up an entry in a NameDictionaryBase successor. If the entry is found
+  // control goes to {if_found} and {var_name_index} contains an index of the
+  // key field of the entry found. If the key is not found control goes to
+  // {if_not_found}.
   void NumberDictionaryLookup(TNode<NumberDictionary> dictionary,
                               TNode<IntPtrT> intptr_index, Label* if_found,
                               TVariable<IntPtrT>* var_entry,
@@ -3332,8 +3572,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                    TNode<Smi> enum_index);
 
   template <class Dictionary>
-  void AddToDictionary(TNode<Dictionary> dictionary, TNode<Name> key,
-                       TNode<Object> value, Label* bailout);
+  void AddToDictionary(
+      TNode<Dictionary> dictionary, TNode<Name> key, TNode<Object> value,
+      Label* bailout,
+      base::Optional<TNode<IntPtrT>> insertion_index = base::nullopt);
 
   // Tries to check if {object} has own {unique_name} property.
   void TryHasOwnProperty(TNode<HeapObject> object, TNode<Map> map,
@@ -3392,7 +3634,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<Object> GetProperty(TNode<Context> context, TNode<Object> receiver,
                             Handle<Name> name) {
-    return GetProperty(context, receiver, HeapConstant(name));
+    return GetProperty(context, receiver, HeapConstantNoHole(name));
   }
 
   TNode<Object> GetProperty(TNode<Context> context, TNode<Object> receiver,
@@ -3435,17 +3677,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<JSObject> CreateAsyncFromSyncIterator(TNode<Context> context,
                                               TNode<JSReceiver> sync_iterator,
                                               TNode<Object> next);
-
-  template <class... TArgs>
-  TNode<Object> CallBuiltin(Builtin id, TNode<Object> context, TArgs... args) {
-    return CallStub<Object>(Builtins::CallableFor(isolate(), id), context,
-                            args...);
-  }
-
-  template <class... TArgs>
-  void TailCallBuiltin(Builtin id, TNode<Object> context, TArgs... args) {
-    return TailCallStub(Builtins::CallableFor(isolate(), id), context, args...);
-  }
 
   void LoadPropertyFromFastObject(TNode<HeapObject> object, TNode<Map> map,
                                   TNode<DescriptorArray> descriptors,
@@ -3670,6 +3901,12 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   void TrapAllocationMemento(TNode<JSObject> object, Label* memento_found);
 
+  // Helpers to look up MemoryChunk/Page metadata for a given address.
+  // Equivalent to MemoryChunkHeader::FromAddress().
+  TNode<IntPtrT> PageHeaderFromAddress(TNode<IntPtrT> address);
+  // Equivalent to MemoryChunkHeader::MemoryChunk().
+  TNode<IntPtrT> PageFromPageHeader(TNode<IntPtrT> address);
+  // Equivalent to BasicMemoryChunk::FromAddress().
   TNode<IntPtrT> PageFromAddress(TNode<IntPtrT> address);
 
   // Store a weak in-place reference into the FeedbackVector.
@@ -3991,6 +4228,12 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <typename TIndex>
   TNode<IntPtrT> ElementOffsetFromIndex(TNode<TIndex> index, ElementsKind kind,
                                         int base_size = 0);
+  template <typename Array, typename TIndex>
+  TNode<IntPtrT> OffsetOfElementAt(TNode<TIndex> index) {
+    static_assert(Array::Shape::kElementSize == kTaggedSize);
+    return ElementOffsetFromIndex(index, PACKED_ELEMENTS,
+                                  Array::kHeaderSize - kHeapObjectTag);
+  }
 
   // Check that a field offset is within the bounds of the an object.
   TNode<BoolT> IsOffsetInBounds(TNode<IntPtrT> offset, TNode<IntPtrT> length,
@@ -4055,6 +4298,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<Object> GetArgumentValue(TorqueStructArguments args,
                                  TNode<IntPtrT> index);
+
+  void SetArgumentValue(TorqueStructArguments args, TNode<IntPtrT> index,
+                        TNode<Object> value);
 
   enum class FrameArgumentsArgcType {
     kCountIncludesReceiver,
@@ -4400,6 +4646,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                               TNode<Uint8T> property_details,
                               Label* needs_resize);
 
+  TNode<Object> CallOnCentralStack(TNode<Context> context, TNode<Object> target,
+                                   TNode<Int32T> num_args,
+                                   TNode<FixedArray> args);
+
  private:
   friend class CodeStubArguments;
 
@@ -4551,6 +4801,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void EmitElementStoreTypedArrayUpdateValue(
       TNode<Object> value, ElementsKind elements_kind,
       TNode<TValue> converted_value, TVariable<Object>* maybe_converted_value);
+
+  TNode<RawPtrT> SwitchToTheCentralStackForJS(TNode<Object> callable_node);
+  void SwitchFromTheCentralStackForJS(TNode<RawPtrT> old_sp,
+                                      TNode<Object> callable);
 };
 
 class V8_EXPORT_PRIVATE CodeStubArguments {
@@ -4603,6 +4857,8 @@ class V8_EXPORT_PRIVATE CodeStubArguments {
   TNode<Object> GetOptionalArgumentValue(int index) {
     return GetOptionalArgumentValue(assembler_->IntPtrConstant(index));
   }
+
+  void SetArgumentValue(TNode<IntPtrT> index, TNode<Object> value);
 
   // Iteration doesn't include the receiver. |first| and |last| are zero-based.
   using ForEachBodyFunction = std::function<void(TNode<Object> arg)>;

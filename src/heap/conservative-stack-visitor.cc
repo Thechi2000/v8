@@ -30,8 +30,7 @@ ConservativeStackVisitor::ConservativeStackVisitor(Isolate* isolate,
       allocator_(isolate->heap()->memory_allocator()),
       collector_(collector) {}
 
-Address ConservativeStackVisitor::FindBasePtrForMarking(
-    Address maybe_inner_ptr) const {
+Address ConservativeStackVisitor::FindBasePtr(Address maybe_inner_ptr) const {
   // Check if the pointer is contained by a normal or large page owned by this
   // heap. Bail out if it is not.
   const BasicMemoryChunk* chunk =
@@ -42,9 +41,9 @@ Address ConservativeStackVisitor::FindBasePtrForMarking(
   if (chunk->IsLargePage()) {
     // This could be simplified if we could guarantee that there are no free
     // space or filler objects in large pages. A few cctests violate this now.
-    HeapObject obj(static_cast<const LargePage*>(chunk)->GetObject());
+    Tagged<HeapObject> obj(static_cast<const LargePage*>(chunk)->GetObject());
     PtrComprCageBase cage_base{chunk->heap()->isolate()};
-    return obj.IsFreeSpaceOrFiller(cage_base) ? kNullAddress : obj.address();
+    return IsFreeSpaceOrFiller(obj, cage_base) ? kNullAddress : obj.address();
   }
   // Otherwise, we have a pointer inside a normal page.
   const Page* page = static_cast<const Page*>(chunk);
@@ -57,21 +56,18 @@ Address ConservativeStackVisitor::FindBasePtrForMarking(
   // must ignore it, as its markbits may not be clean.
   if (page->IsFromPage()) return kNullAddress;
   // Try to find the address of a previous valid object on this page.
-  Address base_ptr = MarkingBitmap::FindPreviousObjectForConservativeMarking(
-      page, maybe_inner_ptr);
-  // If the markbit is set, then we have an object that does not need to be
-  // marked.
-  if (base_ptr == kNullAddress) return kNullAddress;
+  Address base_ptr =
+      MarkingBitmap::FindPreviousValidObject(page, maybe_inner_ptr);
   // Iterate through the objects in the page forwards, until we find the object
   // containing maybe_inner_ptr.
   DCHECK_LE(base_ptr, maybe_inner_ptr);
   PtrComprCageBase cage_base{page->heap()->isolate()};
   while (true) {
-    HeapObject obj(HeapObject::FromAddress(base_ptr));
-    const int size = obj.Size(cage_base);
+    Tagged<HeapObject> obj(HeapObject::FromAddress(base_ptr));
+    const int size = obj->Size(cage_base);
     DCHECK_LT(0, size);
     if (maybe_inner_ptr < base_ptr + size)
-      return obj.IsFreeSpaceOrFiller(cage_base) ? kNullAddress : base_ptr;
+      return IsFreeSpaceOrFiller(obj, cage_base) ? kNullAddress : base_ptr;
     base_ptr += size;
     DCHECK_LT(base_ptr, page->area_end());
   }
@@ -79,19 +75,37 @@ Address ConservativeStackVisitor::FindBasePtrForMarking(
 
 void ConservativeStackVisitor::VisitPointer(const void* pointer) {
   auto address = reinterpret_cast<Address>(const_cast<void*>(pointer));
-  VisitConservativelyIfPointer(address);
+  VisitConservativelyIfPointer<false>(address);
 #ifdef V8_COMPRESS_POINTERS
   V8HeapCompressionScheme::ProcessIntermediatePointers(
       cage_base_, address,
-      [this](Address ptr) { VisitConservativelyIfPointer(ptr); });
+      [this](Address ptr) { VisitConservativelyIfPointer<true>(ptr); });
 #endif  // V8_COMPRESS_POINTERS
 }
 
+template <bool is_known_to_be_in_cage>
 void ConservativeStackVisitor::VisitConservativelyIfPointer(Address address) {
-  Address base_ptr = FindBasePtrForMarking(address);
+#ifdef V8_COMPRESS_POINTERS
+  if constexpr (!is_known_to_be_in_cage) {
+    // Bail out immediately if the pointer is not in the cage.
+    if (V8HeapCompressionScheme::GetPtrComprCageBaseAddress(address) !=
+        cage_base_.address())
+      return;
+  }
+  DCHECK_EQ(V8HeapCompressionScheme::GetPtrComprCageBaseAddress(address),
+            cage_base_.address());
+#endif  // V8_COMPRESS_POINTERS
+  // Bail out immediately if the pointer is not in the space managed by the
+  // allocator.
+  if (allocator_->IsOutsideAllocatedSpace(address)) {
+    DCHECK_EQ(nullptr, allocator_->LookupChunkContainingAddress(address));
+    return;
+  }
+  // Proceed with inner-pointer resolution.
+  Address base_ptr = FindBasePtr(address);
   if (base_ptr == kNullAddress) return;
-  HeapObject obj = HeapObject::FromAddress(base_ptr);
-  Object root = obj;
+  Tagged<HeapObject> obj = HeapObject::FromAddress(base_ptr);
+  Tagged<Object> root = obj;
   DCHECK_NOT_NULL(delegate_);
   delegate_->VisitRootPointer(Root::kStackRoots, nullptr,
                               FullObjectSlot(&root));

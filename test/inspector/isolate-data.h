@@ -67,7 +67,7 @@ class InspectorIsolateData : public v8_inspector::V8InspectorClient {
   // Working with V8Inspector api.
   base::Optional<int> ConnectSession(
       int context_group_id, const v8_inspector::StringView& state,
-      std::unique_ptr<FrontendChannelImpl> channel);
+      std::unique_ptr<FrontendChannelImpl> channel, bool is_fully_trusted);
   std::vector<uint8_t> DisconnectSession(int session_id,
                                          TaskRunner* context_task_runner);
   void SendMessage(int session_id, const v8_inspector::StringView& message);
@@ -112,7 +112,7 @@ class InspectorIsolateData : public v8_inspector::V8InspectorClient {
  private:
   static v8::MaybeLocal<v8::Module> ModuleResolveCallback(
       v8::Local<v8::Context> context, v8::Local<v8::String> specifier,
-      v8::Local<v8::FixedArray> import_assertions,
+      v8::Local<v8::FixedArray> import_attributes,
       v8::Local<v8::Module> referrer);
   static void MessageHandler(v8::Local<v8::Message> message,
                              v8::Local<v8::Value> exception);

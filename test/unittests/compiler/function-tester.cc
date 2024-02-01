@@ -64,29 +64,26 @@ FunctionTester::FunctionTester(Isolate* isolate, Handle<Code> code,
 void FunctionTester::CheckThrows(Handle<Object> a) {
   TryCatch try_catch(reinterpret_cast<v8::Isolate*>(isolate));
   MaybeHandle<Object> no_result = Call(a);
-  CHECK(isolate->has_pending_exception());
+  CHECK(isolate->has_exception());
   CHECK(try_catch.HasCaught());
   CHECK(no_result.is_null());
-  isolate->OptionalRescheduleException(true);
 }
 
 void FunctionTester::CheckThrows(Handle<Object> a, Handle<Object> b) {
   TryCatch try_catch(reinterpret_cast<v8::Isolate*>(isolate));
   MaybeHandle<Object> no_result = Call(a, b);
-  CHECK(isolate->has_pending_exception());
+  CHECK(isolate->has_exception());
   CHECK(try_catch.HasCaught());
   CHECK(no_result.is_null());
-  isolate->OptionalRescheduleException(true);
 }
 
 v8::Local<v8::Message> FunctionTester::CheckThrowsReturnMessage(
     Handle<Object> a, Handle<Object> b) {
   TryCatch try_catch(reinterpret_cast<v8::Isolate*>(isolate));
   MaybeHandle<Object> no_result = Call(a, b);
-  CHECK(isolate->has_pending_exception());
+  CHECK(isolate->has_exception());
   CHECK(try_catch.HasCaught());
   CHECK(no_result.is_null());
-  isolate->OptionalRescheduleException(true);
   CHECK(!try_catch.Message().IsEmpty());
   return try_catch.Message();
 }
@@ -95,7 +92,7 @@ void FunctionTester::CheckCall(Handle<Object> expected, Handle<Object> a,
                                Handle<Object> b, Handle<Object> c,
                                Handle<Object> d) {
   Handle<Object> result = Call(a, b, c, d).ToHandleChecked();
-  CHECK(expected->SameValue(*result));
+  CHECK(Object::SameValue(*expected, *result));
 }
 
 Handle<JSFunction> FunctionTester::NewFunction(const char* source) {

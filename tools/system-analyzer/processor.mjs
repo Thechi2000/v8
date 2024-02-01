@@ -69,14 +69,14 @@ export class Processor extends LogReader {
 
   MAJOR_VERSION = 7;
   MINOR_VERSION = 6;
-  constructor(useBigInt = false) {
-    super(false, false, useBigInt);
-    this.useBigInt = useBigInt;
-    this.kZero = useBigInt ? 0n : 0;
-    this.parseAddress = useBigInt ? BigInt : parseInt;
+  constructor(useBigIntAddresses = false) {
+    super(false, false, useBigIntAddresses);
+    this.useBigIntAddresses = useBigIntAddresses;
+    this.kZero = useBigIntAddresses ? 0n : 0;
+    this.parseAddress = useBigIntAddresses ? BigInt : parseInt;
     this._chunkConsumer =
         new AsyncConsumer((chunk) => this._processChunk(chunk));
-    this._profile = new Profile(useBigInt);
+    this._profile = new Profile(useBigIntAddresses);
     const propertyICParser = [
       this.parseAddress, parseInt, parseInt, parseInt, parseString, parseString,
       parseString, parseString, parseString, parseString
@@ -115,8 +115,6 @@ export class Processor extends LogReader {
         parsers: [this.parseAddress, this.parseAddress],
         processor: this.processCodeMove
       },
-      'code-delete':
-          {parsers: [this.parseAddress], processor: this.processCodeDelete},
       'code-source-info': {
         parsers: [
           this.parseAddress, parseInt, parseInt, parseInt, parseString,
@@ -359,15 +357,15 @@ export class Processor extends LogReader {
     this._lastTimestamp = timestamp;
     let profilerEntry;
     let stateName = '';
-    if (maybe_func.length) {
-      const funcAddr = this.parseAddress(maybe_func[0]);
+    if (type != 'RegExp' && maybe_func.length) {
+      const sfiAddr = this.parseAddress(maybe_func[0]);
       stateName = maybe_func[1] ?? '';
       const state = Profile.parseState(maybe_func[1]);
       profilerEntry = this._profile.addFuncCode(
-          type, nameAndPosition, timestamp, start, size, funcAddr, state);
+          type, nameAndPosition, timestamp, start, size, sfiAddr, state);
     } else {
-      profilerEntry = this._profile.addAnyCode(
-          type, nameAndPosition, timestamp, start, size);
+      profilerEntry =
+          this._profile.addCode(type, nameAndPosition, timestamp, start, size);
     }
     const name = nameAndPosition.slice(0, nameAndPosition.indexOf(' '));
     this._lastCodeLogEntry = new CodeLogEntry(

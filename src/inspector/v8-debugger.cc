@@ -8,6 +8,7 @@
 #include "include/v8-context.h"
 #include "include/v8-function.h"
 #include "include/v8-microtask-queue.h"
+#include "include/v8-profiler.h"
 #include "include/v8-util.h"
 #include "src/inspector/inspected-context.h"
 #include "src/inspector/protocol/Protocol.h"
@@ -38,7 +39,7 @@ void cleanupExpiredWeakPointers(Map& map) {
   }
 }
 
-class MatchPrototypePredicate : public v8::debug::QueryObjectPredicate {
+class MatchPrototypePredicate : public v8::QueryObjectPredicate {
  public:
   MatchPrototypePredicate(V8InspectorImpl* inspector,
                           v8::Local<v8::Context> context,
@@ -179,7 +180,6 @@ void V8Debugger::setBreakpointsActive(bool active) {
 
 void V8Debugger::removeBreakpoint(v8::debug::BreakpointId id) {
   v8::debug::RemoveBreakpoint(m_isolate, id);
-  m_throwingConditionReported.erase(id);
 }
 
 v8::debug::ExceptionBreakState V8Debugger::getPauseOnExceptionsState() {
@@ -531,7 +531,9 @@ void V8Debugger::handleProgramBreak(
 
     m_inspector->forEachSession(
         contextGroupId, [](V8InspectorSessionImpl* session) {
-          session->heapProfilerAgent()->takePendingHeapSnapshots();
+          if (session->heapProfilerAgent()) {
+            session->heapProfilerAgent()->takePendingHeapSnapshots();
+          }
         });
 
     m_inspector->client()->runMessageLoopOnPause(contextGroupId);
@@ -719,24 +721,7 @@ bool V8Debugger::ShouldBeSkipped(v8::Local<v8::debug::Script> script, int line,
 void V8Debugger::BreakpointConditionEvaluated(
     v8::Local<v8::Context> context, v8::debug::BreakpointId breakpoint_id,
     bool exception_thrown, v8::Local<v8::Value> exception) {
-  auto it = m_throwingConditionReported.find(breakpoint_id);
-
-  if (!exception_thrown) {
-    // Successful evaluation, clear out the bit: we report exceptions should
-    // this breakpoint throw again.
-    if (it != m_throwingConditionReported.end()) {
-      m_throwingConditionReported.erase(it);
-    }
-    return;
-  }
-
-  CHECK(exception_thrown);
-  if (it != m_throwingConditionReported.end() || exception.IsEmpty()) {
-    // Already reported this breakpoint or no exception to report.
-    return;
-  }
-
-  CHECK(!exception.IsEmpty());
+  if (!exception_thrown || exception.IsEmpty()) return;
 
   v8::Local<v8::Message> message =
       v8::debug::CreateMessageFromException(isolate(), exception);
@@ -754,7 +739,6 @@ void V8Debugger::BreakpointConditionEvaluated(
       message->GetLineNumber(context).FromMaybe(0),
       message->GetStartColumn() + 1, createStackTrace(message->GetStackTrace()),
       origin.ScriptId());
-  m_throwingConditionReported.insert(breakpoint_id);
 }
 
 void V8Debugger::AsyncEventOccurred(v8::debug::DebugAsyncActionType type,
@@ -931,13 +915,13 @@ v8::MaybeLocal<v8::Array> V8Debugger::privateMethods(
     return v8::MaybeLocal<v8::Array>();
   }
   v8::Isolate* isolate = context->GetIsolate();
-  std::vector<v8::Local<v8::Value>> names;
-  std::vector<v8::Local<v8::Value>> values;
+  v8::LocalVector<v8::Value> names(isolate);
+  v8::LocalVector<v8::Value> values(isolate);
   int filter =
       static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateMethods);
   if (!v8::debug::GetPrivateMembers(context, receiver.As<v8::Object>(), filter,
                                     &names, &values) ||
-      names.size() == 0) {
+      names.empty()) {
     return v8::MaybeLocal<v8::Array>();
   }
 
@@ -1011,7 +995,7 @@ v8::Local<v8::Array> V8Debugger::queryObjects(v8::Local<v8::Context> context,
   v8::Isolate* isolate = context->GetIsolate();
   std::vector<v8::Global<v8::Object>> v8_objects;
   MatchPrototypePredicate predicate(m_inspector, context, prototype);
-  v8::debug::QueryObjects(context, &predicate, &v8_objects);
+  isolate->GetHeapProfiler()->QueryObjects(context, &predicate, &v8_objects);
 
   v8::MicrotasksScope microtasksScope(context,
                                       v8::MicrotasksScope::kDoNotRunMicrotasks);
@@ -1223,7 +1207,7 @@ void V8Debugger::asyncTaskStartedForStack(void* task) {
 void V8Debugger::asyncTaskFinishedForStack(void* task) {
   if (!m_maxAsyncCallStackDepth) return;
   // We could start instrumenting half way and the stack is empty.
-  if (!m_currentTasks.size()) return;
+  if (m_currentTasks.empty()) return;
   DCHECK(m_currentTasks.back() == task);
   m_currentTasks.pop_back();
 

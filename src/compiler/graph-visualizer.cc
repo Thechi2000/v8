@@ -91,10 +91,11 @@ void JsonPrintFunctionSource(std::ostream& os, int source_id,
 
   int start = 0;
   int end = 0;
-  if (!script.is_null() && !script->IsUndefined(isolate) && !shared.is_null()) {
-    Object source_name = script->name();
+  if (!script.is_null() && !IsUndefined(*script, isolate) &&
+      !shared.is_null()) {
+    Tagged<Object> source_name = script->name();
     os << ", \"sourceName\": \"";
-    if (source_name.IsString()) {
+    if (IsString(source_name)) {
       std::ostringstream escaped_name;
       escaped_name << String::cast(source_name)->ToCString().get();
       os << JSONEscaped(escaped_name);
@@ -104,7 +105,7 @@ void JsonPrintFunctionSource(std::ostream& os, int source_id,
       start = shared->StartPosition();
       end = shared->EndPosition();
       os << ", \"sourceText\": \"";
-      if (!script->source().IsUndefined()) {
+      if (!IsUndefined(script->source())) {
         DisallowGarbageCollection no_gc;
         int len = shared->EndPosition() - start;
         SubStringRange source(String::cast(script->source()), no_gc, start,
@@ -114,7 +115,7 @@ void JsonPrintFunctionSource(std::ostream& os, int source_id,
         }
 #if V8_ENABLE_WEBASSEMBLY
       } else if (shared->HasWasmExportedFunctionData()) {
-        WasmExportedFunctionData function_data =
+        Tagged<WasmExportedFunctionData> function_data =
             shared->wasm_exported_function_data();
         Handle<WasmInstanceObject> instance(function_data->instance(), isolate);
         const wasm::WasmModule* module = instance->module();
@@ -218,7 +219,7 @@ void JsonPrintAllSourceWithPositions(std::ostream& os,
   os << "\"sources\" : {";
   Handle<Script> script =
       (info->shared_info().is_null() ||
-       info->shared_info()->script() == Object())
+       info->shared_info()->script() == Tagged<Object>())
           ? Handle<Script>()
           : handle(Script::cast(info->shared_info()->script()), isolate);
   JsonPrintFunctionSource(os, -1,
@@ -329,10 +330,11 @@ std::unique_ptr<char[]> GetVisualizerLogFileName(OptimizedCompilationInfo* info,
   base::EmbeddedVector<char, 256> source_file(0);
   bool source_available = false;
   if (v8_flags.trace_file_names && info->has_shared_info() &&
-      info->shared_info()->script().IsScript()) {
-    Object source_name = Script::cast(info->shared_info()->script())->name();
-    if (source_name.IsString()) {
-      String str = String::cast(source_name);
+      IsScript(info->shared_info()->script())) {
+    Tagged<Object> source_name =
+        Script::cast(info->shared_info()->script())->name();
+    if (IsString(source_name)) {
+      Tagged<String> str = String::cast(source_name);
       if (str->length() > 0) {
         SNPrintF(source_file, "%s", str->ToCString().get());
         std::replace(source_file.begin(),
@@ -528,8 +530,7 @@ class GraphC1Visualizer {
   void PrintSchedule(const char* phase, const Schedule* schedule,
                      const SourcePositionTable* positions,
                      const InstructionSequence* instructions);
-  void PrintLiveRanges(const char* phase,
-                       const TopTierRegisterAllocationData* data);
+  void PrintLiveRanges(const char* phase, const RegisterAllocationData* data);
   Zone* zone() const { return zone_; }
 
  private:
@@ -810,8 +811,8 @@ void GraphC1Visualizer::PrintSchedule(const char* phase,
   }
 }
 
-void GraphC1Visualizer::PrintLiveRanges(
-    const char* phase, const TopTierRegisterAllocationData* data) {
+void GraphC1Visualizer::PrintLiveRanges(const char* phase,
+                                        const RegisterAllocationData* data) {
   Tag tag(this, "intervals");
   PrintStringProperty("name", phase);
 
@@ -923,14 +924,9 @@ std::ostream& operator<<(std::ostream& os, const AsC1V& ac) {
 
 std::ostream& operator<<(std::ostream& os,
                          const AsC1VRegisterAllocationData& ac) {
-  // TODO(rmcilroy): Add support for fast register allocator.
-  if (ac.data_->type() == RegisterAllocationData::kTopTier) {
-    AccountingAllocator allocator;
-    Zone tmp_zone(&allocator, ZONE_NAME);
-    GraphC1Visualizer(os, &tmp_zone)
-        .PrintLiveRanges(ac.phase_,
-                         TopTierRegisterAllocationData::cast(ac.data_));
-  }
+  AccountingAllocator allocator;
+  Zone tmp_zone(&allocator, ZONE_NAME);
+  GraphC1Visualizer(os, &tmp_zone).PrintLiveRanges(ac.phase_, ac.data_);
   return os;
 }
 
@@ -1179,22 +1175,12 @@ void PrintTopLevelLiveRanges(std::ostream& os,
 
 std::ostream& operator<<(std::ostream& os,
                          const RegisterAllocationDataAsJSON& ac) {
-  if (ac.data_.type() == RegisterAllocationData::kTopTier) {
-    const TopTierRegisterAllocationData& ac_data =
-        TopTierRegisterAllocationData::cast(ac.data_);
-    os << "\"fixed_double_live_ranges\": ";
-    PrintTopLevelLiveRanges(os, ac_data.fixed_double_live_ranges(), ac.code_);
-    os << ",\"fixed_live_ranges\": ";
-    PrintTopLevelLiveRanges(os, ac_data.fixed_live_ranges(), ac.code_);
-    os << ",\"live_ranges\": ";
-    PrintTopLevelLiveRanges(os, ac_data.live_ranges(), ac.code_);
-  } else {
-    // TODO(rmcilroy): Add support for fast register allocation data. For now
-    // output the expected fields to keep Turbolizer happy.
-    os << "\"fixed_double_live_ranges\": {}";
-    os << ",\"fixed_live_ranges\": {}";
-    os << ",\"live_ranges\": {}";
-  }
+  os << "\"fixed_double_live_ranges\": ";
+  PrintTopLevelLiveRanges(os, ac.data_.fixed_double_live_ranges(), ac.code_);
+  os << ",\"fixed_live_ranges\": ";
+  PrintTopLevelLiveRanges(os, ac.data_.fixed_live_ranges(), ac.code_);
+  os << ",\"live_ranges\": ";
+  PrintTopLevelLiveRanges(os, ac.data_.live_ranges(), ac.code_);
   return os;
 }
 

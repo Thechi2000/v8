@@ -92,7 +92,7 @@ class V8_EXPORT_PRIVATE Operand {
   V8_INLINE static Operand Zero();
   V8_INLINE explicit Operand(const ExternalReference& f);
   explicit Operand(Handle<HeapObject> handle);
-  V8_INLINE explicit Operand(Smi value);
+  V8_INLINE explicit Operand(Tagged<Smi> value);
 
   // rm
   V8_INLINE explicit Operand(Register rm);
@@ -211,13 +211,15 @@ class V8_EXPORT_PRIVATE MemOperand {
     return MemOperand(array, key, LSL, kPointerSizeLog2 - kSmiTagSize, am);
   }
 
+  bool IsImmediateOffset() const { return rm_ == no_reg; }
+
   void set_offset(int32_t offset) {
-    DCHECK(rm_ == no_reg);
+    DCHECK(IsImmediateOffset());
     offset_ = offset;
   }
 
-  uint32_t offset() const {
-    DCHECK(rm_ == no_reg);
+  int32_t offset() const {
+    DCHECK(IsImmediateOffset());
     return offset_;
   }
 
@@ -371,7 +373,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // This sets the branch destination (which is in the constant pool on ARM).
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
-      Address constant_pool_entry, Code code, Address target);
+      Address constant_pool_entry, Tagged<Code> code, Address target);
 
   // Get the size of the special target encoded at 'location'.
   inline static int deserialization_special_target_size(Address location);

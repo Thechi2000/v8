@@ -28,6 +28,7 @@ enum RememberedSetType {
   OLD_TO_OLD,
   OLD_TO_SHARED,
   OLD_TO_CODE,
+  TRUSTED_TO_TRUSTED,
   NUMBER_OF_REMEMBERED_SET_TYPES
 };
 
@@ -36,14 +37,15 @@ using ActiveSystemPages = ::heap::base::ActiveSystemPages;
 class V8_EXPORT_PRIVATE MemoryChunkLayout {
  public:
   static constexpr int kNumSets = NUMBER_OF_REMEMBERED_SET_TYPES;
-  static constexpr int kNumTypes = ExternalBackingStoreType::kNumTypes;
+  static constexpr int kNumTypes =
+      static_cast<int>(ExternalBackingStoreType::kNumValues);
   static constexpr int kMemoryChunkAlignment = sizeof(size_t);
 #define FIELD(Type, Name) \
   k##Name##Offset, k##Name##End = k##Name##Offset + sizeof(Type) - 1
   enum Header {
     // BasicMemoryChunk fields:
-    FIELD(size_t, Size),
     FIELD(uintptr_t, Flags),
+    FIELD(size_t, Size),
     FIELD(Heap*, Heap),
     FIELD(Address, AreaStart),
     FIELD(Address, AreaEnd),
@@ -90,7 +92,7 @@ class V8_EXPORT_PRIVATE MemoryChunkLayout {
   static intptr_t ObjectStartOffsetInCodePage();
   static intptr_t ObjectEndOffsetInCodePage();
   static size_t AllocatableMemoryInCodePage();
-  static intptr_t ObjectStartOffsetInDataPage();
+  static size_t ObjectStartOffsetInDataPage();
   static size_t AllocatableMemoryInDataPage();
   static intptr_t ObjectStartOffsetInReadOnlyPage();
   static size_t AllocatableMemoryInReadOnlyPage();

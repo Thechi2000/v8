@@ -46,9 +46,8 @@ Handle<T> GetLexical(const char* name) {
 
   VariableLookupResult lookup_result;
   if (script_contexts->Lookup(str_name, &lookup_result)) {
-    Handle<Context> script_context = ScriptContextTable::GetContext(
-        isolate, script_contexts, lookup_result.context_index);
-
+    Tagged<Context> script_context =
+        script_contexts->get(lookup_result.context_index);
     Handle<Object> result(script_context->get(lookup_result.slot_index),
                           isolate);
     return Handle<T>::cast(result);
@@ -72,26 +71,27 @@ static inline Handle<T> CompileRunI(const char* script) {
   return OpenHandle<T>(CompileRun(script));
 }
 
-static Object GetFieldValue(JSObject obj, int property_index) {
+static Tagged<Object> GetFieldValue(Tagged<JSObject> obj, int property_index) {
   FieldIndex index = FieldIndex::ForPropertyIndex(obj->map(), property_index);
   return obj->RawFastPropertyAt(index);
 }
 
-static double GetDoubleFieldValue(JSObject obj, FieldIndex field_index) {
-  Object value = obj->RawFastPropertyAt(field_index);
-  if (value.IsHeapNumber()) {
+static double GetDoubleFieldValue(Tagged<JSObject> obj,
+                                  FieldIndex field_index) {
+  Tagged<Object> value = obj->RawFastPropertyAt(field_index);
+  if (IsHeapNumber(value)) {
     return HeapNumber::cast(value)->value();
   } else {
-    return value.Number();
+    return Object::Number(value);
   }
 }
 
-static double GetDoubleFieldValue(JSObject obj, int property_index) {
+static double GetDoubleFieldValue(Tagged<JSObject> obj, int property_index) {
   FieldIndex index = FieldIndex::ForPropertyIndex(obj->map(), property_index);
   return GetDoubleFieldValue(obj, index);
 }
 
-bool IsObjectShrinkable(JSObject obj) {
+bool IsObjectShrinkable(Tagged<JSObject> obj) {
   Handle<Map> filler_map =
       CcTest::i_isolate()->factory()->one_pointer_filler_map();
 

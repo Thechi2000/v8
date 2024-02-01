@@ -396,10 +396,10 @@ void MipsDebugger::Debug() {
           int64_t value;
           StdoutStream os;
           if (GetValue(arg1, &value)) {
-            Object obj(value);
+            Tagged<Object> obj(value);
             os << arg1 << ": \n";
 #ifdef DEBUG
-            obj.Print(os);
+            Print(obj, os);
             os << "\n";
 #else
             os << Brief(obj) << "\n";
@@ -442,16 +442,16 @@ void MipsDebugger::Debug() {
         while (cur < end) {
           PrintF("  0x%012" PRIxPTR " :  0x%016" PRIx64 "  %14" PRId64 " ",
                  reinterpret_cast<intptr_t>(cur), *cur, *cur);
-          Object obj(*cur);
+          Tagged<Object> obj(*cur);
           Heap* current_heap = sim_->isolate_->heap();
           if (!skip_obj_print) {
-            if (obj.IsSmi() ||
+            if (IsSmi(obj) ||
                 IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
               PrintF(" (");
-              if (obj.IsSmi()) {
+              if (IsSmi(obj)) {
                 PrintF("smi %d", Smi::ToInt(obj));
               } else {
-                obj.ShortPrint();
+                ShortPrint(obj);
               }
               PrintF(")");
             }
@@ -894,12 +894,12 @@ void Simulator::set_fpu_register_hi_word(int fpureg, int32_t value) {
 
 void Simulator::set_fpu_register_float(int fpureg, float value) {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  *base::bit_cast<float*>(&FPUregisters_[fpureg * 2]) = value;
+  memcpy(&FPUregisters_[fpureg * 2], &value, sizeof(value));
 }
 
 void Simulator::set_fpu_register_double(int fpureg, double value) {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  *base::bit_cast<double*>(&FPUregisters_[fpureg * 2]) = value;
+  memcpy(&FPUregisters_[fpureg * 2], &value, sizeof(value));
 }
 
 // Get the register from the architecture state. This function does handle
@@ -947,13 +947,12 @@ int32_t Simulator::get_fpu_register_hi_word(int fpureg) const {
 
 float Simulator::get_fpu_register_float(int fpureg) const {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  return *base::bit_cast<float*>(
-      const_cast<int64_t*>(&FPUregisters_[fpureg * 2]));
+  return base::bit_cast<float>(get_fpu_register_word(fpureg));
 }
 
 double Simulator::get_fpu_register_double(int fpureg) const {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  return *base::bit_cast<double*>(&FPUregisters_[fpureg * 2]);
+  return base::bit_cast<double>(FPUregisters_[fpureg * 2]);
 }
 
 template <typename T>

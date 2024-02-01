@@ -578,6 +578,7 @@ class LocationOperand : public InstructionOperand {
       case MachineRepresentation::kNone:
         return false;
       case MachineRepresentation::kMapWord:
+      case MachineRepresentation::kIndirectPointer:
         break;
     }
     UNREACHABLE();
@@ -777,7 +778,8 @@ class V8_EXPORT_PRIVATE MoveOperands final
     if (dest_rep == MR::kTagged || dest_rep == MR::kTaggedPointer) {
       MR src_rep = LocationOperand::cast(&source_)->representation();
       DCHECK_NE(src_rep, MR::kCompressedPointer);
-      DCHECK_NE(src_rep, MR::kCompressed);
+      // TODO(dmercadier): it would be nice to insert a DEBUG runtime check here
+      // to make sure that if `src_rep` is kCompressed, then the value is a Smi.
     }
 #endif
   }
@@ -872,10 +874,12 @@ class V8_EXPORT_PRIVATE ParallelMove final
 
 std::ostream& operator<<(std::ostream&, const ParallelMove&);
 
+// TODOC(dmercadier): what is a ReferenceMap exactly, what does it contain,
+// when is it created, and what is it used for?
 class ReferenceMap final : public ZoneObject {
  public:
   explicit ReferenceMap(Zone* zone)
-      : reference_operands_(8, zone), instruction_position_(-1) {}
+      : reference_operands_(zone), instruction_position_(-1) {}
 
   const ZoneVector<InstructionOperand>& reference_operands() const {
     return reference_operands_;
@@ -1457,6 +1461,9 @@ class FrameStateDescriptor : public ZoneObject {
   size_t stack_count() const { return stack_count_; }
   MaybeHandle<SharedFunctionInfo> shared_info() const { return shared_info_; }
   FrameStateDescriptor* outer_state() const { return outer_state_; }
+  bool HasClosure() const {
+    return type_ != FrameStateType::kConstructInvokeStub;
+  }
   bool HasContext() const {
     return FrameStateFunctionInfo::IsJSFunctionType(type_) ||
            type_ == FrameStateType::kBuiltinContinuation ||
@@ -1705,12 +1712,9 @@ struct PrintableInstructionBlock {
 
 std::ostream& operator<<(std::ostream&, const PrintableInstructionBlock&);
 
-using ConstantDeque = ZoneDeque<Constant>;
-using ConstantMap = std::map<int, Constant, std::less<int>,
-                             ZoneAllocator<std::pair<const int, Constant> > >;
-
-using InstructionDeque = ZoneDeque<Instruction*>;
-using ReferenceMapDeque = ZoneDeque<ReferenceMap*>;
+using ConstantMap = ZoneUnorderedMap</* virtual register */ int, Constant>;
+using Instructions = ZoneVector<Instruction*>;
+using ReferenceMaps = ZoneVector<ReferenceMap*>;
 using InstructionBlocks = ZoneVector<InstructionBlock*>;
 
 // Represents architecture-specific generated code before, during, and after
@@ -1753,7 +1757,9 @@ class V8_EXPORT_PRIVATE InstructionSequence final
     return instruction_blocks_->at(rpo_number.ToSize());
   }
 
-  InstructionBlock* GetInstructionBlock(int instruction_index) const;
+  InstructionBlock* GetInstructionBlock(int instruction_index) const {
+    return instructions()[instruction_index]->block();
+  }
 
   static MachineRepresentation DefaultRepresentation() {
     return MachineType::PointerRepresentation();
@@ -1785,10 +1791,10 @@ class V8_EXPORT_PRIVATE InstructionSequence final
 
   Instruction* GetBlockStart(RpoNumber rpo) const;
 
-  using const_iterator = InstructionDeque::const_iterator;
+  using const_iterator = Instructions::const_iterator;
   const_iterator begin() const { return instructions_.begin(); }
   const_iterator end() const { return instructions_.end(); }
-  const InstructionDeque& instructions() const { return instructions_; }
+  const Instructions& instructions() const { return instructions_; }
   int LastInstructionIndex() const {
     return static_cast<int>(instructions().size()) - 1;
   }
@@ -1800,7 +1806,7 @@ class V8_EXPORT_PRIVATE InstructionSequence final
   }
 
   Isolate* isolate() const { return isolate_; }
-  const ReferenceMapDeque* reference_maps() const { return &reference_maps_; }
+  const ReferenceMaps* reference_maps() const { return &reference_maps_; }
   Zone* zone() const { return zone_; }
 
   // Used by the instruction selector while adding instructions.
@@ -1808,13 +1814,12 @@ class V8_EXPORT_PRIVATE InstructionSequence final
   void StartBlock(RpoNumber rpo);
   void EndBlock(RpoNumber rpo);
 
-  int AddConstant(int virtual_register, Constant constant) {
+  void AddConstant(int virtual_register, Constant constant) {
     // TODO(titzer): allow RPO numbers as constants?
     DCHECK_NE(Constant::kRpoNumber, constant.type());
     DCHECK(virtual_register >= 0 && virtual_register < next_virtual_register_);
     DCHECK(constants_.find(virtual_register) == constants_.end());
-    constants_.insert(std::make_pair(virtual_register, constant));
-    return virtual_register;
+    constants_.emplace(virtual_register, constant);
   }
   Constant GetConstant(int virtual_register) const {
     auto it = constants_.find(virtual_register);
@@ -1925,7 +1930,8 @@ class V8_EXPORT_PRIVATE InstructionSequence final
   friend V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&,
                                                     const InstructionSequence&);
 
-  using SourcePositionMap = ZoneMap<const Instruction*, SourcePosition>;
+  using SourcePositionMap =
+      ZoneAbslFlatHashMap<const Instruction*, SourcePosition>;
 
   static const RegisterConfiguration* RegisterConfigurationForTesting();
   static const RegisterConfiguration* registerConfigurationForTesting_;
@@ -1941,9 +1947,9 @@ class V8_EXPORT_PRIVATE InstructionSequence final
   ConstantMap constants_;
   Immediates immediates_;
   RpoImmediates rpo_immediates_;
-  InstructionDeque instructions_;
+  Instructions instructions_;
   int next_virtual_register_;
-  ReferenceMapDeque reference_maps_;
+  ReferenceMaps reference_maps_;
   ZoneVector<MachineRepresentation> representations_;
   int representation_mask_;
   DeoptimizationVector deoptimization_entries_;

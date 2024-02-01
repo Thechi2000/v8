@@ -56,9 +56,9 @@ bool SatisfiesAssertion(RegExpAssertion::Type type,
 }
 
 base::Vector<RegExpInstruction> ToInstructionVector(
-    ByteArray raw_bytes, const DisallowGarbageCollection& no_gc) {
+    Tagged<ByteArray> raw_bytes, const DisallowGarbageCollection& no_gc) {
   RegExpInstruction* inst_begin =
-      reinterpret_cast<RegExpInstruction*>(raw_bytes->GetDataStartAddress());
+      reinterpret_cast<RegExpInstruction*>(raw_bytes->begin());
   int inst_num = raw_bytes->length() / sizeof(RegExpInstruction);
   DCHECK_EQ(sizeof(RegExpInstruction) * inst_num, raw_bytes->length());
   return base::Vector<RegExpInstruction>(inst_begin, inst_num);
@@ -66,11 +66,11 @@ base::Vector<RegExpInstruction> ToInstructionVector(
 
 template <class Character>
 base::Vector<const Character> ToCharacterVector(
-    String str, const DisallowGarbageCollection& no_gc);
+    Tagged<String> str, const DisallowGarbageCollection& no_gc);
 
 template <>
 base::Vector<const uint8_t> ToCharacterVector<uint8_t>(
-    String str, const DisallowGarbageCollection& no_gc) {
+    Tagged<String> str, const DisallowGarbageCollection& no_gc) {
   DCHECK(str->IsFlat());
   String::FlatContent content = str->GetFlatContent(no_gc);
   DCHECK(content.IsOneByte());
@@ -79,7 +79,7 @@ base::Vector<const uint8_t> ToCharacterVector<uint8_t>(
 
 template <>
 base::Vector<const base::uc16> ToCharacterVector<base::uc16>(
-    String str, const DisallowGarbageCollection& no_gc) {
+    Tagged<String> str, const DisallowGarbageCollection& no_gc) {
   DCHECK(str->IsFlat());
   String::FlatContent content = str->GetFlatContent(no_gc);
   DCHECK(content.IsTwoByte());
@@ -149,10 +149,6 @@ class FilterGroups {
   }
 
   base::Vector<int> Run() {
-    if (pc_ == bytecode_.length()) {
-      return registers_;
-    }
-
     while (!completed_) {
       auto instr = bytecode_[pc_];
       switch (instr.opcode) {
@@ -279,9 +275,9 @@ class NfaInterpreter {
   // ACCEPTing thread with highest priority.
  public:
   NfaInterpreter(Isolate* isolate, RegExp::CallOrigin call_origin,
-                 ByteArray bytecode, int register_count_per_match,
-                 int quantifier_count, String input, int32_t input_index,
-                 Zone* zone)
+                 Tagged<ByteArray> bytecode, int register_count_per_match,
+                 int quantifier_count, Tagged<String> input,
+                 int32_t input_index, Zone* zone)
       : isolate_(isolate),
         call_origin_(call_origin),
         bytecode_object_(bytecode),
@@ -292,18 +288,55 @@ class NfaInterpreter {
         input_(ToCharacterVector<Character>(input, no_gc_)),
         input_index_(input_index),
         clock(0),
-        pc_last_input_index_(zone->AllocateArray<int>(bytecode.length()),
-                             bytecode.length()),
+        pc_last_input_index_(
+            zone->AllocateArray<LastInputIndex>(bytecode->length()),
+            bytecode->length()),
         active_threads_(0, zone),
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
         best_match_thread_(base::nullopt),
+        lookbehind_pc_(0, zone),
+        filter_groups_pc_(base::nullopt),
+        lookbehind_table_(0, zone),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(), -1);
+    // Finds the starting PC of every lookbehind. Since they are listed one
+    // after the other, they start after each `ACCEPT` and
+    // `WRITE_LOOKBEHIND_TABLE` instructions (except the last one). We do not
+    // iterate over the last instruction, since it cannot be followed by a
+    // lookbehind's bytecode.
+    for (int i = 0; i < bytecode_.length() - 1; ++i) {
+      // After the `ACCEPT`, we need to skip the `FILTER_*` instruction before
+      // reaching the first lookbehind.
+      if (bytecode_[i].opcode == RegExpInstruction::Opcode::ACCEPT) {
+        ++i;
+
+        if (RegExpInstruction::IsFilter(bytecode_[i]) && i < bytecode_.length()) {
+          filter_groups_pc_ = i;
+        }
+
+        while (RegExpInstruction::IsFilter(bytecode_[i])) {
+          i++;
+        }
+
+        if (i < bytecode_.length()) {
+          lookbehind_pc_.Add(i, zone_);
+          lookbehind_table_.Add(false, zone_);
+        }
+      }
+
+      if (bytecode_[i].opcode ==
+          RegExpInstruction::Opcode::WRITE_LOOKBEHIND_TABLE) {
+        lookbehind_pc_.Add(i + 1, zone_);
+        lookbehind_table_.Add(false, zone_);
+      }
+    }
+
+    std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
+              LastInputIndex());
   }
 
   // Finds matches and writes their concatenated capture registers to
@@ -357,13 +390,17 @@ class NfaInterpreter {
   // be confused with an OS thread.)
   class InterpreterThread {
    public:
+    enum class ConsumedCharacter { DidConsume, DidNotConsume };
+
     InterpreterThread(int pc, int* register_array_begin,
                       int* quantifiers_clock_array_begin,
-                      int* captures_clock_array_begin)
+                      int* captures_clock_array_begin,
+                      ConsumedCharacter consumed_since_last_quantifier)
         : pc(pc),
           register_array_begin(register_array_begin),
           quantifiers_clock_array_begin(quantifiers_clock_array_begin),
-          captures_clock_array_begin(captures_clock_array_begin) {}
+          captures_clock_array_begin(captures_clock_array_begin),
+          consumed_since_last_quantifier(consumed_since_last_quantifier) {}
 
     // This thread's program counter, i.e. the index within `bytecode_` of the
     // next instruction to be executed.
@@ -372,11 +409,18 @@ class NfaInterpreter {
     // `register_count_per_match_`.  Should be deallocated with
     // `register_array_allocator_`.
     int* register_array_begin;
+
     // Pointer to an array containing the clock when the register was last
     // saved, which is always size `register_count_per_match_`.  Should be
     // deallocated with `register_array_allocator_`.
     int* quantifiers_clock_array_begin;
     int* captures_clock_array_begin;
+
+    // Describe whether the thread consumed a character since it last entered a
+    // quantifier. Since quantifier iterations that match the empty string are
+    // not allowed, we need to distinguish threads that are allowed to exit a
+    // quantifier iteration from those that are not.
+    ConsumedCharacter consumed_since_last_quantifier;
   };
 
   // Handles pending interrupts if there are any.  Returns
@@ -415,12 +459,12 @@ class NfaInterpreter {
         const bool was_one_byte =
             String::IsOneByteRepresentationUnderneath(input_object_);
 
-        Object result;
+        Tagged<Object> result;
         {
           AllowGarbageCollection yes_gc;
           result = isolate_->stack_guard()->HandleInterrupts();
         }
-        if (result.IsException(isolate_)) {
+        if (IsException(result, isolate_)) {
           return RegExp::kInternalRegExpException;
         }
 
@@ -469,7 +513,9 @@ class NfaInterpreter {
     //
     // for all k > 0 hold I think everything should be fine.  Maybe we can do
     // something about this in `SetInputIndex`.
-    std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(), -1);
+    std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
+              LastInputIndex());
+    std::fill(lookbehind_table_.begin(), lookbehind_table_.end(), false);
 
     // Clean up left-over data from a previous call to FindNextMatch.
     for (InterpreterThread t : blocked_threads_) {
@@ -487,11 +533,24 @@ class NfaInterpreter {
       best_match_thread_ = base::nullopt;
     }
 
-    // All threads start at bytecode 0.
+    // The lookbehind threads need to be executed before the thread of their
+    // parent (lookbehind or main expression). The order of the bytecode (see
+    // also `BytecodeAssembler`) ensures that they need to be executed from last
+    // to first (as of their position in the bytecode). The main expression
+    // bytecode is located at PC 0, and is executed with the lowest priority.
     active_threads_.Add(
         InterpreterThread(0, NewRegisterArray(kUndefinedRegisterValue),
-                          NewQuantifierClockArray(0), NewCaptureClockArray(0)),
+                          NewQuantifierClockArray(0), NewCaptureClockArray(0),
+                          InterpreterThread::ConsumedCharacter::DidConsume),
         zone_);
+
+    for (int i : lookbehind_pc_) {
+      active_threads_.Add(
+          InterpreterThread(i, NewRegisterArray(kUndefinedRegisterValue),
+                            NewQuantifierClockArray(0), NewCaptureClockArray(0),
+                            InterpreterThread::ConsumedCharacter::DidConsume),
+          zone_);
+    }
     // Run the initial thread, potentially forking new threads, until every
     // thread is blocked without further input.
     RunActiveThreads();
@@ -508,6 +567,8 @@ class NfaInterpreter {
       DCHECK(active_threads_.is_empty());
       base::uc16 input_char = input_[input_index_];
       ++input_index_;
+
+      std::fill(lookbehind_table_.begin(), lookbehind_table_.end(), false);
 
       static constexpr int kTicksBetweenInterruptHandling = 64;
       if (input_index_ % kTicksBetweenInterruptHandling == 0) {
@@ -535,8 +596,8 @@ class NfaInterpreter {
     ++clock;
 
     while (true) {
-      if (IsPcProcessed(t.pc)) return;
-      MarkPcProcessed(t.pc);
+      if (IsPcProcessed(t.pc, t.consumed_since_last_quantifier)) return;
+      MarkPcProcessed(t.pc, t.consumed_since_last_quantifier);
 
       RegExpInstruction inst = bytecode_[t.pc];
       switch (inst.opcode) {
@@ -556,7 +617,8 @@ class NfaInterpreter {
           InterpreterThread fork(inst.payload.pc,
                                  NewRegisterArrayUninitialized(),
                                  NewQuantifierClockArrayUninitialized(),
-                                 NewCaptureClockArrayUninitialized());
+                                 NewCaptureClockArrayUninitialized(),
+                                 t.consumed_since_last_quantifier);
 
           base::Vector<int> fork_registers = GetRegisterArray(fork);
           base::Vector<int> t_registers = GetRegisterArray(t);
@@ -613,6 +675,44 @@ class NfaInterpreter {
         case RegExpInstruction::FILTER_GROUP:
         case RegExpInstruction::FILTER_CHILD:
           UNREACHABLE();
+        case RegExpInstruction::BEGIN_LOOP:
+          t.consumed_since_last_quantifier =
+              InterpreterThread::ConsumedCharacter::DidNotConsume;
+          ++t.pc;
+          break;
+        case RegExpInstruction::END_LOOP:
+          // If the thread did not consume any character during a whole
+          // quantifier iteration,then it must be destroyed, since quantifier
+          // repetitions are not allowed to match the empty string.
+          if (t.consumed_since_last_quantifier ==
+              InterpreterThread::ConsumedCharacter::DidNotConsume) {
+            DestroyThread(t);
+            return;
+          }
+          ++t.pc;
+          break;
+        case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
+          // Reaching this instruction means that the current lookbehind thread
+          // has found a match and needs to be destroyed. Since the lookbehind
+          // is verified at this position, we update the `lookbehind_table_`.
+          lookbehind_table_[inst.payload.looktable_index] = true;
+          DestroyThread(t);
+          return;
+        case RegExpInstruction::READ_LOOKBEHIND_TABLE:
+          // Destroy the thread if the corresponding lookbehind did or did not
+          // complete a match at the current position (depending on whether or
+          // not the lookbehind is positive). The thread's priority ensures that
+          // all the threads of the lookbehind have already been run at this
+          // position.
+          if (lookbehind_table_[inst.payload.read_lookbehind
+                                    .lookbehind_index()] !=
+              inst.payload.read_lookbehind.is_positive()) {
+            DestroyThread(t);
+            return;
+          }
+
+          ++t.pc;
+          break;
       }
     }
   }
@@ -640,6 +740,8 @@ class NfaInterpreter {
       RegExpInstruction::Uc16Range range = inst.payload.consume_range;
       if (input_char >= range.min && input_char <= range.max) {
         ++t.pc;
+        t.consumed_since_last_quantifier =
+            InterpreterThread::ConsumedCharacter::DidConsume;
         active_threads_.Add(t, zone_);
       } else {
         DestroyThread(t);
@@ -713,15 +815,20 @@ class NfaInterpreter {
 
   base::Vector<int> GetFilteredRegisters(InterpreterThread t) {
     base::Vector<int> registers = GetRegisterArray(t);
-    base::Vector<int> filtered_registers(
-        NewRegisterArray(kUndefinedRegisterValue), register_count_per_match_);
 
-    filtered_registers[0] = registers[0];
-    filtered_registers[1] = registers[1];
+    if (filter_groups_pc_.has_value()) {
+      base::Vector<int> filtered_registers(
+          NewRegisterArray(kUndefinedRegisterValue), register_count_per_match_);
 
-    return FilterGroups::Filter(t.pc + 1, registers, GetQuantifierClockArray(t),
-                                GetCaptureClockArray(t), filtered_registers,
-                                bytecode_, zone_);
+      filtered_registers[0] = registers[0];
+      filtered_registers[1] = registers[1];
+
+      return FilterGroups::Filter(
+          *filter_groups_pc_, registers, GetQuantifierClockArray(t),
+          GetCaptureClockArray(t), filtered_registers, bytecode_, zone_);
+    } else {
+      return registers;
+    }
   }
 
   void DestroyThread(InterpreterThread t) {
@@ -730,28 +837,51 @@ class NfaInterpreter {
     FreeCaptureClockArray(t.captures_clock_array_begin);
   }
 
-  // It is redundant to have two threads t, t0 execute at the same PC value,
-  // because one of t, t0 matches iff the other does.  We can thus discard
-  // the one with lower priority.  We check whether a thread executed at some
-  // PC value by recording for every possible value of PC what the value of
-  // input_index_ was the last time a thread executed at PC. If a thread
-  // tries to continue execution at a PC value that we have seen before at
-  // the current input index, we abort it. (We execute threads with higher
-  // priority first, so the second thread is guaranteed to have lower
-  // priority.)
+  // It is redundant to have two threads t, t0 execute at the same PC and
+  // consumed_since_last_quantifier values, because one of t, t0 matches iff the
+  // other does.  We can thus discard the one with lower priority.  We check
+  // whether a thread executed at some PC value by recording for every possible
+  // value of PC what the value of input_index_ was the last time a thread
+  // executed at PC. If a thread tries to continue execution at a PC value that
+  // we have seen before at the current input index, we abort it. (We execute
+  // threads with higher priority first, so the second thread is guaranteed to
+  // have lower priority.)
   //
-  // Check whether we've seen an active thread with a given pc value since the
-  // last increment of `input_index_`.
-  bool IsPcProcessed(int pc) {
-    DCHECK_LE(pc_last_input_index_[pc], input_index_);
-    return pc_last_input_index_[pc] == input_index_;
+  // Check whether we've seen an active thread with a given pc and
+  // consumed_since_last_quantifier value since the last increment of
+  // `input_index_`.
+  bool IsPcProcessed(int pc, typename InterpreterThread::ConsumedCharacter
+                                 consumed_since_last_quantifier) {
+    switch (consumed_since_last_quantifier) {
+      case InterpreterThread::ConsumedCharacter::DidConsume:
+        DCHECK_LE(pc_last_input_index_[pc].having_consumed_character,
+                  input_index_);
+        return pc_last_input_index_[pc].having_consumed_character ==
+               input_index_;
+      case InterpreterThread::ConsumedCharacter::DidNotConsume:
+        DCHECK_LE(pc_last_input_index_[pc].not_having_consumed_character,
+                  input_index_);
+        return pc_last_input_index_[pc].not_having_consumed_character ==
+               input_index_;
+    }
   }
 
   // Mark a pc as having been processed since the last increment of
   // `input_index_`.
-  void MarkPcProcessed(int pc) {
-    DCHECK_LE(pc_last_input_index_[pc], input_index_);
-    pc_last_input_index_[pc] = input_index_;
+  void MarkPcProcessed(int pc, typename InterpreterThread::ConsumedCharacter
+                                   consumed_since_last_quantifier) {
+    switch (consumed_since_last_quantifier) {
+      case InterpreterThread::ConsumedCharacter::DidConsume:
+        DCHECK_LE(pc_last_input_index_[pc].having_consumed_character,
+                  input_index_);
+        pc_last_input_index_[pc].having_consumed_character = input_index_;
+        break;
+      case InterpreterThread::ConsumedCharacter::DidNotConsume:
+        DCHECK_LE(pc_last_input_index_[pc].not_having_consumed_character,
+                  input_index_);
+        pc_last_input_index_[pc].not_having_consumed_character = input_index_;
+        break;
+    }
   }
 
   Isolate* const isolate_;
@@ -760,7 +890,7 @@ class NfaInterpreter {
 
   DisallowGarbageCollection no_gc_;
 
-  ByteArray bytecode_object_;
+  Tagged<ByteArray> bytecode_object_;
   base::Vector<const RegExpInstruction> bytecode_;
 
   // Number of registers used per thread.
@@ -769,18 +899,33 @@ class NfaInterpreter {
   // Number of quantifiers in the regexp.
   const int quantifiers_count_;
 
-  String input_object_;
+  Tagged<String> input_object_;
   base::Vector<const Character> input_;
   int input_index_;
 
   // Global clock counting the total of executed instructions
   int clock;
 
-  // pc_last_input_index_[k] records the value of input_index_ the last
-  // time a thread t such that t.pc == k was activated, i.e. put on
-  // active_threads_.  Thus pc_last_input_index.size() == bytecode.size().  See
-  // also `RunActiveThread`.
-  base::Vector<int> pc_last_input_index_;
+  // Stores the last input index at which a thread was activated for a given pc.
+  // Two values are stored, depending on the value
+  // consumed_since_last_quantifier of the thread.
+  class LastInputIndex {
+   public:
+    LastInputIndex() : LastInputIndex(-1, -1) {}
+    LastInputIndex(int having_consumed_character,
+                   int not_having_consumed_character)
+        : having_consumed_character(having_consumed_character),
+          not_having_consumed_character(not_having_consumed_character) {}
+
+    int having_consumed_character;
+    int not_having_consumed_character;
+  };
+
+  // pc_last_input_index_[k] records the values of input_index_ the last
+  // time a thread t such that t.pc == k was activated for both values of
+  // consumed_since_last_quantifier. Thus pc_last_input_index.size() ==
+  // bytecode.size(). See also `RunActiveThread`.
+  base::Vector<LastInputIndex> pc_last_input_index_;
 
   // Active threads can potentially (but not necessarily) continue without
   // input.  Sorted from low to high priority.
@@ -801,20 +946,33 @@ class NfaInterpreter {
   // `register_array_allocator_`.
   base::Optional<InterpreterThread> best_match_thread_;
 
+  // Starting PC of each of the lookbehinds in the bytecode. Computed during the
+  // NFA instantiation (see the constructor).
+  ZoneList<int> lookbehind_pc_;
+
+  // PC of the first FILTER_* instruction. Computed during the NFA instantiation
+  // (see the constructor). May be empty if their are no such instructions (in
+  // the case where there are no capture groups).
+  base::Optional<int> filter_groups_pc_;
+
+  // Truth table for the lookbehinds. lookbehind_table_[k] indicates whether the
+  // lookbehind of index k did complete a match on the current position.
+  ZoneList<bool> lookbehind_table_;
+
   Zone* zone_;
 };
 
 }  // namespace
 
 int ExperimentalRegExpInterpreter::FindMatches(
-    Isolate* isolate, RegExp::CallOrigin call_origin, ByteArray bytecode,
-    int register_count_per_match, int quantifier_count, String input,
-    int start_index, int32_t* output_registers, int output_register_count,
-    Zone* zone) {
-  DCHECK(input.IsFlat());
+    Isolate* isolate, RegExp::CallOrigin call_origin,
+    Tagged<ByteArray> bytecode, int register_count_per_match,
+    int quantifier_count, Tagged<String> input, int start_index,
+    int32_t* output_registers, int output_register_count, Zone* zone) {
+  DCHECK(input->IsFlat());
   DisallowGarbageCollection no_gc;
 
-  if (input.GetFlatContent(no_gc).IsOneByte()) {
+  if (input->GetFlatContent(no_gc).IsOneByte()) {
     NfaInterpreter<uint8_t> interpreter(
         isolate, call_origin, bytecode, register_count_per_match,
         quantifier_count, input, start_index, zone);

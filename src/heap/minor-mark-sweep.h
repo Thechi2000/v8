@@ -10,58 +10,21 @@
 #include <vector>
 
 #include "src/common/globals.h"
-#include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/heap.h"
 #include "src/heap/index-generator.h"
 #include "src/heap/marking-state.h"
-#include "src/heap/marking-visitor.h"
 #include "src/heap/marking-worklist.h"
 #include "src/heap/parallel-work-item.h"
 #include "src/heap/pretenuring-handler.h"
 #include "src/heap/slot-set.h"
 #include "src/heap/sweeper.h"
+#include "src/heap/young-generation-marking-visitor.h"
 
 namespace v8 {
 namespace internal {
 
-class YoungGenerationMainMarkingVisitor final
-    : public YoungGenerationMarkingVisitorBase<
-          YoungGenerationMainMarkingVisitor> {
- public:
-  YoungGenerationMainMarkingVisitor(
-      Isolate* isolate, MarkingWorklists::Local* worklists_local,
-      EphemeronRememberedSet::TableList::Local* ephemeron_table_list_local);
-
-  ~YoungGenerationMainMarkingVisitor() override;
-
-  YoungGenerationMainMarkingVisitor(const YoungGenerationMainMarkingVisitor&) =
-      delete;
-  YoungGenerationMainMarkingVisitor& operator=(
-      const YoungGenerationMainMarkingVisitor&) = delete;
-
-  template <typename TSlot>
-  V8_INLINE void VisitPointersImpl(HeapObject host, TSlot start, TSlot end);
-
-  V8_INLINE void IncrementLiveBytesCached(MemoryChunk* chunk, intptr_t by);
-
-  template <typename TSlot>
-  V8_INLINE bool VisitObjectViaSlotInRemeberedSet(TSlot slot);
-
-  V8_INLINE bool ShortCutStrings(HeapObjectSlot slot, HeapObject* heap_object);
-
- private:
-  PretenuringHandler::PretenuringFeedbackMap local_pretenuring_feedback_;
-  const bool shortcut_strings_;
-
-  static constexpr size_t kNumEntries = 128;
-  static constexpr size_t kEntriesMask = kNumEntries - 1;
-  // Fixed-size hashmap that caches live bytes. Hashmap entries are evicted to
-  // the global counters on collision.
-  std::array<std::pair<MemoryChunk*, size_t>, kNumEntries> live_bytes_data_;
-
-  friend class YoungGenerationMarkingVisitorBase<
-      YoungGenerationMainMarkingVisitor>;
-};
+using YoungGenerationMainMarkingVisitor = YoungGenerationMarkingVisitor<
+    YoungGenerationMarkingVisitationMode::kParallel>;
 
 class YoungGenerationRememberedSetsMarkingWorklist {
  private:
@@ -130,14 +93,6 @@ class YoungGenerationRememberedSetsMarkingWorklist {
     V8_INLINE SlotCallbackResult CheckAndMarkObject(Visitor* visitor,
                                                     TSlot slot);
 
-    V8_INLINE void CheckOldToNewSlotForSharedUntyped(MemoryChunk* chunk,
-                                                     Address slot_address,
-                                                     MaybeObject object);
-    V8_INLINE void CheckOldToNewSlotForSharedTyped(MemoryChunk* chunk,
-                                                   SlotType slot_type,
-                                                   Address slot_address,
-                                                   MaybeObject new_target);
-
     MemoryChunk* const chunk_;
     const SlotsType slots_type_;
     union {
@@ -189,7 +144,9 @@ class MinorMarkSweepCollector final {
 
   void TearDown();
   void CollectGarbage();
-  void StartMarking();
+  void StartMarking(bool force_use_background_threads);
+
+  void RequestGC();
 
   EphemeronRememberedSet::TableList* ephemeron_table_list() const {
     return ephemeron_table_list_.get();
@@ -197,8 +154,8 @@ class MinorMarkSweepCollector final {
 
   MarkingWorklists* marking_worklists() { return marking_worklists_.get(); }
 
-  MarkingWorklists::Local* local_marking_worklists() const {
-    return local_marking_worklists_.get();
+  MarkingWorklists::Local* local_marking_worklists() {
+    return &main_marking_visitor_->marking_worklists_local();
   }
 
   YoungGenerationRememberedSetsMarkingWorklist*
@@ -211,6 +168,18 @@ class MinorMarkSweepCollector final {
     return main_marking_visitor_.get();
   }
 
+  bool is_in_atomic_pause() const {
+    return is_in_atomic_pause_.load(std::memory_order_relaxed);
+  }
+
+  bool gc_finalization_requsted() const {
+    return gc_finalization_requested_.load(std::memory_order_relaxed);
+  }
+
+  bool UseBackgroundThreadsInCycle() const {
+    return use_background_threads_in_cycle_.value();
+  }
+
  private:
   using ResizeNewSpaceMode = Heap::ResizeNewSpaceMode;
 
@@ -221,7 +190,6 @@ class MinorMarkSweepCollector final {
   void MarkLiveObjects();
   void MarkRoots(YoungGenerationRootMarkingVisitor& root_visitor,
                  bool was_marked_incrementally);
-  void DoParallelMarking();
   void DrainMarkingWorklist();
   void MarkRootsFromTracedHandles(
       YoungGenerationRootMarkingVisitor& root_visitor);
@@ -245,21 +213,26 @@ class MinorMarkSweepCollector final {
   Heap* const heap_;
 
   std::unique_ptr<MarkingWorklists> marking_worklists_;
-  std::unique_ptr<MarkingWorklists::Local> local_marking_worklists_;
 
   std::unique_ptr<EphemeronRememberedSet::TableList> ephemeron_table_list_;
-  std::unique_ptr<EphemeronRememberedSet::TableList::Local>
-      local_ephemeron_table_list_;
   std::unique_ptr<YoungGenerationMainMarkingVisitor> main_marking_visitor_;
 
   MarkingState* const marking_state_;
   NonAtomicMarkingState* const non_atomic_marking_state_;
   Sweeper* const sweeper_;
 
+  std::unique_ptr<PretenuringHandler::PretenuringFeedbackMap>
+      pretenuring_feedback_;
+
   std::unique_ptr<YoungGenerationRememberedSetsMarkingWorklist>
       remembered_sets_marking_handler_;
 
   ResizeNewSpaceMode resize_new_space_ = ResizeNewSpaceMode::kNone;
+
+  base::Optional<bool> use_background_threads_in_cycle_;
+
+  std::atomic<bool> is_in_atomic_pause_{false};
+  std::atomic<bool> gc_finalization_requested_{false};
 
   friend class IncrementalMarking;
 };

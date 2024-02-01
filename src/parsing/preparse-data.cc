@@ -524,12 +524,12 @@ class OnHeapProducedPreparseData final : public ProducedPreparseData {
       : data_(data) {}
 
   Handle<PreparseData> Serialize(Isolate* isolate) final {
-    DCHECK(!data_->is_null());
+    DCHECK(!data_.is_null());
     return data_;
   }
 
   Handle<PreparseData> Serialize(LocalIsolate* isolate) final {
-    DCHECK(!data_->is_null());
+    DCHECK(!data_.is_null());
     DCHECK_IMPLIES(!isolate->is_main_thread(),
                    isolate->heap()->ContainsLocalHandle(data_.location()));
     return data_;
@@ -762,7 +762,9 @@ bool BaseConsumedPreparseData<Data>::VerifyDataStart() {
 }
 #endif
 
-PreparseData OnHeapConsumedPreparseData::GetScopeData() { return *data_; }
+Tagged<PreparseData> OnHeapConsumedPreparseData::GetScopeData() {
+  return *data_;
+}
 
 ProducedPreparseData* OnHeapConsumedPreparseData::GetChildData(Zone* zone,
                                                                int index) {
@@ -773,9 +775,11 @@ ProducedPreparseData* OnHeapConsumedPreparseData::GetChildData(Zone* zone,
 
 OnHeapConsumedPreparseData::OnHeapConsumedPreparseData(
     LocalIsolate* isolate, Handle<PreparseData> data)
-    : BaseConsumedPreparseData<PreparseData>(), isolate_(isolate), data_(data) {
+    : BaseConsumedPreparseData<Tagged<PreparseData>>(),
+      isolate_(isolate),
+      data_(data) {
   DCHECK_NOT_NULL(isolate);
-  DCHECK(data->IsPreparseData());
+  DCHECK(IsPreparseData(*data));
   DCHECK(VerifyDataStart());
 }
 

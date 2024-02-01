@@ -70,8 +70,8 @@ void MaglevAssembler::Allocate(RegisterSnapshot register_snapshot,
         __ b(*done);
       },
       register_snapshot, object,
-      in_new_space ? Builtin::kAllocateRegularInYoungGeneration
-                   : Builtin::kAllocateRegularInOldGeneration,
+      in_new_space ? Builtin::kAllocateInYoungGeneration
+                   : Builtin::kAllocateInOldGeneration,
       size_in_bytes, done);
   // Store new top and tag object.
   Move(ExternalReferenceAsOperand(top, scratch), new_top);
@@ -263,8 +263,8 @@ void MaglevAssembler::StringFromCharCode(RegisterSnapshot register_snapshot,
         register_snapshot.live_registers.set(char_code);
         __ AllocateTwoByteString(register_snapshot, string, 1);
         __ and_(scratch, char_code, Operand(0xFFFF));
-        __ strh(scratch,
-                FieldMemOperand(string, SeqTwoByteString::kHeaderSize));
+        __ strh(scratch, FieldMemOperand(
+                             string, OFFSET_OF_DATA_START(SeqTwoByteString)));
         if (reallocate_result) {
           __ Move(result, string);
         }
@@ -332,14 +332,13 @@ void MaglevAssembler::StringCharCodeOrCodePointAt(
                              LAST_STRING_TYPE);
     Check(ls, AbortReason::kUnexpectedValue);
 
-    ldr(scratch, FieldMemOperand(string, String::kLengthOffset));
+    ldr(scratch, FieldMemOperand(string, offsetof(String, length_)));
     cmp(index, scratch);
     Check(lo, AbortReason::kUnexpectedValue);
   }
 
   // Get instance type.
-  LoadMap(instance_type, string);
-  ldr(instance_type, FieldMemOperand(instance_type, Map::kInstanceTypeOffset));
+  LoadInstanceType(instance_type, string);
 
   {
     ScratchRegisterScope temps(this);
@@ -360,7 +359,7 @@ void MaglevAssembler::StringCharCodeOrCodePointAt(
 
   // Is a thin string.
   {
-    ldr(string, FieldMemOperand(string, ThinString::kActualOffset));
+    ldr(string, FieldMemOperand(string, offsetof(ThinString, actual_)));
     b(&loop);
   }
 
@@ -369,9 +368,9 @@ void MaglevAssembler::StringCharCodeOrCodePointAt(
     ScratchRegisterScope temps(this);
     Register offset = temps.Acquire();
 
-    ldr(offset, FieldMemOperand(string, SlicedString::kOffsetOffset));
-    SmiUntag(offset);
-    ldr(string, FieldMemOperand(string, SlicedString::kParentOffset));
+    LoadAndUntagTaggedSignedField(offset, string,
+                                  offsetof(SlicedString, offset_));
+    LoadTaggedField(string, string, offsetof(SlicedString, parent_));
     add(index, index, offset);
     b(&loop);
   }
@@ -381,10 +380,10 @@ void MaglevAssembler::StringCharCodeOrCodePointAt(
     // Reuse {instance_type} register here, since CompareRoot requires a scratch
     // register as well.
     Register second_string = instance_type;
-    ldr(second_string, FieldMemOperand(string, ConsString::kSecondOffset));
+    ldr(second_string, FieldMemOperand(string, offsetof(ConsString, second_)));
     CompareRoot(second_string, RootIndex::kempty_string);
     b(ne, deferred_runtime_call);
-    ldr(string, FieldMemOperand(string, ConsString::kFirstOffset));
+    ldr(string, FieldMemOperand(string, offsetof(ConsString, first_)));
     b(&loop);  // Try again with first string.
   }
 
@@ -396,7 +395,8 @@ void MaglevAssembler::StringCharCodeOrCodePointAt(
     // The result of one-byte string will be the same for both modes
     // (CharCodeAt/CodePointAt), since it cannot be the first half of a
     // surrogate pair.
-    add(index, index, Operand(SeqOneByteString::kHeaderSize - kHeapObjectTag));
+    add(index, index,
+        Operand(OFFSET_OF_DATA_START(SeqOneByteString) - kHeapObjectTag));
     ldrb(result, MemOperand(string, index));
     b(result_fits_one_byte);
 
@@ -405,7 +405,7 @@ void MaglevAssembler::StringCharCodeOrCodePointAt(
     Register scratch = instance_type;
     lsl(scratch, index, Operand(1));
     add(scratch, scratch,
-        Operand(SeqTwoByteString::kHeaderSize - kHeapObjectTag));
+        Operand(OFFSET_OF_DATA_START(SeqTwoByteString) - kHeapObjectTag));
     ldrh(result, MemOperand(string, scratch));
 
     if (mode == BuiltinStringPrototypeCharCodeOrCodePointAt::kCodePointAt) {
@@ -415,7 +415,7 @@ void MaglevAssembler::StringCharCodeOrCodePointAt(
       b(ne, *done);
 
       Register length = scratch;
-      ldr(length, FieldMemOperand(string, String::kLengthOffset));
+      ldr(length, FieldMemOperand(string, offsetof(String, length_)));
       add(index, index, Operand(1));
       cmp(index, length);
       b(ge, *done);
@@ -423,7 +423,7 @@ void MaglevAssembler::StringCharCodeOrCodePointAt(
       Register second_code_point = scratch;
       lsl(index, index, Operand(1));
       add(index, index,
-          Operand(SeqTwoByteString::kHeaderSize - kHeapObjectTag));
+          Operand(OFFSET_OF_DATA_START(SeqTwoByteString) - kHeapObjectTag));
       ldrh(second_code_point, MemOperand(string, index));
 
       // {index} is not needed at this point.
@@ -561,8 +561,8 @@ void MaglevAssembler::TryChangeFloat64ToIndex(Register result,
   // Check that the result of the float64->int32->float64 is equal to
   // the input (i.e. that the conversion didn't truncate).
   VFPCompareAndSetFlags(value, converted_back);
-  JumpIf(kEqual, success);
-  Jump(fail);
+  JumpIf(kNotEqual, fail);
+  Jump(success);
 }
 
 }  // namespace maglev

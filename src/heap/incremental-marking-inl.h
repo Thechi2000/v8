@@ -15,7 +15,8 @@
 namespace v8 {
 namespace internal {
 
-void IncrementalMarking::TransferColor(HeapObject from, HeapObject to) {
+void IncrementalMarking::TransferColor(Tagged<HeapObject> from,
+                                       Tagged<HeapObject> to) {
   if (marking_state()->IsMarked(to)) {
     DCHECK(black_allocation());
     return;
@@ -25,7 +26,7 @@ void IncrementalMarking::TransferColor(HeapObject from, HeapObject to) {
     bool success = marking_state()->TryMark(to);
     DCHECK(success);
     USE(success);
-    if (!to.IsDescriptorArray() ||
+    if (!IsDescriptorArray(to) ||
         (DescriptorArrayMarkingState::Marked::decode(
              DescriptorArray::cast(to)->raw_gc_state(kRelaxedLoad)) != 0)) {
       MemoryChunk::FromHeapObject(to)->IncrementLiveBytesAtomically(

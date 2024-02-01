@@ -25,17 +25,13 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import imp
-import itertools
-import os
-import re
+import importlib.machinery
 import sys
 
 from pathlib import Path
 
 from testrunner.local import statusfile
 from testrunner.local import testsuite
-from testrunner.local import utils
 from testrunner.objects import testcase
 from testrunner.outproc import base as outproc
 from testrunner.outproc import test262
@@ -58,12 +54,16 @@ FEATURE_FLAGS = {
     'ShadowRealm': '--harmony-shadow-realm',
     'regexp-v-flag': '--harmony-regexp-unicode-sets',
     'array-grouping': '--harmony-array-grouping',
-    'change-array-by-copy': '--harmony-change-array-by-copy',
     'String.prototype.isWellFormed': '--harmony-string-is-well-formed',
     'String.prototype.toWellFormed': '--harmony-string-is-well-formed',
     'arraybuffer-transfer': '--harmony-rab-gsab-transfer',
     'json-parse-with-source': '--harmony-json-parse-with-source',
     'iterator-helpers': '--harmony-iterator-helpers',
+    'set-methods': '--harmony-set-methods',
+    'promise-with-resolvers': '--js-promise-withresolvers',
+    'Array.fromAsync': '--harmony-array-from-async',
+    'import-attributes': '--harmony-import-attributes',
+    'regexp-duplicate-named-groups': '--js-regexp-duplicate-named-groups',
 }
 
 SKIPPED_FEATURES = set([])
@@ -143,11 +143,12 @@ class TestSuite(testsuite.TestSuite):
     root = TEST_262_TOOLS_ABS_PATH
     f = None
     try:
-      (f, pathname, description) = imp.find_module("parseTestRecord", [root])
-      module = imp.load_module("parseTestRecord", f, pathname, description)
+      loader = importlib.machinery.SourceFileLoader(
+          "parseTestRecord", f"{root}/parseTestRecord.py")
+      module = loader.load_module()
       return module.parseTestRecord
-    except:
-      print('Cannot load parseTestRecord')
+    except Exception as e:
+      print(f'Cannot load parseTestRecord: {e}')
       raise
     finally:
       if f:
@@ -174,6 +175,7 @@ class TestCase(testcase.D8TestCase):
           .get('negative', {})
           .get('type', None)
     )
+    self._async = 'async' in self.test_record.get('flags', [])
 
     # We disallow combining FAIL_PHASE_ONLY with any other fail outcome types.
     # Outcome parsing logic in the base class converts all outcomes specified in
@@ -249,14 +251,14 @@ class TestCase(testcase.D8TestCase):
     if self._expected_exception is not None:
       return test262.ExceptionOutProc(self.expected_outcomes,
                                       self._expected_exception,
-                                      self._fail_phase_reverse)
+                                      self._fail_phase_reverse, self._async)
     else:
       # We only support fail phase reverse on tests that expect an exception.
       assert not self._fail_phase_reverse
 
     if self.expected_outcomes == outproc.OUTCOMES_PASS:
-      return test262.PASS_NO_EXCEPTION
-    return test262.NoExceptionOutProc(self.expected_outcomes)
+      return test262.PassNoExceptionOutProc(self._async)
+    return test262.NoExceptionOutProc(self.expected_outcomes, self._async)
 
   def skip_rdb(self, result):
     return not result.has_unexpected_output

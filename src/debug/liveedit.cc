@@ -534,7 +534,6 @@ bool ParseScript(Isolate* isolate, Handle<Script> script, ParseInfo* parse_info,
     }
   }
   if (!success) {
-    isolate->OptionalRescheduleException(false);
     DCHECK(try_catch.HasCaught());
     result->message = try_catch.Message()->Get();
     i::Handle<i::JSMessageObject> msg = Utils::OpenHandle(*try_catch.Message());
@@ -569,12 +568,12 @@ class FunctionDataMap : public ThreadVisitor {
     map_.emplace(GetFuncId(script_id, literal), FunctionData{literal});
   }
 
-  bool Lookup(SharedFunctionInfo sfi, FunctionData** data) {
+  bool Lookup(Tagged<SharedFunctionInfo> sfi, FunctionData** data) {
     int start_position = sfi->StartPosition();
-    if (!sfi->script().IsScript() || start_position == -1) {
+    if (!IsScript(sfi->script()) || start_position == -1) {
       return false;
     }
-    Script script = Script::cast(sfi->script());
+    Tagged<Script> script = Script::cast(sfi->script());
     return Lookup(GetFuncId(script->id(), sfi), data);
   }
 
@@ -587,23 +586,23 @@ class FunctionDataMap : public ThreadVisitor {
     {
       HeapObjectIterator iterator(isolate->heap(),
                                   HeapObjectIterator::kFilterUnreachable);
-      for (HeapObject obj = iterator.Next(); !obj.is_null();
+      for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
            obj = iterator.Next()) {
-        if (obj.IsSharedFunctionInfo()) {
-          SharedFunctionInfo sfi = SharedFunctionInfo::cast(obj);
+        if (IsSharedFunctionInfo(obj)) {
+          Tagged<SharedFunctionInfo> sfi = SharedFunctionInfo::cast(obj);
           FunctionData* data = nullptr;
           if (!Lookup(sfi, &data)) continue;
           data->shared = handle(sfi, isolate);
-        } else if (obj.IsJSFunction()) {
-          JSFunction js_function = JSFunction::cast(obj);
-          SharedFunctionInfo sfi = js_function->shared();
+        } else if (IsJSFunction(obj)) {
+          Tagged<JSFunction> js_function = JSFunction::cast(obj);
+          Tagged<SharedFunctionInfo> sfi = js_function->shared();
           FunctionData* data = nullptr;
           if (!Lookup(sfi, &data)) continue;
           data->js_functions.emplace_back(js_function, isolate);
-        } else if (obj.IsJSGeneratorObject()) {
-          JSGeneratorObject gen = JSGeneratorObject::cast(obj);
+        } else if (IsJSGeneratorObject(obj)) {
+          Tagged<JSGeneratorObject> gen = JSGeneratorObject::cast(obj);
           if (gen->is_closed()) continue;
-          SharedFunctionInfo sfi = gen->function()->shared();
+          Tagged<SharedFunctionInfo> sfi = gen->function()->shared();
           FunctionData* data = nullptr;
           if (!Lookup(sfi, &data)) continue;
           data->running_generators.emplace_back(gen, isolate);
@@ -635,7 +634,7 @@ class FunctionDataMap : public ThreadVisitor {
     return FuncId(script_id, start_position);
   }
 
-  FuncId GetFuncId(int script_id, SharedFunctionInfo sfi) {
+  FuncId GetFuncId(int script_id, Tagged<SharedFunctionInfo> sfi) {
     DCHECK_EQ(script_id, Script::cast(sfi->script())->id());
     int start_position = sfi->StartPosition();
     DCHECK_NE(start_position, -1);
@@ -760,14 +759,15 @@ void UpdatePositions(Isolate* isolate, Handle<SharedFunctionInfo> sfi,
 }
 
 #ifdef DEBUG
-ScopeInfo FindOuterScopeInfoFromScriptSfi(Isolate* isolate,
-                                          Handle<Script> script) {
+Tagged<ScopeInfo> FindOuterScopeInfoFromScriptSfi(Isolate* isolate,
+                                                  Handle<Script> script) {
   // We take some SFI from the script and walk outwards until we find the
   // EVAL_SCOPE. Then we do the same search as `DetermineOuterScopeInfo` and
   // check that we found the same ScopeInfo.
   SharedFunctionInfo::ScriptIterator it(isolate, *script);
-  ScopeInfo other_scope_info;
-  for (SharedFunctionInfo sfi = it.Next(); !sfi.is_null(); sfi = it.Next()) {
+  Tagged<ScopeInfo> other_scope_info;
+  for (Tagged<SharedFunctionInfo> sfi = it.Next(); !sfi.is_null();
+       sfi = it.Next()) {
     if (!sfi->scope_info()->IsEmpty()) {
       other_scope_info = sfi->scope_info();
       break;
@@ -804,12 +804,12 @@ MaybeHandle<ScopeInfo> DetermineOuterScopeInfo(Isolate* isolate,
                                                Handle<Script> script) {
   if (!script->has_eval_from_shared()) return kNullMaybeHandle;
   DCHECK_EQ(script->compilation_type(), Script::CompilationType::kEval);
-  ScopeInfo scope_info = script->eval_from_shared()->scope_info();
+  Tagged<ScopeInfo> scope_info = script->eval_from_shared()->scope_info();
   // Sloppy eval compiles use the ScopeInfo of the context. Let's find it.
   while (!scope_info->IsEmpty()) {
     if (scope_info->HasContext()) {
 #ifdef DEBUG
-      ScopeInfo other_scope_info =
+      Tagged<ScopeInfo> other_scope_info =
           FindOuterScopeInfoFromScriptSfi(isolate, script);
       DCHECK_IMPLIES(!other_scope_info.is_null(),
                      scope_info == other_scope_info);
@@ -912,7 +912,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
 
     isolate->compilation_cache()->Remove(sfi);
     isolate->debug()->DeoptimizeFunction(sfi);
-    if (base::Optional<DebugInfo> di = sfi->TryGetDebugInfo(isolate)) {
+    if (base::Optional<Tagged<DebugInfo>> di = sfi->TryGetDebugInfo(isolate)) {
       Handle<DebugInfo> debug_info(di.value(), isolate);
       isolate->debug()->RemoveBreakInfoAndMaybeFree(debug_info);
     }
@@ -921,7 +921,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
 
     sfi->set_script(*new_script, kReleaseStore);
     sfi->set_function_literal_id(mapping.second->function_literal_id());
-    new_script->shared_function_infos()->Set(
+    new_script->shared_function_infos()->set(
         mapping.second->function_literal_id(), HeapObjectReference::Weak(*sfi));
     DCHECK_EQ(sfi->function_literal_id(),
               mapping.second->function_literal_id());
@@ -938,7 +938,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
     for (auto& js_function : data->js_functions) {
       js_function->set_raw_feedback_cell(
           *isolate->factory()->many_closures_cell());
-      if (!js_function->is_compiled()) continue;
+      if (!js_function->is_compiled(isolate)) continue;
       IsCompiledScope is_compiled_scope(
           js_function->shared()->is_compiled_scope(isolate));
       JSFunction::EnsureFeedbackVector(isolate, js_function,
@@ -946,9 +946,10 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
     }
 
     if (!sfi->HasBytecodeArray()) continue;
-    FixedArray constants = sfi->GetBytecodeArray(isolate)->constant_pool();
+    Tagged<FixedArray> constants =
+        sfi->GetBytecodeArray(isolate)->constant_pool();
     for (int i = 0; i < constants->length(); ++i) {
-      if (!constants->get(i).IsSharedFunctionInfo()) continue;
+      if (!IsSharedFunctionInfo(constants->get(i))) continue;
       data = nullptr;
       if (!function_data_map.Lookup(SharedFunctionInfo::cast(constants->get(i)),
                                     &data)) {
@@ -986,7 +987,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
 
       js_function->set_raw_feedback_cell(
           *isolate->factory()->many_closures_cell());
-      if (!js_function->is_compiled()) continue;
+      if (!js_function->is_compiled(isolate)) continue;
       IsCompiledScope is_compiled_scope(
           js_function->shared()->is_compiled_scope(isolate));
       JSFunction::EnsureFeedbackVector(isolate, js_function,
@@ -994,12 +995,14 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
     }
   }
   SharedFunctionInfo::ScriptIterator it(isolate, *new_script);
-  for (SharedFunctionInfo sfi = it.Next(); !sfi.is_null(); sfi = it.Next()) {
+  for (Tagged<SharedFunctionInfo> sfi = it.Next(); !sfi.is_null();
+       sfi = it.Next()) {
     if (!sfi->HasBytecodeArray()) continue;
-    FixedArray constants = sfi->GetBytecodeArray(isolate)->constant_pool();
+    Tagged<FixedArray> constants =
+        sfi->GetBytecodeArray(isolate)->constant_pool();
     for (int i = 0; i < constants->length(); ++i) {
-      if (!constants->get(i).IsSharedFunctionInfo()) continue;
-      SharedFunctionInfo inner_sfi =
+      if (!IsSharedFunctionInfo(constants->get(i))) continue;
+      Tagged<SharedFunctionInfo> inner_sfi =
           SharedFunctionInfo::cast(constants->get(i));
       // See if there is a mapping from this function's start position to a
       // unchanged function's id.
@@ -1009,10 +1012,10 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
 
       // Grab that function id from the new script's SFI list, which should have
       // already been updated in in the unchanged pass.
-      SharedFunctionInfo old_unchanged_inner_sfi =
+      Tagged<SharedFunctionInfo> old_unchanged_inner_sfi =
           SharedFunctionInfo::cast(new_script->shared_function_infos()
-                                       ->Get(unchanged_it->second)
-                                       ->GetHeapObject());
+                                       ->get(unchanged_it->second)
+                                       .GetHeapObject());
       if (old_unchanged_inner_sfi == inner_sfi) continue;
       DCHECK_NE(old_unchanged_inner_sfi, inner_sfi);
       // Now some sanity checks. Make sure that the unchanged SFI has already
@@ -1030,7 +1033,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
 
     SharedFunctionInfo::ScriptIterator script_it(isolate, *new_script);
     std::set<int> start_positions;
-    for (SharedFunctionInfo sfi = script_it.Next(); !sfi.is_null();
+    for (Tagged<SharedFunctionInfo> sfi = script_it.Next(); !sfi.is_null();
          sfi = script_it.Next()) {
       DCHECK_EQ(sfi->script(), *new_script);
       DCHECK_EQ(sfi->function_literal_id(), script_it.CurrentIndex());
@@ -1046,15 +1049,16 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
       // Check that all the functions in this function's constant pool are also
       // on the new script, and that their id matches their index in the new
       // scripts function list.
-      FixedArray constants = sfi->GetBytecodeArray(isolate)->constant_pool();
+      Tagged<FixedArray> constants =
+          sfi->GetBytecodeArray(isolate)->constant_pool();
       for (int i = 0; i < constants->length(); ++i) {
-        if (!constants->get(i).IsSharedFunctionInfo()) continue;
-        SharedFunctionInfo inner_sfi =
+        if (!IsSharedFunctionInfo(constants->get(i))) continue;
+        Tagged<SharedFunctionInfo> inner_sfi =
             SharedFunctionInfo::cast(constants->get(i));
         DCHECK_EQ(inner_sfi->script(), *new_script);
         DCHECK_EQ(inner_sfi, new_script->shared_function_infos()
-                                 ->Get(inner_sfi->function_literal_id())
-                                 ->GetHeapObject());
+                                 ->get(inner_sfi->function_literal_id())
+                                 .GetHeapObject());
       }
     }
   }

@@ -35,7 +35,7 @@ class InterpreterCallable {
  public:
   virtual ~InterpreterCallable() = default;
 
-  FeedbackVector vector() const { return function_->feedback_vector(); }
+  Tagged<FeedbackVector> vector() const { return function_->feedback_vector(); }
 
  protected:
   InterpreterCallable(Isolate* isolate, Handle<JSFunction> function)
@@ -166,8 +166,8 @@ class InterpreterTester {
     }
 
     if (!bytecode_.is_null()) {
-      function->shared()->set_function_data(*bytecode_.ToHandleChecked(),
-                                            kReleaseStore);
+      function->shared()->overwrite_bytecode_array(
+          *bytecode_.ToHandleChecked());
       is_compiled_scope = function->shared()->is_compiled_scope(isolate_);
     }
     if (HasFeedbackMetadata()) {

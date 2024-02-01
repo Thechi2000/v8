@@ -60,7 +60,7 @@ void PrintCode(Isolate* isolate, CodeDesc desc) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif  // OBJECT_PRINT
 }
 
@@ -90,7 +90,7 @@ TEST_F(MacroAssemblerX64Test, TestCheck) {
 
   // Fail if the first parameter is 17.
   __ movl(rax, Immediate(17));
-  __ cmpl(rax, arg_reg_1);
+  __ cmpl(rax, kCArgRegs[0]);
   __ Check(Condition::not_equal, AbortReason::kNoReason);
   __ ret(0);
 
@@ -165,9 +165,9 @@ TEST_F(MacroAssemblerX64Test, Smi) {
     bool is_in_range = number >= Smi::kMinValue && number <= Smi::kMaxValue;
     CHECK_EQ(is_in_range, is_valid);
     if (is_valid) {
-      Smi smi_from_intptr = Smi::FromIntptr(number);
+      Tagged<Smi> smi_from_intptr = Smi::FromIntptr(number);
       if (static_cast<int>(number) == number) {  // Is a 32-bit int.
-        Smi smi_from_int = Smi::FromInt(static_cast<int32_t>(number));
+        Tagged<Smi> smi_from_int = Smi::FromInt(static_cast<int32_t>(number));
         CHECK_EQ(smi_from_int, smi_from_intptr);
       }
       int64_t smi_value = smi_from_intptr.value();
@@ -176,7 +176,8 @@ TEST_F(MacroAssemblerX64Test, Smi) {
   }
 }
 
-static void TestMoveSmi(MacroAssembler* masm, Label* exit, int id, Smi value) {
+static void TestMoveSmi(MacroAssembler* masm, Label* exit, int id,
+                        Tagged<Smi> value) {
   __ movl(rax, Immediate(id));
   __ Move(rcx, value);
   __ Move(rdx, static_cast<intptr_t>(value.ptr()));
@@ -246,12 +247,16 @@ void TestSmiCompare(MacroAssembler* masm, Label* exit, int id, int x, int y) {
     __ movl(rax, Immediate(id + 3));
     __ j(not_equal, exit);
   }
+  // In this build config we clobber SMIs to stress test consumers, thus
+  // SmiCompare can actually change unused bits.
+#ifndef ENABLE_SLOW_DCHECKS
   __ movl(rax, Immediate(id + 4));
   __ cmpq(rcx, r8);
   __ j(not_equal, exit);
   __ incq(rax);
   __ cmpq(rdx, r9);
   __ j(not_equal, exit);
+#endif
 
   if (x != y) {
     __ SmiCompare(rdx, rcx);
@@ -267,9 +272,11 @@ void TestSmiCompare(MacroAssembler* masm, Label* exit, int id, int x, int y) {
     __ cmpq(rcx, rcx);
     __ movl(rax, Immediate(id + 11));
     __ j(not_equal, exit);
+#ifndef ENABLE_SLOW_DCHECKS
     __ incq(rax);
     __ cmpq(rcx, r8);
     __ j(not_equal, exit);
+#endif
   }
 }
 
@@ -541,11 +548,11 @@ TEST_F(MacroAssemblerX64Test, EmbeddedObj) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
   using myF0 = Address();
   auto f = GeneratedCode<myF0>::FromAddress(isolate, code->instruction_start());
-  Object result = Object(f.Call());
+  Tagged<Object> result = Tagged<Object>(f.Call());
   CHECK_EQ(old_array->ptr(), result.ptr());
 
   // Collect garbage to ensure reloc info can be walked by the heap.
@@ -572,7 +579,7 @@ TEST_F(MacroAssemblerX64Test, EmbeddedObj) {
 TEST_F(MacroAssemblerX64Test, SmiIndex) {
   Isolate* isolate = i_isolate();
   HandleScope handles(isolate);
-  auto buffer = AllocateAssemblerBuffer();
+  auto buffer = AllocateAssemblerBuffer(2 * Assembler::kDefaultBufferSize);
   MacroAssembler assembler(isolate, v8::internal::CodeObjectRequired::kYes,
                            buffer->CreateView());
 
@@ -1127,13 +1134,13 @@ TEST_F(MacroAssemblerX64Test, S256Select) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load src1, src2, mask
-  __ vmovdqu(src1, Operand(arg_reg_1, 0));
-  __ vmovdqu(src2, Operand(arg_reg_2, 0));
-  __ vmovdqu(mask, Operand(arg_reg_3, 0));
+  __ vmovdqu(src1, Operand(kCArgRegs[0], 0));
+  __ vmovdqu(src2, Operand(kCArgRegs[1], 0));
+  __ vmovdqu(mask, Operand(kCArgRegs[2], 0));
   // Bitselect
   __ S256Select(dst, mask, src1, src2, tmp);
   // Store result
-  __ vmovdqu(Operand(arg_reg_4, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[3], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1219,7 +1226,11 @@ TEST_F(MacroAssemblerX64Test, DeoptExitSizeIsFixed) {
   for (int i = 0; i < kDeoptimizeKindCount; i++) {
     DeoptimizeKind kind = static_cast<DeoptimizeKind>(i);
     Label before_exit;
+
     masm.bind(&before_exit);
+    if (kind == DeoptimizeKind::kLazy) {
+      masm.CodeEntry();
+    }
     Builtin target = Deoptimizer::GetDeoptimizationEntry(kind);
     masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
                                nullptr);
@@ -1244,12 +1255,12 @@ TEST_F(MacroAssemblerX64Test, I64x2Mul) {
   const XMMRegister tmp2 = xmm4;
 
   // Load array
-  __ movdqu(lhs, Operand(arg_reg_1, 0));
-  __ movdqu(rhs, Operand(arg_reg_2, 0));
+  __ movdqu(lhs, Operand(kCArgRegs[0], 0));
+  __ movdqu(rhs, Operand(kCArgRegs[1], 0));
   // Calculation
   __ I64x2Mul(dst, lhs, rhs, tmp1, tmp2);
   // Store result array
-  __ movdqu(Operand(arg_reg_3, 0), dst);
+  __ movdqu(Operand(kCArgRegs[2], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1305,12 +1316,12 @@ TEST_F(MacroAssemblerX64Test, I64x4Mul) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(lhs, Operand(arg_reg_1, 0));
-  __ vmovdqu(rhs, Operand(arg_reg_2, 0));
+  __ vmovdqu(lhs, Operand(kCArgRegs[0], 0));
+  __ vmovdqu(rhs, Operand(kCArgRegs[1], 0));
   // Calculation
   __ I64x4Mul(dst, lhs, rhs, tmp1, tmp2);
   // Store result array
-  __ vmovdqu(Operand(arg_reg_3, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[2], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1368,12 +1379,12 @@ TEST_F(MacroAssemblerX64Test, I64x4Mul) {
     CpuFeatureScope avx2_scope(masm, AVX2);                                   \
                                                                               \
     /* src is register */                                                     \
-    __ name(ymm0, arg_reg_1);                                                 \
-    __ vmovdqu(Operand(arg_reg_3, 0), ymm0);                                  \
+    __ name(ymm0, kCArgRegs[0]);                                              \
+    __ vmovdqu(Operand(kCArgRegs[2], 0), ymm0);                               \
                                                                               \
     /* src is address*/                                                       \
-    __ name(ymm0, Operand(arg_reg_2, 0));                                     \
-    __ vmovdqu(Operand(arg_reg_4, 0), ymm0);                                  \
+    __ name(ymm0, Operand(kCArgRegs[1], 0));                                  \
+    __ vmovdqu(Operand(kCArgRegs[3], 0), ymm0);                               \
     __ ret(0);                                                                \
                                                                               \
     CodeDesc desc;                                                            \
@@ -1423,12 +1434,12 @@ TEST_F(MacroAssemblerX64Test, F64x4Min) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(lhs, Operand(arg_reg_1, 0));
-  __ vmovdqu(rhs, Operand(arg_reg_2, 0));
+  __ vmovdqu(lhs, Operand(kCArgRegs[0], 0));
+  __ vmovdqu(rhs, Operand(kCArgRegs[1], 0));
   // Calculation
   __ F64x4Min(dst, lhs, rhs, tmp);
   // Store result array
-  __ vmovdqu(Operand(arg_reg_3, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[2], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1438,7 +1449,7 @@ TEST_F(MacroAssemblerX64Test, F64x4Min) {
   Handle<Code> code =
       Factory::CodeBuilder(i_isolate(), desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
   buffer->MakeExecutable();
   // Call the function from C++.
@@ -1490,12 +1501,12 @@ TEST_F(MacroAssemblerX64Test, F64x4Max) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(lhs, Operand(arg_reg_1, 0));
-  __ vmovdqu(rhs, Operand(arg_reg_2, 0));
+  __ vmovdqu(lhs, Operand(kCArgRegs[0], 0));
+  __ vmovdqu(rhs, Operand(kCArgRegs[1], 0));
   // Calculation
   __ F64x4Max(dst, lhs, rhs, tmp);
   // Store result array
-  __ vmovdqu(Operand(arg_reg_3, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[2], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1505,7 +1516,7 @@ TEST_F(MacroAssemblerX64Test, F64x4Max) {
   Handle<Code> code =
       Factory::CodeBuilder(i_isolate(), desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
   buffer->MakeExecutable();
   // Call the function from C++.
@@ -1557,12 +1568,12 @@ TEST_F(MacroAssemblerX64Test, F32x8Min) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(lhs, Operand(arg_reg_1, 0));
-  __ vmovdqu(rhs, Operand(arg_reg_2, 0));
+  __ vmovdqu(lhs, Operand(kCArgRegs[0], 0));
+  __ vmovdqu(rhs, Operand(kCArgRegs[1], 0));
   // Calculation
   __ F32x8Min(dst, lhs, rhs, tmp);
   // Store result array
-  __ vmovdqu(Operand(arg_reg_3, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[2], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1572,7 +1583,7 @@ TEST_F(MacroAssemblerX64Test, F32x8Min) {
   Handle<Code> code =
       Factory::CodeBuilder(i_isolate(), desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
   buffer->MakeExecutable();
   // Call the function from C++.
@@ -1627,12 +1638,12 @@ TEST_F(MacroAssemblerX64Test, F32x8Max) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(lhs, Operand(arg_reg_1, 0));
-  __ vmovdqu(rhs, Operand(arg_reg_2, 0));
+  __ vmovdqu(lhs, Operand(kCArgRegs[0], 0));
+  __ vmovdqu(rhs, Operand(kCArgRegs[1], 0));
   // Calculation
   __ F32x8Max(dst, lhs, rhs, tmp);
   // Store result array
-  __ vmovdqu(Operand(arg_reg_3, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[2], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1642,7 +1653,7 @@ TEST_F(MacroAssemblerX64Test, F32x8Max) {
   Handle<Code> code =
       Factory::CodeBuilder(i_isolate(), desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
   buffer->MakeExecutable();
   // Call the function from C++.
@@ -1700,8 +1711,8 @@ void RunExtMulTest(Isolate* isolate, OpType expected_op) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(lhs, Operand(arg_reg_1, 0));
-  __ vmovdqu(rhs, Operand(arg_reg_2, 0));
+  __ vmovdqu(lhs, Operand(kCArgRegs[0], 0));
+  __ vmovdqu(rhs, Operand(kCArgRegs[1], 0));
 
   bool is_signed = std::is_signed_v<T>;
   // Calculation
@@ -1720,7 +1731,7 @@ void RunExtMulTest(Isolate* isolate, OpType expected_op) {
   }
 
   // Store result array
-  __ vmovdqu(Operand(arg_reg_3, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[2], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1810,11 +1821,11 @@ TEST_F(MacroAssemblerX64Test, I32x8ExtAddPairwiseI16x16S) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(src, Operand(arg_reg_1, 0));
+  __ vmovdqu(src, Operand(kCArgRegs[0], 0));
   // Calculation
   __ I32x8ExtAddPairwiseI16x16S(dst, src, tmp);
   // Store result array
-  __ vmovdqu(Operand(arg_reg_2, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[1], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1868,11 +1879,11 @@ TEST_F(MacroAssemblerX64Test, I16x16ExtAddPairwiseI8x32S) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(src, Operand(arg_reg_1, 0));
+  __ vmovdqu(src, Operand(kCArgRegs[0], 0));
   // Calculation
   __ I16x16ExtAddPairwiseI8x32S(dst, src, tmp);
   // Store result array
-  __ vmovdqu(Operand(arg_reg_2, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[1], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1930,11 +1941,11 @@ TEST_F(MacroAssemblerX64Test, I32x8ExtAddPairwiseI16x16U) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(src, Operand(arg_reg_1, 0));
+  __ vmovdqu(src, Operand(kCArgRegs[0], 0));
   // Calculation
   __ I32x8ExtAddPairwiseI16x16U(dst, src, tmp);
   // Store result array
-  __ vmovdqu(Operand(arg_reg_2, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[1], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -1987,11 +1998,11 @@ TEST_F(MacroAssemblerX64Test, I16x16ExtAddPairwiseI8x32U) {
   CpuFeatureScope avx2_scope(masm, AVX2);
 
   // Load array
-  __ vmovdqu(src, Operand(arg_reg_1, 0));
+  __ vmovdqu(src, Operand(kCArgRegs[0], 0));
   // Calculation
   __ I16x16ExtAddPairwiseI8x32U(dst, src, tmp);
   // Store result array
-  __ vmovdqu(Operand(arg_reg_2, 0), dst);
+  __ vmovdqu(Operand(kCArgRegs[1], 0), dst);
   __ ret(0);
 
   CodeDesc desc;
@@ -2042,9 +2053,9 @@ TEST_F(MacroAssemblerX64Test, F64x4Splat) {
   CpuFeatureScope avx_scope(masm, AVX);
   CpuFeatureScope avx2_scope(masm, AVX2);
 
-  __ vmovsd(xmm1, Operand(arg_reg_1, 0));
+  __ vmovsd(xmm1, Operand(kCArgRegs[0], 0));
   __ F64x4Splat(ymm2, xmm1);
-  __ vmovdqu(Operand(arg_reg_2, 0), ymm2);
+  __ vmovdqu(Operand(kCArgRegs[1], 0), ymm2);
   __ ret(0);
 
   CodeDesc desc;
@@ -2076,9 +2087,9 @@ TEST_F(MacroAssemblerX64Test, F32x8Splat) {
   CpuFeatureScope avx_scope(masm, AVX);
   CpuFeatureScope avx2_scope(masm, AVX2);
 
-  __ vmovss(xmm1, Operand(arg_reg_1, 0));
+  __ vmovss(xmm1, Operand(kCArgRegs[0], 0));
   __ F32x8Splat(ymm2, xmm1);
-  __ vmovdqu(Operand(arg_reg_2, 0), ymm2);
+  __ vmovdqu(Operand(kCArgRegs[1], 0), ymm2);
   __ ret(0);
 
   CodeDesc desc;

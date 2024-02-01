@@ -22,8 +22,8 @@ class V8_EXPORT_PRIVATE BytecodeOffsetIterator {
   explicit BytecodeOffsetIterator(Handle<ByteArray> mapping_table,
                                   Handle<BytecodeArray> bytecodes);
   // Non-handlified version for use when no GC can happen.
-  explicit BytecodeOffsetIterator(ByteArray mapping_table,
-                                  BytecodeArray bytecodes);
+  explicit BytecodeOffsetIterator(Tagged<ByteArray> mapping_table,
+                                  Tagged<BytecodeArray> bytecodes);
   ~BytecodeOffsetIterator();
 
   inline void Advance() {
@@ -84,7 +84,7 @@ class V8_EXPORT_PRIVATE BytecodeOffsetIterator {
   Address current_pc_start_offset_;
   Address current_pc_end_offset_;
   int current_bytecode_offset_;
-  BytecodeArray bytecode_handle_storage_;
+  Tagged<BytecodeArray> bytecode_handle_storage_;
   interpreter::BytecodeArrayIterator bytecode_iterator_;
   LocalHeap* local_heap_;
   base::Optional<DisallowGarbageCollection> no_gc_;

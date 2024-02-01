@@ -124,6 +124,9 @@ struct FieldAccess {
                                         // guarantee that the value is at most
                                         // kMaxSafeBufferSizeForSandbox after
                                         // decoding.
+  bool is_immutable = false;  // Whether this field is known to be immutable for
+                              // the purpose of loads.
+  IndirectPointerTag indirect_pointer_tag = kIndirectPointerNullTag;
 
   FieldAccess()
       : base_is_tagged(kTaggedBase),
@@ -143,7 +146,9 @@ struct FieldAccess {
               ConstFieldInfo const_field_info = ConstFieldInfo::None(),
               bool is_store_in_literal = false,
               ExternalPointerTag external_pointer_tag = kExternalPointerNullTag,
-              bool maybe_initializing_or_transitioning_store = false)
+              bool maybe_initializing_or_transitioning_store = false,
+              bool is_immutable = false,
+              IndirectPointerTag indirect_pointer_tag = kIndirectPointerNullTag)
       : base_is_tagged(base_is_tagged),
         offset(offset),
         name(name),
@@ -155,7 +160,9 @@ struct FieldAccess {
         is_store_in_literal(is_store_in_literal),
         external_pointer_tag(external_pointer_tag),
         maybe_initializing_or_transitioning_store(
-            maybe_initializing_or_transitioning_store) {
+            maybe_initializing_or_transitioning_store),
+        is_immutable(is_immutable),
+        indirect_pointer_tag(indirect_pointer_tag) {
     DCHECK_GE(offset, 0);
     DCHECK_IMPLIES(
         machine_type.IsMapWord(),
@@ -645,21 +652,15 @@ int FormalParameterCountOf(const Operator* op) V8_WARN_UNUSED_RESULT;
 
 class AllocateParameters {
  public:
-  AllocateParameters(
-      Type type, AllocationType allocation_type,
-      AllowLargeObjects allow_large_objects = AllowLargeObjects::kFalse)
-      : type_(type),
-        allocation_type_(allocation_type),
-        allow_large_objects_(allow_large_objects) {}
+  AllocateParameters(Type type, AllocationType allocation_type)
+      : type_(type), allocation_type_(allocation_type) {}
 
   Type type() const { return type_; }
   AllocationType allocation_type() const { return allocation_type_; }
-  AllowLargeObjects allow_large_objects() const { return allow_large_objects_; }
 
  private:
   Type type_;
   AllocationType allocation_type_;
-  AllowLargeObjects allow_large_objects_;
 };
 
 bool IsCheckedWithFeedback(const Operator* op);
@@ -970,6 +971,7 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* ChangeUint64ToTagged();
   const Operator* ChangeFloat64ToTagged(CheckForMinusZeroMode);
   const Operator* ChangeFloat64ToTaggedPointer();
+  const Operator* ChangeFloat64HoleToTagged();
   const Operator* ChangeTaggedToBit();
   const Operator* ChangeBitToTagged();
   const Operator* TruncateBigIntToWord64();
@@ -1102,8 +1104,7 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* Allocate(Type type,
                            AllocationType allocation = AllocationType::kYoung);
   const Operator* AllocateRaw(
-      Type type, AllocationType allocation = AllocationType::kYoung,
-      AllowLargeObjects allow_large_objects = AllowLargeObjects::kFalse);
+      Type type, AllocationType allocation = AllocationType::kYoung);
 
   const Operator* LoadMessage();
   const Operator* StoreMessage();
@@ -1185,8 +1186,8 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* WasmTypeCheckAbstract(WasmTypeCheckConfig config);
   const Operator* WasmTypeCast(WasmTypeCheckConfig config);
   const Operator* WasmTypeCastAbstract(WasmTypeCheckConfig config);
-  const Operator* WasmExternInternalize();
-  const Operator* WasmExternExternalize();
+  const Operator* WasmAnyConvertExtern();
+  const Operator* WasmExternConvertAny();
   const Operator* WasmStructGet(const wasm::StructType* type, int field_index,
                                 bool is_signed, CheckForNull null_check);
   const Operator* WasmStructSet(const wasm::StructType* type, int field_index,

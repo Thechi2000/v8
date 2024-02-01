@@ -24,7 +24,7 @@ Handle<AllocationSite> AllocationSiteUsageContext::EnterNewScope() {
     InitializeTraversal(top_site_);
   } else {
     // Advance current site
-    Object nested_site = current()->nested_site();
+    Tagged<Object> nested_site = current()->nested_site();
     // Something is wrong if we advance to the end of the list here.
     update_current_site(AllocationSite::cast(nested_site));
   }
@@ -44,7 +44,7 @@ bool AllocationSiteUsageContext::ShouldCreateMemento(Handle<JSObject> object) {
         AllocationSite::ShouldTrack(object->GetElementsKind())) {
       if (v8_flags.trace_creation_allocation_sites) {
         PrintF("*** Creating Memento for %s %p\n",
-               object->IsJSArray() ? "JSArray" : "JSObject",
+               IsJSArray(*object) ? "JSArray" : "JSObject",
                reinterpret_cast<void*>(object->ptr()));
       }
       return true;

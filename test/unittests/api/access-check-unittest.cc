@@ -34,7 +34,6 @@ class AccessCheckTest : public TestWithIsolate {
 
     // Running script in this context should work.
     RunJS("this.foo = 42; this[23] = true;");
-    EXPECT_THAT(RunJS("this.all_can_read"), IsInt32(42));
     RunJS("this.cross_context_int = 23");
     CHECK_EQ(g_cross_context_int, 23);
     EXPECT_THAT(RunJS("this.cross_context_int"), IsInt32(23));
@@ -58,12 +57,6 @@ class AccessCheckTest : public TestWithIsolate {
     {
       TryCatch try_catch(isolate());
       CHECK(TryRunJS("this.other[23]").IsEmpty());
-    }
-
-    // AllCanRead properties are also inaccessible.
-    {
-      TryCatch try_catch(isolate());
-      CHECK(TryRunJS("this.other.all_can_read").IsEmpty());
     }
 
     // Intercepted properties are accessible, however.
@@ -168,15 +161,31 @@ TEST_F(AccessCheckTest, GetOwnPropertyDescriptor) {
       .FromJust();
 
   Context::Scope context_scope(accessing_context);
-  Local<Value> result =
-      CompileRun(isolate(),
-                 "Object.getOwnPropertyDescriptor(this, 'property')"
-                 "    .get.call(other);")
-          .ToLocalChecked();
-  EXPECT_TRUE(result->IsUndefined());
-  CompileRun(isolate(),
-             "Object.getOwnPropertyDescriptor(this, 'property')"
-             "    .set.call(other, 42);");
+  Local<String> no_access_str = NewString("no access");
+  Local<Value> result;
+  result = CompileRun(isolate(),
+                      "var m = null; "
+                      "try {"
+                      "  Object.getOwnPropertyDescriptor(this, 'property')"
+                      "      .get.call(other);"
+                      "} catch(e) {"
+                      "  m = e.message;"
+                      "};"
+                      "m")
+               .ToLocalChecked();
+  EXPECT_TRUE(no_access_str->Equals(accessing_context, result).FromJust());
+
+  result = CompileRun(isolate(),
+                      "var m = null; "
+                      "try {"
+                      "  Object.getOwnPropertyDescriptor(this, 'property')"
+                      "      .set.call(other, 42);"
+                      "} catch(e) {"
+                      "  m = e.message;"
+                      "};"
+                      "m")
+               .ToLocalChecked();
+  EXPECT_TRUE(no_access_str->Equals(accessing_context, result).FromJust());
 }
 
 class AccessRegressionTest : public AccessCheckTest {
@@ -189,7 +198,7 @@ class AccessRegressionTest : public AccessCheckTest {
 
     i::Handle<i::JSReceiver> r =
         Utils::OpenHandle(*Local<Function>::Cast(getter));
-    EXPECT_TRUE(r->IsJSFunction());
+    EXPECT_TRUE(IsJSFunction(*r));
     return i::Handle<i::JSFunction>::cast(r);
   }
 };
@@ -224,7 +233,7 @@ TEST_F(AccessRegressionTest,
       context2,
       "Object.getOwnPropertyDescriptor(object_from_context1, 'property').get");
 
-  ASSERT_EQ(getter->native_context(), *Utils::OpenHandle(*context1));
+  ASSERT_EQ(getter->native_context(), *Utils::OpenDirectHandle(*context1));
 }
 
 // Regression test for https://crbug.com/986063.
@@ -284,8 +293,8 @@ TEST_F(AccessRegressionTest,
   i::Handle<i::JSFunction> getter_c2 = RetrieveFunctionFrom(
       context2, "Object.getOwnPropertyDescriptor(object, 'property').get");
 
-  ASSERT_EQ(getter_c1->native_context(), *Utils::OpenHandle(*context1));
-  ASSERT_EQ(getter_c2->native_context(), *Utils::OpenHandle(*context2));
+  ASSERT_EQ(getter_c1->native_context(), *Utils::OpenDirectHandle(*context1));
+  ASSERT_EQ(getter_c2->native_context(), *Utils::OpenDirectHandle(*context2));
 }
 
 void NamedGetter(Local<Name> property,
@@ -467,9 +476,6 @@ TEST_F(AccessCheckTest, AccessCheckWithInterceptor) {
                                           IndexedEnumerator));
   global_template->SetNativeDataProperty(
       NewString("cross_context_int"), GetCrossContextInt, SetCrossContextInt);
-  global_template->SetNativeDataProperty(NewString("all_can_read"), Return42,
-                                         nullptr, Local<Value>(), None,
-                                         ALL_CAN_READ);
 
   Local<Context> context0 = Context::New(isolate(), nullptr, global_template);
   CheckCanRunScriptInContext(context0);
@@ -546,9 +552,6 @@ TEST_F(AccessCheckTest, NewRemoteContext) {
                                           IndexedEnumerator));
   global_template->SetNativeDataProperty(
       NewString("cross_context_int"), GetCrossContextInt, SetCrossContextInt);
-  global_template->SetNativeDataProperty(NewString("all_can_read"), Return42,
-                                         nullptr, Local<Value>(), None,
-                                         ALL_CAN_READ);
 
   Local<Object> global0 =
       Context::NewRemoteContext(isolate(), global_template).ToLocalChecked();
@@ -605,9 +608,6 @@ TEST_F(AccessCheckTest, NewRemoteInstance) {
       IndexedPropertyHandlerConfiguration(IndexedGetter, IndexedSetter,
                                           IndexedQuery, IndexedDeleter,
                                           IndexedEnumerator));
-  tmpl->SetNativeDataProperty(NewString("all_can_read"), Return42, nullptr,
-                              Local<Value>(), None, ALL_CAN_READ);
-
   Local<Object> obj = tmpl->NewRemoteInstance().ToLocalChecked();
 
   Local<Context> context = Context::New(isolate());

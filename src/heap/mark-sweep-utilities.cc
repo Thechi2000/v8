@@ -24,13 +24,13 @@ static_assert(Heap::kMinObjectSizeInTaggedWords >= 2);
 MarkingVerifierBase::MarkingVerifierBase(Heap* heap)
     : ObjectVisitorWithCageBases(heap), heap_(heap) {}
 
-void MarkingVerifierBase::VisitMapPointer(HeapObject object) {
+void MarkingVerifierBase::VisitMapPointer(Tagged<HeapObject> object) {
   VerifyMap(object->map(cage_base()));
 }
 
 void MarkingVerifierBase::VerifyRoots() {
-  heap_->IterateRootsIncludingClients(
-      this, base::EnumSet<SkipRoot>{SkipRoot::kWeak, SkipRoot::kTopOfStack});
+  heap_->IterateRootsIncludingClients(this,
+                                      base::EnumSet<SkipRoot>{SkipRoot::kWeak});
 }
 
 void MarkingVerifierBase::VerifyMarkingOnPage(const Page* page, Address start,
@@ -43,7 +43,7 @@ void MarkingVerifierBase::VerifyMarkingOnPage(const Page* page, Address start,
     if (current >= end) break;
     CHECK(IsMarked(object));
     CHECK(current >= next_object_must_be_here_or_later);
-    object.Iterate(cage_base(), this);
+    object->Iterate(cage_base(), this);
     next_object_must_be_here_or_later = current + size;
     // The object is either part of a black area of black allocation or a
     // regular black object
@@ -61,22 +61,14 @@ void MarkingVerifierBase::VerifyMarkingOnPage(const Page* page, Address start,
 
 void MarkingVerifierBase::VerifyMarking(NewSpace* space) {
   if (!space) return;
+
   if (v8_flags.minor_ms) {
     VerifyMarking(PagedNewSpace::From(space)->paged_space());
     return;
   }
-  Address end = space->top();
-  // The bottom position is at the start of its page. Allows us to use
-  // page->area_start() as start of range on all pages.
-  CHECK_EQ(space->first_allocatable_address(),
-           space->first_page()->area_start());
 
-  PageRange range(space->first_allocatable_address(), end);
-  for (auto it = range.begin(); it != range.end();) {
-    Page* page = *(it++);
-    Address limit = it != range.end() ? page->area_end() : end;
-    CHECK(limit == end || !page->Contains(end));
-    VerifyMarkingOnPage(page, page->area_start(), limit);
+  for (Page* page : *space) {
+    VerifyMarkingOnPage(page, page->area_start(), page->area_end());
   }
 }
 
@@ -89,7 +81,7 @@ void MarkingVerifierBase::VerifyMarking(PagedSpaceBase* space) {
 void MarkingVerifierBase::VerifyMarking(LargeObjectSpace* lo_space) {
   if (!lo_space) return;
   LargeObjectSpaceObjectIterator it(lo_space);
-  for (HeapObject obj = it.Next(); !obj.is_null(); obj = it.Next()) {
+  for (Tagged<HeapObject> obj = it.Next(); !obj.is_null(); obj = it.Next()) {
     if (IsMarked(obj)) {
       obj->Iterate(cage_base(), this);
     }
@@ -105,22 +97,22 @@ void ExternalStringTableCleanerVisitor<mode>::VisitRootPointers(
   DCHECK_EQ(static_cast<int>(root),
             static_cast<int>(Root::kExternalStringsTable));
   NonAtomicMarkingState* marking_state = heap_->non_atomic_marking_state();
-  Object the_hole = ReadOnlyRoots(heap_).the_hole_value();
+  Tagged<Object> the_hole = ReadOnlyRoots(heap_).the_hole_value();
   for (FullObjectSlot p = start; p < end; ++p) {
-    Object o = *p;
-    if (!o.IsHeapObject()) continue;
-    HeapObject heap_object = HeapObject::cast(o);
+    Tagged<Object> o = *p;
+    if (!IsHeapObject(o)) continue;
+    Tagged<HeapObject> heap_object = HeapObject::cast(o);
     // MinorMS doesn't update the young strings set and so it may contain
     // strings that are already in old space.
     if (!marking_state->IsUnmarked(heap_object)) continue;
     if ((mode == ExternalStringTableCleaningMode::kYoungOnly) &&
         !Heap::InYoungGeneration(heap_object))
       continue;
-    if (o.IsExternalString()) {
+    if (IsExternalString(o)) {
       heap_->FinalizeExternalString(String::cast(o));
     } else {
       // The original external string may have been internalized.
-      DCHECK(o.IsThinString());
+      DCHECK(IsThinString(o));
     }
     // Set the entry to the_hole_value (as deleted).
     p.store(the_hole);

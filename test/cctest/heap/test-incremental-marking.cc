@@ -48,7 +48,9 @@ class MockPlatform : public TestPlatform {
     return taskrunner_;
   }
 
-  void CallOnWorkerThread(std::unique_ptr<Task> task) override {
+  void PostTaskOnWorkerThreadImpl(TaskPriority priority,
+                                  std::unique_ptr<Task> task,
+                                  const SourceLocation& location) override {
     worker_tasks_.push_back(std::move(task));
   }
 
@@ -125,8 +127,8 @@ TEST_WITH_PLATFORM(IncrementalMarkingUsingTasks, MockPlatform) {
       marking->Start(GarbageCollector::MARK_COMPACTOR,
                      i::GarbageCollectionReason::kTesting);
     }
-    CHECK(platform.PendingTask());
-    while (platform.PendingTask()) {
+    CHECK(marking->IsMajorMarking());
+    while (marking->IsMajorMarking()) {
       platform.PerformTask();
     }
     CHECK(marking->IsStopped());

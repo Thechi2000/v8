@@ -61,6 +61,9 @@ void BaselineAssembler::RegisterFrameAddress(
 MemOperand BaselineAssembler::FeedbackVectorOperand() {
   return MemOperand(fp, BaselineFrameConstants::kFeedbackVectorFromFp);
 }
+MemOperand BaselineAssembler::FeedbackCellOperand() {
+  return MemOperand(fp, BaselineFrameConstants::kFeedbackCellFromFp);
+}
 
 void BaselineAssembler::Bind(Label* label) { __ bind(label); }
 
@@ -150,7 +153,7 @@ void BaselineAssembler::JumpIfInstanceType(Condition cc, Register map,
   __ Ld_hu(type, FieldMemOperand(map, Map::kInstanceTypeOffset));
   __ Branch(target, cc, type, Operand(instance_type));
 }
-void BaselineAssembler::JumpIfSmi(Condition cc, Register value, Smi smi,
+void BaselineAssembler::JumpIfSmi(Condition cc, Register value, Tagged<Smi> smi,
                                   Label* target, Label::Distance) {
   __ CompareTaggedAndBranch(target, cc, value, Operand(smi));
 }
@@ -183,7 +186,7 @@ void BaselineAssembler::JumpIfByte(Condition cc, Register value, int32_t byte,
 void BaselineAssembler::Move(interpreter::Register output, Register source) {
   Move(RegisterFrameOperand(output), source);
 }
-void BaselineAssembler::Move(Register output, TaggedIndex value) {
+void BaselineAssembler::Move(Register output, Tagged<TaggedIndex> value) {
   __ li(output, Operand(value.ptr()));
 }
 void BaselineAssembler::Move(MemOperand output, Register source) {
@@ -339,7 +342,7 @@ void BaselineAssembler::LoadWord8Field(Register output, Register source,
   __ Ld_b(output, FieldMemOperand(source, offset));
 }
 void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
-                                               Smi value) {
+                                               Tagged<Smi> value) {
   ASM_CODE_COMMENT(masm_);
   ScratchRegisterScope temps(this);
   Register scratch = temps.AcquireScratch();
@@ -372,6 +375,12 @@ void BaselineAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
   // Is it marked_for_deoptimization? If yes, clear the slot.
   {
     ScratchRegisterScope temps(this);
+
+    // The entry references a CodeWrapper object. Unwrap it now.
+    __ LoadCodePointerField(
+        scratch_and_result,
+        FieldMemOperand(scratch_and_result, CodeWrapper::kCodeOffset));
+
     Register scratch = temps.AcquireScratch();
     __ TestCodeIsMarkedForDeoptimizationAndJump(scratch_and_result, scratch, eq,
                                                 on_result);
@@ -389,9 +398,7 @@ void BaselineAssembler::AddToInterruptBudgetAndJumpIfNotExceeded(
   ASM_CODE_COMMENT(masm_);
   ScratchRegisterScope scratch_scope(this);
   Register feedback_cell = scratch_scope.AcquireScratch();
-  LoadFunction(feedback_cell);
-  LoadTaggedField(feedback_cell, feedback_cell,
-                  JSFunction::kFeedbackCellOffset);
+  LoadFeedbackCell(feedback_cell);
 
   Register interrupt_budget = scratch_scope.AcquireScratch();
   __ Ld_w(interrupt_budget,
@@ -409,9 +416,7 @@ void BaselineAssembler::AddToInterruptBudgetAndJumpIfNotExceeded(
   ASM_CODE_COMMENT(masm_);
   ScratchRegisterScope scratch_scope(this);
   Register feedback_cell = scratch_scope.AcquireScratch();
-  LoadFunction(feedback_cell);
-  LoadTaggedField(feedback_cell, feedback_cell,
-                  JSFunction::kFeedbackCellOffset);
+  LoadFeedbackCell(feedback_cell);
 
   Register interrupt_budget = scratch_scope.AcquireScratch();
   __ Ld_w(interrupt_budget,
@@ -474,7 +479,7 @@ void BaselineAssembler::StaModuleVariable(Register context, Register value,
   StoreTaggedFieldWithWriteBarrier(context, Cell::kValueOffset, value);
 }
 
-void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
+void BaselineAssembler::AddSmi(Register lhs, Tagged<Smi> rhs) {
   if (SmiValuesAre31Bits()) {
     __ Add_w(lhs, lhs, Operand(rhs));
   } else {

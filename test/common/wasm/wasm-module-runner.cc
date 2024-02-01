@@ -26,8 +26,8 @@ MaybeHandle<WasmModuleObject> CompileForTesting(Isolate* isolate,
                                                 ErrorThrower* thrower,
                                                 ModuleWireBytes bytes) {
   auto enabled_features = WasmFeatures::FromIsolate(isolate);
-  MaybeHandle<WasmModuleObject> module =
-      GetWasmEngine()->SyncCompile(isolate, enabled_features, thrower, bytes);
+  MaybeHandle<WasmModuleObject> module = GetWasmEngine()->SyncCompile(
+      isolate, enabled_features, CompileTimeImports{}, thrower, bytes);
   DCHECK_EQ(thrower->error(), module.is_null());
   return module;
 }
@@ -102,7 +102,7 @@ MaybeHandle<WasmExportedFunction> GetExportedFunction(
   Maybe<bool> property_found = JSReceiver::GetOwnPropertyDescriptor(
       isolate, exports_object, main_name, &desc);
   if (!property_found.FromMaybe(false)) return {};
-  if (!desc.value()->IsJSFunction()) return {};
+  if (!IsJSFunction(*desc.value())) return {};
 
   return Handle<WasmExportedFunction>::cast(desc.value());
 }
@@ -127,30 +127,30 @@ int32_t CallWasmFunctionForTesting(Isolate* isolate,
 
   // The result should be a number.
   if (retval.is_null()) {
-    DCHECK(isolate->has_pending_exception());
+    DCHECK(isolate->has_exception());
     if (exception) {
       Handle<String> exception_string = Object::NoSideEffectsToString(
-          isolate, handle(isolate->pending_exception(), isolate));
+          isolate, handle(isolate->exception(), isolate));
       *exception = exception_string->ToCString();
     }
-    isolate->clear_pending_exception();
+    isolate->clear_internal_exception();
     return -1;
   }
   Handle<Object> result = retval.ToHandleChecked();
 
   // Multi-value returns, get the first return value (see InterpretWasmModule).
-  if (result->IsJSArray()) {
+  if (IsJSArray(*result)) {
     auto receiver = Handle<JSReceiver>::cast(result);
     result = JSObject::GetElement(isolate, receiver, 0).ToHandleChecked();
   }
 
-  if (result->IsSmi()) {
+  if (IsSmi(*result)) {
     return Smi::ToInt(*result);
   }
-  if (result->IsHeapNumber()) {
+  if (IsHeapNumber(*result)) {
     return static_cast<int32_t>(HeapNumber::cast(*result)->value());
   }
-  if (result->IsBigInt()) {
+  if (IsBigInt(*result)) {
     return static_cast<int32_t>(BigInt::cast(*result)->AsInt64());
   }
   return -1;

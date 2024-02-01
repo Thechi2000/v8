@@ -62,7 +62,7 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
   }
 
 #ifdef DEBUG
-  int CheckBytecodeMatches(BytecodeArray bytecode);
+  int CheckBytecodeMatches(Tagged<BytecodeArray> bytecode);
 #endif
 
 #define DECLARE_VISIT(type) void Visit##type(type* node);
@@ -80,6 +80,7 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
   class ContextScope;
   class ControlScope;
   class ControlScopeForBreakable;
+  class ControlScopeForDerivedConstructor;
   class ControlScopeForIteration;
   class ControlScopeForTopLevel;
   class ControlScopeForTryCatch;
@@ -195,6 +196,7 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
   };
 
   void GenerateBytecodeBody();
+  void GenerateBytecodeBodyWithoutImplicitFinalReturn();
   template <typename IsolateT>
   void AllocateDeferredConstants(IsolateT* isolate, Handle<Script> script);
 
@@ -350,6 +352,8 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
   void VisitArgumentsObject(Variable* variable);
   void VisitRestArgumentsArray(Variable* rest);
   void VisitCallSuper(Call* call);
+  void BuildInstanceInitializationAfterSuperCall(Register this_function,
+                                                 Register instance);
   void BuildInvalidPropertyAccess(MessageTemplate tmpl, Property* property);
   void BuildPrivateBrandCheck(Property* property, Register object);
   void BuildPrivateMethodIn(Variable* private_name,
@@ -413,6 +417,9 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
 
   int AllocateBlockCoverageSlotIfEnabled(AstNode* node, SourceRangeKind kind);
   int AllocateNaryBlockCoverageSlotIfEnabled(NaryOperation* node, size_t index);
+  int AllocateConditionalChainBlockCoverageSlotIfEnabled(ConditionalChain* node,
+                                                         SourceRangeKind kind,
+                                                         size_t index);
 
   void BuildIncrementBlockCoverageCounterIfEnabled(AstNode* node,
                                                    SourceRangeKind kind);
@@ -434,6 +441,10 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
   template <typename ExpressionFunc>
   void BuildOptionalChain(ExpressionFunc expression_func);
 
+  void BuildGetAndCheckSuperConstructor(Register this_function,
+                                        Register new_target,
+                                        Register constructor,
+                                        BytecodeLabel* super_ctor_call_done);
   void BuildSuperCallOptimization(Register this_function, Register new_target,
                                   Register constructor_then_instance,
                                   BytecodeLabel* super_ctor_call_done);

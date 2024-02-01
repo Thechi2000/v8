@@ -26,6 +26,9 @@
 #include "src/profiler/heap-profiler.h"
 #include "src/sandbox/sandbox.h"
 #include "src/snapshot/snapshot.h"
+#if defined(V8_USE_PERFETTO)
+#include "src/tracing/code-data-source.h"
+#endif  // defined(V8_USE_PERFETTO)
 #include "src/tracing/tracing-category-observer.h"
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -216,6 +219,9 @@ void V8::Initialize() {
     DISABLE_FLAG(trace_turbo_graph);
     DISABLE_FLAG(trace_turbo_scheduled);
     DISABLE_FLAG(trace_turbo_reduction);
+#ifdef V8_ENABLE_SLOW_TRACING
+    // If expensive tracing is disabled via a build flag, the following flags
+    // cannot be disabled (because they are already).
     DISABLE_FLAG(trace_turbo_trimming);
     DISABLE_FLAG(trace_turbo_jt);
     DISABLE_FLAG(trace_turbo_ceq);
@@ -223,6 +229,7 @@ void V8::Initialize() {
     DISABLE_FLAG(trace_turbo_alloc);
     DISABLE_FLAG(trace_all_uses);
     DISABLE_FLAG(trace_representation);
+#endif
     DISABLE_FLAG(trace_turbo_stack_accesses);
   }
 
@@ -231,7 +238,15 @@ void V8::Initialize() {
   // generation.
   CHECK(!v8_flags.interpreted_frames_native_stack || !v8_flags.jitless);
 
-  base::OS::Initialize(v8_flags.hard_abort, v8_flags.gc_fake_mmap);
+  base::AbortMode abort_mode = base::AbortMode::kDefault;
+
+  if (v8_flags.soft_abort) {
+    abort_mode = base::AbortMode::kSoft;
+  } else if (v8_flags.hard_abort) {
+    abort_mode = base::AbortMode::kHard;
+  }
+
+  base::OS::Initialize(abort_mode, v8_flags.gc_fake_mmap);
 
   if (v8_flags.random_seed) {
     GetPlatformPageAllocator()->SetRandomMmapSeed(v8_flags.random_seed);
@@ -253,13 +268,16 @@ void V8::Initialize() {
   GetProcessWideSandbox()->Initialize(GetPlatformVirtualAddressSpace());
   CHECK_EQ(kSandboxSize, GetProcessWideSandbox()->size());
 
-#if defined(V8_CODE_POINTER_SANDBOXING)
   GetProcessWideCodePointerTable()->Initialize();
-#endif
 #endif
 
 #if defined(V8_USE_PERFETTO)
-  if (perfetto::Tracing::IsInitialized()) TrackEvent::Register();
+  if (perfetto::Tracing::IsInitialized()) {
+    TrackEvent::Register();
+    if (v8_flags.perfetto_code_logger) {
+      v8::internal::CodeDataSource::Register();
+    }
+  }
 #endif
   IsolateAllocator::InitializeOncePerProcess();
   Isolate::InitializeOncePerProcess();

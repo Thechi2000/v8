@@ -34,7 +34,7 @@ MaybeHandle<JSV8BreakIterator> JSV8BreakIterator::New(
       maybe_requested_locales.FromJust();
 
   Handle<JSReceiver> options;
-  if (options_obj->IsUndefined(isolate)) {
+  if (IsUndefined(*options_obj, isolate)) {
     options = factory->NewJSObjectWithNullProto();
   } else {
     ASSIGN_RETURN_ON_EXCEPTION(isolate, options,
@@ -95,7 +95,7 @@ MaybeHandle<JSV8BreakIterator> JSV8BreakIterator::New(
   }
 
   // Error handling for break_iterator
-  if (U_FAILURE(status) || break_iterator.get() == nullptr) {
+  if (U_FAILURE(status) || break_iterator == nullptr) {
     THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kIcuError),
                     JSV8BreakIterator);
   }
@@ -218,8 +218,8 @@ Handle<Object> JSV8BreakIterator::Next(
       break_iterator->break_iterator()->raw()->next());
 }
 
-String JSV8BreakIterator::BreakType(Isolate* isolate,
-                                    Handle<JSV8BreakIterator> break_iterator) {
+Tagged<String> JSV8BreakIterator::BreakType(
+    Isolate* isolate, Handle<JSV8BreakIterator> break_iterator) {
   int32_t status = break_iterator->break_iterator()->raw()->getRuleStatus();
   // Keep return values in sync with JavaScript BreakType enum.
   if (status >= UBRK_WORD_NONE && status < UBRK_WORD_NONE_LIMIT) {

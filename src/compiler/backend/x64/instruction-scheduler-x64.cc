@@ -271,11 +271,13 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64SNot:
     case kX64SSelect:
     case kX64S128Const:
+    case kX64S256Const:
     case kX64SZero:
     case kX64SAllOnes:
     case kX64SAndNot:
     case kX64IAllTrue:
     case kX64I8x16Swizzle:
+    case kX64Vpshufd:
     case kX64I8x16Shuffle:
     case kX64I8x16Popcnt:
     case kX64Shufps:
@@ -309,6 +311,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64Blendvpd:
     case kX64Blendvps:
     case kX64Pblendvb:
+    case kX64ExtractF128:
       return (instr->addressing_mode() == kMode_None)
                  ? kNoOpcodeFlags
                  : kIsLoadOperation | kHasSideEffect;
@@ -354,6 +357,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64MovqDecompressTaggedSigned:
     case kX64MovqDecompressTagged:
     case kX64MovqCompressTagged:
+    case kX64MovqStoreIndirectPointer:
     case kX64MovqDecodeSandboxedPointer:
     case kX64MovqEncodeSandboxedPointer:
     case kX64Movq:
@@ -375,6 +379,12 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64S128Load16x4U:
     case kX64S128Load32x2S:
     case kX64S128Load32x2U:
+    case kX64S256Load8x16S:
+    case kX64S256Load8x16U:
+    case kX64S256Load16x8S:
+    case kX64S256Load16x8U:
+    case kX64S256Load32x4S:
+    case kX64S256Load32x4U:
       return instr->HasOutput() ? kIsLoadOperation : kHasSideEffect;
 
     case kX64Peek:

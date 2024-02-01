@@ -4,8 +4,8 @@
 
 #include "src/builtins/builtins-object-gen.h"
 
+#include "src/builtins/builtins-inl.h"
 #include "src/builtins/builtins-utils-gen.h"
-#include "src/builtins/builtins.h"
 #include "src/common/globals.h"
 #include "src/heap/factory-inl.h"
 #include "src/ic/accessor-assembler.h"
@@ -56,10 +56,10 @@ void ObjectBuiltinsAssembler::ReturnToStringFormat(TNode<Context> context,
   TNode<String> lhs = StringConstant("[object ");
   TNode<String> rhs = StringConstant("]");
 
-  Callable callable = CodeFactory::StringAdd(isolate(), STRING_ADD_CHECK_NONE);
+  Builtin builtin = Builtins::StringAdd(STRING_ADD_CHECK_NONE);
 
-  Return(CallStub(callable, context, CallStub(callable, context, lhs, string),
-                  rhs));
+  Return(CallBuiltin(builtin, context,
+                     CallBuiltin(builtin, context, lhs, string), rhs));
 }
 
 TNode<JSObject> ObjectBuiltinsAssembler::ConstructAccessorDescriptor(
@@ -216,8 +216,7 @@ TNode<JSArray> ObjectEntriesValuesBuiltinsAssembler::FastGetOwnValuesOrEntries(
   {
     GotoIf(WordEqual(object_enum_length, IntPtrConstant(0)), if_no_properties);
     TNode<FixedArray> values_or_entries =
-        CAST(AllocateFixedArray(PACKED_ELEMENTS, object_enum_length,
-                                AllocationFlag::kAllowLargeObjectAllocation));
+        CAST(AllocateFixedArray(PACKED_ELEMENTS, object_enum_length));
 
     // If in case we have enum_cache,
     // we can't detect accessor of object until loop through descriptors.
@@ -1093,9 +1092,15 @@ TF_BUILTIN(ObjectCreate, ObjectBuiltinsAssembler) {
       TNode<PrototypeInfo> prototype_info =
           LoadMapPrototypeInfo(LoadMap(CAST(prototype)), &call_runtime);
       Comment("Load ObjectCreateMap from PrototypeInfo");
-      TNode<MaybeObject> maybe_map = LoadMaybeWeakObjectField(
-          prototype_info, PrototypeInfo::kObjectCreateMapOffset);
-      GotoIf(TaggedEqual(maybe_map, UndefinedConstant()), &call_runtime);
+      TNode<HeapObject> derived_maps = CAST(
+          LoadObjectField(prototype_info, PrototypeInfo::kDerivedMapsOffset));
+      // In case it exists, derived maps is a weak array list where the first
+      // element is the object create map.
+      GotoIf(TaggedEqual(derived_maps, UndefinedConstant()), &call_runtime);
+      CSA_DCHECK(this, InstanceTypeEqual(LoadInstanceType(derived_maps),
+                                         WEAK_ARRAY_LIST_TYPE));
+      TNode<MaybeObject> maybe_map = UncheckedCast<MaybeObject>(LoadObjectField(
+          derived_maps, IntPtrConstant(WeakArrayList::kHeaderSize)));
       map = CAST(GetHeapObjectAssumeWeak(maybe_map, &call_runtime));
       Goto(&instantiate_map);
     }
@@ -1221,8 +1226,8 @@ TF_BUILTIN(CreateGeneratorObject, ObjectBuiltinsAssembler) {
   TNode<IntPtrT> size =
       IntPtrAdd(WordSar(frame_size, IntPtrConstant(kTaggedSizeLog2)),
                 formal_parameter_count);
-  TNode<FixedArrayBase> parameters_and_registers = AllocateFixedArray(
-      HOLEY_ELEMENTS, size, AllocationFlag::kAllowLargeObjectAllocation);
+  TNode<FixedArrayBase> parameters_and_registers =
+      AllocateFixedArray(HOLEY_ELEMENTS, size);
   FillFixedArrayWithValue(HOLEY_ELEMENTS, parameters_and_registers,
                           IntPtrConstant(0), size, RootIndex::kUndefinedValue);
   // TODO(cbruni): support start_offset to avoid double initialization.
@@ -1357,8 +1362,8 @@ void ObjectBuiltinsAssembler::AddToDictionaryIf(
   Label done(this);
   GotoIfNot(condition, &done);
 
-  AddToDictionary<PropertyDictionary>(CAST(name_dictionary), HeapConstant(name),
-                                      value, bailout);
+  AddToDictionary<PropertyDictionary>(CAST(name_dictionary),
+                                      HeapConstantNoHole(name), value, bailout);
   Goto(&done);
 
   BIND(&done);

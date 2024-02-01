@@ -17,7 +17,8 @@ namespace v8 {
 namespace internal {
 
 void PretenuringHandler::UpdateAllocationSite(
-    Map map, HeapObject object, PretenuringFeedbackMap* pretenuring_feedback) {
+    Tagged<Map> map, Tagged<HeapObject> object,
+    PretenuringFeedbackMap* pretenuring_feedback) {
   DCHECK_NE(pretenuring_feedback, &global_pretenuring_feedback_);
 #ifdef DEBUG
   BasicMemoryChunk* chunk = BasicMemoryChunk::FromHeapObject(object);
@@ -29,21 +30,22 @@ void PretenuringHandler::UpdateAllocationSite(
       !AllocationSite::CanTrack(map->instance_type())) {
     return;
   }
-  AllocationMemento memento_candidate =
+  Tagged<AllocationMemento> memento_candidate =
       FindAllocationMemento<kForGC>(map, object);
   if (memento_candidate.is_null()) return;
-  DCHECK(map->IsJSObjectMap());
+  DCHECK(IsJSObjectMap(map));
 
   // Entering cached feedback is used in the parallel case. We are not allowed
   // to dereference the allocation site and rather have to postpone all checks
   // till actually merging the data.
   Address key = memento_candidate->GetAllocationSiteUnchecked();
-  (*pretenuring_feedback)[AllocationSite::unchecked_cast(Object(key))]++;
+  (*pretenuring_feedback)[AllocationSite::unchecked_cast(
+      Tagged<Object>(key))]++;
 }
 
 template <PretenuringHandler::FindMementoMode mode>
-AllocationMemento PretenuringHandler::FindAllocationMemento(Map map,
-                                                            HeapObject object) {
+Tagged<AllocationMemento> PretenuringHandler::FindAllocationMemento(
+    Tagged<Map> map, Tagged<HeapObject> object) {
   Address object_address = object.address();
   Address memento_address =
       object_address + ALIGN_TO_ALLOCATION_ALIGNMENT(object->SizeFromMap(map));
@@ -59,7 +61,7 @@ AllocationMemento PretenuringHandler::FindAllocationMemento(Map map,
   if (mode != FindMementoMode::kForGC && !object_page->SweepingDone())
     return AllocationMemento();
 
-  HeapObject candidate = HeapObject::FromAddress(memento_address);
+  Tagged<HeapObject> candidate = HeapObject::FromAddress(memento_address);
   ObjectSlot candidate_map_slot = candidate->map_slot();
   // This fast check may peek at an uninitialized word. However, the slow check
   // below (memento_address == top) ensures that this is safe. Mark the word as
@@ -84,7 +86,8 @@ AllocationMemento PretenuringHandler::FindAllocationMemento(Map map,
     }
   }
 
-  AllocationMemento memento_candidate = AllocationMemento::cast(candidate);
+  Tagged<AllocationMemento> memento_candidate =
+      AllocationMemento::cast(candidate);
 
   // Depending on what the memento is used for, we might need to perform
   // additional checks.
@@ -98,7 +101,7 @@ AllocationMemento PretenuringHandler::FindAllocationMemento(Map map,
       // another object of at least word size (the header map word) following
       // it, so suffices to compare ptr and top here.
       top = heap_->NewSpaceTop();
-      DCHECK(memento_address >= heap_->new_space()->limit() ||
+      DCHECK(memento_address >= heap_->NewSpaceLimit() ||
              memento_address +
                      ALIGN_TO_ALLOCATION_ALIGNMENT(AllocationMemento::kSize) <=
                  top);

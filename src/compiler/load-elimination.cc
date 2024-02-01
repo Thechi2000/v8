@@ -940,7 +940,7 @@ Reduction LoadElimination::ReduceLoadField(Node* node,
     DCHECK(IsAnyTagged(access.machine_type.representation()));
     ZoneRefSet<Map> object_maps;
     if (state->LookupMaps(object, &object_maps) && object_maps.size() == 1) {
-      Node* value = jsgraph()->HeapConstant(object_maps[0].object());
+      Node* value = jsgraph()->HeapConstantNoHole(object_maps[0].object());
       NodeProperties::SetType(value, Type::OtherInternal());
       ReplaceWithValue(node, value, effect);
       return Replace(value);
@@ -1094,6 +1094,7 @@ Reduction LoadElimination::ReduceLoadElement(Node* node) {
     case MachineRepresentation::kFloat32:
     case MachineRepresentation::kCompressedPointer:
     case MachineRepresentation::kCompressed:
+    case MachineRepresentation::kIndirectPointer:
     case MachineRepresentation::kSandboxedPointer:
       // TODO(turbofan): Add support for doing the truncations.
       break;
@@ -1153,6 +1154,7 @@ Reduction LoadElimination::ReduceStoreElement(Node* node) {
     case MachineRepresentation::kCompressedPointer:
     case MachineRepresentation::kCompressed:
     case MachineRepresentation::kSandboxedPointer:
+    case MachineRepresentation::kIndirectPointer:
       // TODO(turbofan): Add support for doing the truncations.
       break;
     case MachineRepresentation::kFloat64:
@@ -1459,11 +1461,17 @@ LoadElimination::IndexRange LoadElimination::FieldIndexOf(
     case MachineRepresentation::kMapWord:
     case MachineRepresentation::kCompressedPointer:
     case MachineRepresentation::kCompressed:
+    case MachineRepresentation::kIndirectPointer:
     case MachineRepresentation::kSandboxedPointer:
       break;
   }
   int representation_size = ElementSizeInBytes(rep);
   // We currently only track fields that are at least tagged pointer sized.
+  // We assume that indirect pointers are tagged pointer sized if we see them
+  // here since they should only ever be used in pointer compression
+  // configurations.
+  DCHECK(rep != MachineRepresentation::kIndirectPointer ||
+         representation_size == kTaggedSize);
   if (representation_size < kTaggedSize) return IndexRange::Invalid();
   DCHECK_EQ(0, representation_size % kTaggedSize);
 

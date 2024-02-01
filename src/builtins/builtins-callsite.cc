@@ -27,12 +27,12 @@ namespace internal {
 
 namespace {
 
-Object PositiveNumberOrNull(int value, Isolate* isolate) {
+Tagged<Object> PositiveNumberOrNull(int value, Isolate* isolate) {
   if (value > 0) return *isolate->factory()->NewNumberFromInt(value);
   return ReadOnlyRoots(isolate).null_value();
 }
 
-bool NativeContextIsForShadowRealm(NativeContext native_context) {
+bool NativeContextIsForShadowRealm(Tagged<NativeContext> native_context) {
   return native_context->scope_info()->scope_type() == SHADOW_REALM_SCOPE;
 }
 
@@ -78,7 +78,7 @@ BUILTIN(CallSitePrototypeGetFunction) {
   // in the ShadowRealm, and references to ShadowRealm objects must not exist
   // outside the ShadowRealm.
   if (NativeContextIsForShadowRealm(isolate->raw_native_context()) ||
-      (frame->function().IsJSFunction() &&
+      (IsJSFunction(frame->function()) &&
        NativeContextIsForShadowRealm(
            JSFunction::cast(frame->function())->native_context()))) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -88,7 +88,7 @@ BUILTIN(CallSitePrototypeGetFunction) {
             isolate->factory()->NewStringFromAsciiChecked(method_name)));
   }
   if (frame->IsStrict() ||
-      (frame->function().IsJSFunction() &&
+      (IsJSFunction(frame->function()) &&
        JSFunction::cast(frame->function())->shared()->is_toplevel())) {
     return ReadOnlyRoots(isolate).undefined_value();
   }
@@ -150,7 +150,7 @@ BUILTIN(CallSitePrototypeGetThis) {
   // in the ShadowRealm, and references to ShadowRealm objects must not exist
   // outside the ShadowRealm.
   if (NativeContextIsForShadowRealm(isolate->raw_native_context()) ||
-      (frame->function().IsJSFunction() &&
+      (IsJSFunction(frame->function()) &&
        NativeContextIsForShadowRealm(
            JSFunction::cast(frame->function())->native_context()))) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -163,7 +163,10 @@ BUILTIN(CallSitePrototypeGetThis) {
   isolate->CountUsage(v8::Isolate::kCallSiteAPIGetThisSloppyCall);
 #if V8_ENABLE_WEBASSEMBLY
   if (frame->IsAsmJsWasm()) {
-    return frame->GetWasmInstance()->native_context()->global_proxy();
+    return frame->GetWasmInstance()
+        ->trusted_data(isolate)
+        ->native_context()
+        ->global_proxy();
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   return frame->receiver_or_instance();

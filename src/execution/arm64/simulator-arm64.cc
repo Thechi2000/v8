@@ -81,6 +81,7 @@ bool Simulator::ProbeMemory(uintptr_t address, uintptr_t access_size) {
       trap_handler::ProbeMemory(last_accessed_byte, current_pc);
   if (!landing_pad) return true;
   set_pc(landing_pad);
+  set_reg(kWasmTrapHandlerFaultAddressRegister.code(), current_pc);
   return false;
 #else
   return true;
@@ -367,7 +368,7 @@ void Simulator::Init(FILE* stream) {
   // Allocate and setup the simulator stack.
   size_t stack_size = AllocatedStackSize();
 
-  stack_ = reinterpret_cast<uintptr_t>(new uint8_t[stack_size]);
+  stack_ = reinterpret_cast<uintptr_t>(new uint8_t[stack_size]());
   stack_limit_ = stack_ + kStackProtectionSize;
   uintptr_t tos = stack_ + stack_size - kStackProtectionSize;
   // The stack pointer must be 16-byte aligned.
@@ -3945,10 +3946,10 @@ bool Simulator::ExecDebugCommand(ArrayUniquePtr<char> line_ptr) {
       int64_t value;
       StdoutStream os;
       if (GetValue(arg1, &value)) {
-        Object obj(value);
+        Tagged<Object> obj(value);
         os << arg1 << ": \n";
 #ifdef DEBUG
-        obj.Print(os);
+        Print(obj, os);
         os << "\n";
 #else
         os << Brief(obj) << "\n";
@@ -4003,15 +4004,15 @@ bool Simulator::ExecDebugCommand(ArrayUniquePtr<char> line_ptr) {
       PrintF("  0x%016" PRIx64 ":  0x%016" PRIx64 " %10" PRId64,
              reinterpret_cast<uint64_t>(cur), *cur, *cur);
       if (!skip_obj_print) {
-        Object obj(*cur);
+        Tagged<Object> obj(*cur);
         Heap* current_heap = isolate_->heap();
-        if (obj.IsSmi() ||
+        if (IsSmi(obj) ||
             IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
           PrintF(" (");
-          if (obj.IsSmi()) {
+          if (IsSmi(obj)) {
             PrintF("smi %" PRId32, Smi::ToInt(obj));
           } else {
-            obj.ShortPrint();
+            ShortPrint(obj);
           }
           PrintF(")");
         }

@@ -37,6 +37,11 @@ class Isolate;
  * management as well as entry allocation routines, it does not implement any
  * logic for reclaiming entries such as garbage collection. This must be done
  * by the child classes.
+ *
+ * The Entry type defines how the freelist is represented. For that, it must
+ * implement the following methods:
+ * - void MakeFreelistEntry(uint32_t next_entry_index)
+ * - uint32_t GetNextFreelistEntry()
  */
 template <typename Entry, size_t size>
 class V8_EXPORT_PRIVATE ExternalEntityTable {
@@ -107,14 +112,7 @@ class V8_EXPORT_PRIVATE ExternalEntityTable {
     // Returns the total length of the freelist.
     uint32_t length() const { return length_; }
 
-    bool is_empty() const {
-      // It would be enough to just check that the size is zero. However, when
-      // the size is zero, the next entry must also be zero, and checking that
-      // both values are zero allows the compiler to insert a single 64-bit
-      // comparison against zero.
-      DCHECK_EQ(next_ == 0, length_ == 0);
-      return next_ == 0 && length_ == 0;
-    }
+    bool is_empty() const { return length_ == 0; }
 
    private:
     uint32_t next_;
@@ -169,6 +167,16 @@ class V8_EXPORT_PRIVATE ExternalEntityTable {
     // Returns true if this space contains the entry with the given index.
     bool Contains(uint32_t index);
 
+    // Whether this space is attached to a table's internal read-only segment.
+    bool is_internal_read_only_space() const {
+      return is_internal_read_only_space_;
+    }
+
+#ifdef DEBUG
+    // Check whether this space belongs to the given external entity table.
+    bool BelongsTo(void* table) { return owning_table_ == table; }
+#endif  // DEBUG
+
    protected:
     friend class ExternalEntityTable<Entry, size>;
 
@@ -177,10 +185,7 @@ class V8_EXPORT_PRIVATE ExternalEntityTable {
     // able to insert additional DCHECKs that verify that spaces are always used
     // with the correct table.
     std::atomic<void*> owning_table_ = nullptr;
-
-    // Check whether this space belongs to the given external entity table.
-    bool BelongsTo(void* table) { return owning_table_ == table; }
-#endif  // DEBUG
+#endif
 
     // The freelist used by this space.
     // This contains both the index of the first entry in the freelist and the
@@ -192,8 +197,26 @@ class V8_EXPORT_PRIVATE ExternalEntityTable {
     // The collection of segments belonging to this space.
     std::set<Segment> segments_;
 
+    // Whether this is the internal RO space, which has special semantics:
+    // - read-only page permissions after initialization,
+    // - the space is not swept since slots are live by definition,
+    // - contains exactly one segment, located at offset 0, and
+    // - the segment's lifecycle is managed by `owning_table_`.
+    bool is_internal_read_only_space_ = false;
+
     // Mutex guarding access to the segments_ set.
     base::Mutex mutex_;
+  };
+
+  // A Space that supports black allocations.
+  struct SpaceWithBlackAllocationSupport : public Space {
+    bool allocate_black() { return allocate_black_; }
+    void set_allocate_black(bool allocate_black) {
+      allocate_black_ = allocate_black;
+    }
+
+   private:
+    bool allocate_black_ = false;
   };
 
   ExternalEntityTable() = default;
@@ -238,6 +261,20 @@ class V8_EXPORT_PRIVATE ExternalEntityTable {
   // allocated segment.
   FreelistHead Extend(Space* space);
 
+  // Sweeps the given space.
+  //
+  // This will free all unmarked entries to the freelist and unmark all live
+  // entries. The table is swept top-to-bottom so that the freelist ends up
+  // sorted. During sweeping, new entries must not be allocated.
+  //
+  // This is a generic implementation of table sweeping and requires that the
+  // Entry type implements the following additional methods:
+  // - bool IsMarked()
+  // - void Unmark()
+  //
+  // Returns the number of live entries after sweeping.
+  uint32_t GenericSweep(Space* space);
+
   // Allocate a new segment in this table.
   //
   // The memory of the newly allocated segment is guaranteed to be
@@ -248,6 +285,13 @@ class V8_EXPORT_PRIVATE ExternalEntityTable {
   //
   // The memory of this segment will afterwards be inaccessible.
   void FreeTableSegment(Segment segment);
+
+  // Iterate over all entries in the given space.
+  //
+  // The callback function will be invoked for every entry and be passed the
+  // index of that entry as argument.
+  template <typename Callback>
+  void IterateEntriesIn(Space* space, Callback callback);
 
   // Marker value for the freelist_head_ member to indicate that entry
   // allocation is currently forbidden, for example because the table is being
@@ -271,9 +315,40 @@ class V8_EXPORT_PRIVATE ExternalEntityTable {
   // Deallocates all segments owned by the given space.
   void TearDownSpace(Space* space);
 
+  // Attaches/detaches the given space to the internal read-only segment. Note
+  // the lifetime of the underlying segment itself is managed by the table.
+  void AttachSpaceToReadOnlySegment(Space* space);
+  void DetachSpaceFromReadOnlySegment(Space* space);
+
+  // Use this scope to temporarily unseal the read-only segment (i.e. change
+  // permissions to RW).
+  class UnsealReadOnlySegmentScope final {
+   public:
+    explicit UnsealReadOnlySegmentScope(ExternalEntityTable<Entry, size>* table)
+        : table_(table) {
+      table_->UnsealReadOnlySegment();
+    }
+
+    ~UnsealReadOnlySegmentScope() { table_->SealReadOnlySegment(); }
+
+   private:
+    ExternalEntityTable<Entry, size>* const table_;
+  };
+
  private:
   // Required for Isolate::CheckIsolateLayout().
   friend class Isolate;
+
+  static constexpr uint32_t kInternalReadOnlySegmentOffset = 0;
+  static constexpr uint32_t kInternalNullEntryIndex = 0;
+
+  // Helpers to toggle the first segment's permissions between kRead (sealed)
+  // and kReadWrite (unsealed).
+  void UnsealReadOnlySegment();
+  void SealReadOnlySegment();
+
+  // Extends the given space with the given segment.
+  FreelistHead Extend(Space* space, Segment segment);
 
   // The pointer to the base of the virtual address space backing this table.
   // All entry accesses happen through this pointer.

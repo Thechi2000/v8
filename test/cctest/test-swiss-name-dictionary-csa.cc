@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/codegen/code-stub-assembler.h"
+#include "src/codegen/code-stub-assembler-inl.h"
 #include "src/codegen/cpu-features.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/swiss-name-dictionary-inl.h"
@@ -155,7 +155,7 @@ void CSATestRunner::Allocate(Handle<Smi> capacity) {
   // We must handle |capacity| == 0 specially, because
   // AllocateSwissNameDictionary (just like AllocateNameDictionary) always
   // returns a non-zero sized table.
-  if (capacity->value() == 0) {
+  if ((*capacity).value() == 0) {
     table = ReadOnlyRoots(isolate_).empty_swiss_property_dictionary_handle();
   } else {
     table = allocate_ft_.CallChecked<SwissNameDictionary>(capacity);
@@ -165,11 +165,11 @@ void CSATestRunner::Allocate(Handle<Smi> capacity) {
 }
 
 InternalIndex CSATestRunner::FindEntry(Handle<Name> key) {
-  Handle<Smi> index = find_entry_ft_.CallChecked<Smi>(table, key);
-  if (index->value() == SwissNameDictionary::kNotFoundSentinel) {
+  Tagged<Smi> index = *find_entry_ft_.CallChecked<Smi>(table, key);
+  if (index.value() == SwissNameDictionary::kNotFoundSentinel) {
     return InternalIndex::NotFound();
   } else {
-    return InternalIndex(index->value());
+    return InternalIndex(index.value());
   }
 }
 

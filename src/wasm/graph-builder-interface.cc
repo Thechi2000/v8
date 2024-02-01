@@ -19,9 +19,7 @@
 #include "src/wasm/wasm-opcodes-inl.h"
 #include "src/wasm/well-known-imports.h"
 
-namespace v8 {
-namespace internal {
-namespace wasm {
+namespace v8::internal::wasm {
 
 namespace {
 
@@ -49,7 +47,7 @@ class LocalsVector {
 
   LocalsVector& operator=(const LocalsVector& other) V8_NOEXCEPT {
     allocator_ = other.allocator_;
-    if (!data_.size()) {
+    if (data_.empty()) {
       data_ = base::Vector<TFNode*>(allocator_->allocate(other.size()),
                                     other.size());
     }
@@ -133,8 +131,6 @@ class WasmGraphBuildingInterface {
   struct TryInfo : public ZoneObject {
     SsaEnv* catch_env;
     TFNode* exception = nullptr;
-
-    bool might_throw() const { return exception != nullptr; }
 
     MOVE_ONLY_NO_DEFAULT_CONSTRUCTOR(TryInfo);
 
@@ -245,6 +241,19 @@ class WasmGraphBuildingInterface {
         ssa_env->locals[index++] = node;
       }
     }
+
+    size_t num_memories =
+        decoder->module_ == nullptr ? 0 : decoder->module_->memories.size();
+    if (num_memories == 1) {
+      builder_->set_cached_memory_index(0);
+    } else if (num_memories > 1) {
+      int first_used_mem_index = FindFirstUsedMemoryIndex(
+          base::VectorOf(decoder->start(), decoder->end() - decoder->start()),
+          decoder->zone());
+      if (first_used_mem_index >= 0) {
+        builder_->set_cached_memory_index(first_used_mem_index);
+      }
+    }
     LoadInstanceCacheIntoSsa(ssa_env);
 
     if (v8_flags.trace_wasm && inlined_status_ == kRegularFunction) {
@@ -252,24 +261,25 @@ class WasmGraphBuildingInterface {
     }
   }
 
-  // Load the instance cache entries into the Ssa Environment.
+  // Load the instance cache entries into the SSA Environment.
   void LoadInstanceCacheIntoSsa(SsaEnv* ssa_env) {
     builder_->InitInstanceCache(&ssa_env->instance_cache);
   }
 
-  // Reload the instance cache entries into the Ssa Environment, if memory can
+  // Reload the instance cache entries into the SSA Environment, if memory can
   // actually grow.
   void ReloadInstanceCacheIntoSsa(SsaEnv* ssa_env, const WasmModule* module) {
-    if (module->memories.empty()) return;
-    const WasmMemory* memory0 = &module->memories[0];
-    if (memory0->initial_pages == memory0->maximum_pages) return;
+    if (!builder_->has_cached_memory()) return;
+    const WasmMemory* cached_memory =
+        &module->memories[builder_->cached_memory_index()];
+    if (cached_memory->initial_pages == cached_memory->maximum_pages) return;
     LoadInstanceCacheIntoSsa(ssa_env);
   }
 
   void StartFunctionBody(FullDecoder* decoder, Control* block) {}
 
   void FinishFunction(FullDecoder* decoder) {
-    if (decoder->enabled_.has_inlining()) {
+    if (inlining_enabled(decoder)) {
       DCHECK_EQ(feedback_instruction_index_, type_feedback_.size());
     }
     if (inlined_status_ == kRegularFunction) {
@@ -312,11 +322,12 @@ class WasmGraphBuildingInterface {
         &can_be_innermost);
     if (decoder->failed()) return;
     int instance_cache_index = decoder->num_locals();
-    // If memory 0 is shared, the stack guard might reallocate the backing
-    // store. We have to assume the instance cache will be updated.
-    bool mem0_is_shared = !decoder->module_->memories.empty() &&
-                          decoder->module_->memories.front().is_shared;
-    if (mem0_is_shared) assigned->Add(instance_cache_index);
+    // If the cached memory is shared, the stack guard might reallocate the
+    // backing store. We have to assume the instance cache will be updated.
+    bool cached_mem_is_shared =
+        builder_->has_cached_memory() &&
+        decoder->module_->memories[builder_->cached_memory_index()].is_shared;
+    if (cached_mem_is_shared) assigned->Add(instance_cache_index);
     DCHECK_NOT_NULL(assigned);
     decoder->control_at(0)->loop_assignments = assigned;
 
@@ -350,8 +361,9 @@ class WasmGraphBuildingInterface {
     // Now we setup a new environment for the inside of the loop.
     // TODO(choongwoo): Clear locals of the following SsaEnv after use.
     SetEnv(Split(decoder->zone(), ssa_env_));
-    builder_->StackCheck(mem0_is_shared ? &ssa_env_->instance_cache : nullptr,
-                         decoder->position());
+    builder_->StackCheck(
+        cached_mem_is_shared ? &ssa_env_->instance_cache : nullptr,
+        decoder->position());
     ssa_env_->SetNotMerged();
 
     // Wrap input merge into phis.
@@ -591,7 +603,7 @@ class WasmGraphBuildingInterface {
     SetEnv(internal_env);
   }
 
-  void BrOrRet(FullDecoder* decoder, uint32_t depth, uint32_t drop_values) {
+  void BrOrRet(FullDecoder* decoder, uint32_t depth, uint32_t drop_values = 0) {
     if (depth == decoder->control_depth() - 1) {
       DoReturn(decoder, drop_values);
     } else {
@@ -633,7 +645,7 @@ class WasmGraphBuildingInterface {
     }
     builder_->SetControl(fenv->control);
     ScopedSsaEnv scoped_env(this, tenv);
-    BrOrRet(decoder, depth, 0);
+    BrOrRet(decoder, depth);
   }
 
   void BrTable(FullDecoder* decoder, const BranchTableImmediate& imm,
@@ -641,7 +653,7 @@ class WasmGraphBuildingInterface {
     if (imm.table_count == 0) {
       // Only a default target. Do the equivalent of br.
       uint32_t target = BranchTableIterator<ValidationTag>(decoder, imm).next();
-      BrOrRet(decoder, target, 0);
+      BrOrRet(decoder, target);
       return;
     }
 
@@ -655,7 +667,7 @@ class WasmGraphBuildingInterface {
       ScopedSsaEnv env(this, Split(decoder->zone(), ssa_env_));
       builder_->SetControl(i == imm.table_count ? builder_->IfDefault(sw)
                                                 : builder_->IfValue(i, sw));
-      BrOrRet(decoder, target, 0);
+      BrOrRet(decoder, target);
     }
     DCHECK(decoder->ok());
   }
@@ -739,7 +751,7 @@ class WasmGraphBuildingInterface {
                              const Value args[], Value returns[]) {
     if (!decoder->module_) return false;  // Only needed for tests.
     if (index >= decoder->module_->num_imported_functions) return false;
-    WellKnownImportsList& well_known_imports =
+    const WellKnownImportsList& well_known_imports =
         decoder->module_->type_feedback.well_known_imports;
     using WKI = WellKnownImport;
     WKI import = well_known_imports.get(index);
@@ -747,9 +759,20 @@ class WasmGraphBuildingInterface {
     switch (import) {
       case WKI::kUninstantiated:
       case WKI::kGeneric:
+      case WKI::kLinkError:
         return false;
 
-      // WebAssembly.String.* imports.
+      // JS String Builtins proposal.
+      case WKI::kStringCast:
+        result = ExternRefToString(decoder, args[0]);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      case WKI::kStringTest: {
+        WasmTypeCheckConfig config{args[0].type, kWasmRefString};
+        result = builder_->RefTestAbstract(args[0].node, config);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
       case WKI::kStringCharCodeAt: {
         TFNode* string = ExternRefToString(decoder, args[0]);
         TFNode* view = builder_->StringAsWtf16(
@@ -818,18 +841,34 @@ class WasmGraphBuildingInterface {
         builder_->SetType(result, kWasmRefString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
-      case WKI::kStringFromWtf8Array:
+      case WKI::kStringFromUtf8Array:
         result = builder_->StringNewWtf8Array(
-            unibrow::Utf8Variant::kWtf8, args[0].node,
+            unibrow::Utf8Variant::kLossyUtf8, args[0].node,
             NullCheckFor(args[0].type), args[1].node, args[2].node,
             decoder->position());
         builder_->SetType(result, kWasmRefString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
+      case WKI::kStringIntoUtf8Array: {
+        TFNode* string = ExternRefToString(decoder, args[0]);
+        result = builder_->StringEncodeWtf8Array(
+            unibrow::Utf8Variant::kLossyUtf8, string,
+            compiler::kWithoutNullCheck, args[1].node,
+            NullCheckFor(args[1].type), args[2].node, decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
       case WKI::kStringLength: {
         TFNode* string = ExternRefToString(decoder, args[0]);
         result = builder_->StringMeasureWtf16(
             string, compiler::kWithoutNullCheck, decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+      case WKI::kStringMeasureUtf8: {
+        TFNode* string = ExternRefToString(decoder, args[0]);
+        result = builder_->StringMeasureWtf8(string, compiler::kWithNullCheck,
+                                             decoder->position());
         decoder->detected_->Add(kFeature_imported_strings);
         break;
       }
@@ -885,6 +924,31 @@ class WasmGraphBuildingInterface {
             args[0].node, NullCheckFor(args[0].type));
         decoder->detected_->Add(kFeature_stringref);
         break;
+        // Not implementing for Turbofan.
+      case WKI::kStringIndexOfImported:
+      case WKI::kStringToLowerCaseImported:
+      case WKI::kDataViewGetBigInt64:
+      case WKI::kDataViewGetBigUint64:
+      case WKI::kDataViewGetFloat32:
+      case WKI::kDataViewGetFloat64:
+      case WKI::kDataViewGetInt8:
+      case WKI::kDataViewGetInt16:
+      case WKI::kDataViewGetInt32:
+      case WKI::kDataViewGetUint8:
+      case WKI::kDataViewGetUint16:
+      case WKI::kDataViewGetUint32:
+      case WKI::kDataViewSetBigInt64:
+      case WKI::kDataViewSetBigUint64:
+      case WKI::kDataViewSetFloat32:
+      case WKI::kDataViewSetFloat64:
+      case WKI::kDataViewSetInt8:
+      case WKI::kDataViewSetInt16:
+      case WKI::kDataViewSetInt32:
+      case WKI::kDataViewSetUint8:
+      case WKI::kDataViewSetUint16:
+      case WKI::kDataViewSetUint32:
+      case WKI::kDataViewByteLength:
+        return false;
     }
     if (v8_flags.trace_wasm_inlining) {
       PrintF("[function %d: call to %d is well-known %s]\n", func_index_, index,
@@ -898,7 +962,7 @@ class WasmGraphBuildingInterface {
   void CallDirect(FullDecoder* decoder, const CallFunctionImmediate& imm,
                   const Value args[], Value returns[]) {
     int maybe_call_count = -1;
-    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
+    if (inlining_enabled(decoder) && !type_feedback_.empty()) {
       const CallSiteFeedback& feedback = next_call_feedback();
       DCHECK_EQ(feedback.num_cases(), 1);
       maybe_call_count = feedback.call_count(0);
@@ -913,7 +977,7 @@ class WasmGraphBuildingInterface {
   void ReturnCall(FullDecoder* decoder, const CallFunctionImmediate& imm,
                   const Value args[]) {
     int maybe_call_count = -1;
-    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
+    if (inlining_enabled(decoder) && !type_feedback_.empty()) {
       const CallSiteFeedback& feedback = next_call_feedback();
       DCHECK_EQ(feedback.num_cases(), 1);
       maybe_call_count = feedback.call_count(0);
@@ -941,10 +1005,9 @@ class WasmGraphBuildingInterface {
   }
 
   void CallRef(FullDecoder* decoder, const Value& func_ref,
-               const FunctionSig* sig, uint32_t sig_index, const Value args[],
-               Value returns[]) {
+               const FunctionSig* sig, const Value args[], Value returns[]) {
     const CallSiteFeedback* feedback = nullptr;
-    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
+    if (inlining_enabled(decoder) && !type_feedback_.empty()) {
       feedback = &next_call_feedback();
     }
     if (feedback == nullptr || feedback->num_cases() == 0) {
@@ -988,7 +1051,7 @@ class WasmGraphBuildingInterface {
       DoCall(decoder,
              CallInfo::CallDirect(expected_function_index,
                                   feedback->call_count(i)),
-             decoder->module_->signature(sig_index), args, returns_direct);
+             sig, args, returns_direct);
       control_args.push_back(control());
       effect_args.push_back(effect());
       returns_values.push_back(returns_direct);
@@ -1023,6 +1086,7 @@ class WasmGraphBuildingInterface {
 
     for (uint32_t i = 0; i < sig->return_count(); i++) {
       std::vector<TFNode*> phi_args;
+      phi_args.reserve(num_cases + 2);
       for (int j = 0; j < num_cases; j++) {
         phi_args.push_back(returns_values[j][i].node);
       }
@@ -1035,10 +1099,9 @@ class WasmGraphBuildingInterface {
   }
 
   void ReturnCallRef(FullDecoder* decoder, const Value& func_ref,
-                     const FunctionSig* sig, uint32_t sig_index,
-                     const Value args[]) {
+                     const FunctionSig* sig, const Value args[]) {
     const CallSiteFeedback* feedback = nullptr;
-    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
+    if (inlining_enabled(decoder) && !type_feedback_.empty()) {
       feedback = &next_call_feedback();
     }
     if (feedback == nullptr || feedback->num_cases() == 0) {
@@ -1094,7 +1157,8 @@ class WasmGraphBuildingInterface {
     builder_->SetControl(false_env->control);
     {
       ScopedSsaEnv scoped_env(this, true_env);
-      BrOrRet(decoder, depth, pass_null_along_branch ? 0 : 1);
+      int drop_values = pass_null_along_branch ? 0 : 1;
+      BrOrRet(decoder, depth, drop_values);
     }
     SetAndTypeNode(
         result_on_fallthrough,
@@ -1112,7 +1176,7 @@ class WasmGraphBuildingInterface {
         builder_->BrOnNull(ref_object.node, ref_object.type);
     builder_->SetControl(false_env->control);
     ScopedSsaEnv scoped_env(this, true_env);
-    BrOrRet(decoder, depth, 0);
+    BrOrRet(decoder, depth);
   }
 
   void SimdOp(FullDecoder* decoder, WasmOpcode opcode, const Value* args,
@@ -1147,7 +1211,8 @@ class WasmGraphBuildingInterface {
     GetNodes(args.data(), base::VectorOf(arg_values, count));
     CheckForException(decoder,
                       builder_->Throw(imm.index, imm.tag, base::VectorOf(args),
-                                      decoder->position()));
+                                      decoder->position()),
+                      false);
     builder_->TerminateThrow(effect(), control());
   }
 
@@ -1155,7 +1220,7 @@ class WasmGraphBuildingInterface {
     DCHECK(block->is_try_catchall() || block->is_try_catch());
     TFNode* exception = block->try_info->exception;
     DCHECK_NOT_NULL(exception);
-    CheckForException(decoder, builder_->Rethrow(exception));
+    CheckForException(decoder, builder_->Rethrow(exception), false);
     builder_->TerminateThrow(effect(), control());
   }
 
@@ -1183,14 +1248,6 @@ class WasmGraphBuildingInterface {
   void CatchException(FullDecoder* decoder, const TagIndexImmediate& imm,
                       Control* block, base::Vector<Value> values) {
     DCHECK(block->is_try_catch());
-    // The catch block is unreachable if no possible throws in the try block
-    // exist. We only build a landing pad if some node in the try block can
-    // (possibly) throw. Otherwise the catch environments remain empty.
-    if (!block->try_info->might_throw()) {
-      block->reachability = kSpecOnlyReachable;
-      return;
-    }
-
     TFNode* exception = block->try_info->exception;
     SetEnv(block->try_info->catch_env);
 
@@ -1251,7 +1308,7 @@ class WasmGraphBuildingInterface {
     DCHECK_EQ(decoder->control_at(0), block);
     DCHECK(block->is_incomplete_try());
 
-    if (block->try_info->might_throw()) {
+    if (block->try_info->exception) {
       // Merge the current env into the target handler's env.
       SetEnv(block->try_info->catch_env);
       if (depth == decoder->control_depth() - 1) {
@@ -1285,16 +1342,50 @@ class WasmGraphBuildingInterface {
   void CatchAll(FullDecoder* decoder, Control* block) {
     DCHECK(block->is_try_catchall() || block->is_try_catch());
     DCHECK_EQ(decoder->control_at(0), block);
+    SetEnv(block->try_info->catch_env);
+  }
 
-    // The catch block is unreachable if no possible throws in the try block
-    // exist. We only build a landing pad if some node in the try block can
-    // (possibly) throw. Otherwise the catch environments remain empty.
-    if (!block->try_info->might_throw()) {
-      decoder->SetSucceedingCodeDynamicallyUnreachable();
+  void TryTable(FullDecoder* decoder, Control* block) { Try(decoder, block); }
+
+  void CatchCase(FullDecoder* decoder, Control* block,
+                 const CatchCase& catch_case, base::Vector<Value> values) {
+    DCHECK(block->is_try_table());
+    TFNode* exception = block->try_info->exception;
+    SetEnv(block->try_info->catch_env);
+
+    if (catch_case.kind == kCatchAll || catch_case.kind == kCatchAllRef) {
+      if (catch_case.kind == kCatchAllRef) {
+        DCHECK_EQ(values[0].type, kWasmExnRef);
+        values[0].node = block->try_info->exception;
+      }
+      BrOrRet(decoder, catch_case.br_imm.depth);
       return;
     }
 
-    SetEnv(block->try_info->catch_env);
+    TFNode* caught_tag = builder_->GetExceptionTag(exception);
+    TFNode* expected_tag =
+        builder_->LoadTagFromTable(catch_case.maybe_tag.tag_imm.index);
+
+    base::Vector<Value> values_without_exnref =
+        catch_case.kind == kCatch ? values
+                                  : values.SubVector(0, values.size() - 1);
+    CatchAndUnpackWasmException(decoder, block, exception,
+                                catch_case.maybe_tag.tag_imm.tag, caught_tag,
+                                expected_tag, values_without_exnref);
+    if (catch_case.kind == kCatchRef) {
+      DCHECK_EQ(values.last().type, kWasmExnRef);
+      values.last().node = block->try_info->exception;
+    }
+    BrOrRet(decoder, catch_case.br_imm.depth);
+    bool is_last = &catch_case == &block->catch_cases.last();
+    if (is_last && !decoder->HasCatchAll(block)) {
+      SetEnv(block->try_info->catch_env);
+      ThrowRef(decoder, block->try_info->exception);
+    }
+  }
+
+  void ThrowRef(FullDecoder* decoder, Value* value) {
+    ThrowRef(decoder, value->node);
   }
 
   void AtomicOp(FullDecoder* decoder, WasmOpcode opcode, const Value args[],
@@ -1505,8 +1596,8 @@ class WasmGraphBuildingInterface {
         decoder->position());
   }
 
-  void I31New(FullDecoder* decoder, const Value& input, Value* result) {
-    SetAndTypeNode(result, builder_->I31New(input.node));
+  void RefI31(FullDecoder* decoder, const Value& input, Value* result) {
+    SetAndTypeNode(result, builder_->RefI31(input.node));
   }
 
   void I31GetS(FullDecoder* decoder, const Value& input, Value* result) {
@@ -1604,7 +1695,7 @@ class WasmGraphBuildingInterface {
       Forward(decoder, object, forwarding_value);
       // Currently, br_on_* instructions modify the value stack before calling
       // the interface function, so we don't need to drop any values here.
-      BrOrRet(decoder, br_depth, 0);
+      BrOrRet(decoder, br_depth);
       // Note: Differently to below for !{branch_on_match}, we do not Forward
       // the value here to perform a TypeGuard. It can't be done here due to
       // asymmetric decoder code. A Forward here would be poped from the stack
@@ -1617,7 +1708,7 @@ class WasmGraphBuildingInterface {
         // This will add a TypeGuard to the non-null type (as in this case the
         // object is non-nullable).
         Forward(decoder, object, decoder->stack_value(1));
-        BrOrRet(decoder, br_depth, 0);
+        BrOrRet(decoder, br_depth);
       }
       // Narrow type for the successful cast fallthrough branch.
       Forward(decoder, object, forwarding_value);
@@ -1733,19 +1824,6 @@ class WasmGraphBuildingInterface {
         false, null_succeeds);
   }
 
-  void RefIsStruct(FullDecoder* decoder, const Value& object, Value* result) {
-    WasmTypeCheckConfig config{object.type, ValueType::Ref(HeapType::kStruct)};
-    SetAndTypeNode(result, builder_->RefTestAbstract(object.node, config));
-  }
-
-  void RefAsStruct(FullDecoder* decoder, const Value& object, Value* result) {
-    WasmTypeCheckConfig config{object.type, ValueType::Ref(HeapType::kStruct)};
-    TFNode* cast_object =
-        builder_->RefCastAbstract(object.node, config, decoder->position());
-    TFNode* rename = builder_->TypeGuard(cast_object, result->type);
-    SetAndTypeNode(result, rename);
-  }
-
   void BrOnStruct(FullDecoder* decoder, const Value& object,
                   Value* value_on_branch, uint32_t br_depth,
                   bool null_succeeds) {
@@ -1762,19 +1840,6 @@ class WasmGraphBuildingInterface {
         false, null_succeeds);
   }
 
-  void RefIsArray(FullDecoder* decoder, const Value& object, Value* result) {
-    WasmTypeCheckConfig config{object.type, ValueType::Ref(HeapType::kArray)};
-    SetAndTypeNode(result, builder_->RefTestAbstract(object.node, config));
-  }
-
-  void RefAsArray(FullDecoder* decoder, const Value& object, Value* result) {
-    WasmTypeCheckConfig config{object.type, ValueType::Ref(HeapType::kArray)};
-    TFNode* cast_object =
-        builder_->RefCastAbstract(object.node, config, decoder->position());
-    TFNode* rename = builder_->TypeGuard(cast_object, result->type);
-    SetAndTypeNode(result, rename);
-  }
-
   void BrOnArray(FullDecoder* decoder, const Value& object,
                  Value* value_on_branch, uint32_t br_depth,
                  bool null_succeeds) {
@@ -1789,19 +1854,6 @@ class WasmGraphBuildingInterface {
     BrOnCastAbs<&compiler::WasmGraphBuilder::BrOnArray>(
         decoder, HeapType{kBottom}, object, value_on_fallthrough, br_depth,
         false, null_succeeds);
-  }
-
-  void RefIsI31(FullDecoder* decoder, const Value& object, Value* result) {
-    WasmTypeCheckConfig config{object.type, ValueType::Ref(HeapType::kI31)};
-    SetAndTypeNode(result, builder_->RefTestAbstract(object.node, config));
-  }
-
-  void RefAsI31(FullDecoder* decoder, const Value& object, Value* result) {
-    WasmTypeCheckConfig config{object.type, ValueType::Ref(HeapType::kI31)};
-    TFNode* cast_object =
-        builder_->RefCastAbstract(object.node, config, decoder->position());
-    TFNode* rename = builder_->TypeGuard(cast_object, result->type);
-    SetAndTypeNode(result, rename);
   }
 
   void BrOnI31(FullDecoder* decoder, const Value& object,
@@ -2144,6 +2196,10 @@ class WasmGraphBuildingInterface {
     return v8_flags.wasm_loop_unrolling || v8_flags.wasm_loop_peeling;
   }
 
+  bool inlining_enabled(FullDecoder* decoder) {
+    return decoder->enabled_.has_inlining() || decoder->module_->is_wasm_gc;
+  }
+
   void GetNodes(TFNode** nodes, const Value* values, size_t count) {
     for (size_t i = 0; i < count; ++i) {
       nodes[i] = values[i].node;
@@ -2186,7 +2242,8 @@ class WasmGraphBuildingInterface {
     builder_->set_instance_cache(&env->instance_cache);
   }
 
-  TFNode* CheckForException(FullDecoder* decoder, TFNode* node) {
+  TFNode* CheckForException(FullDecoder* decoder, TFNode* node,
+                            bool may_modify_instance_cache) {
     DCHECK_NOT_NULL(node);
 
     // We need to emit IfSuccess/IfException nodes if this node throws and has
@@ -2216,7 +2273,9 @@ class WasmGraphBuildingInterface {
 
     // The exceptional operation could have modified memory size; we need to
     // reload the memory context into the exceptional control path.
-    ReloadInstanceCacheIntoSsa(ssa_env_, decoder->module_);
+    if (may_modify_instance_cache) {
+      ReloadInstanceCacheIntoSsa(ssa_env_, decoder->module_);
+    }
 
     if (emit_loop_exits()) {
       ValueVector values;
@@ -2463,7 +2522,7 @@ class WasmGraphBuildingInterface {
             call_info.table_index(), call_info.sig_index(),
             base::VectorOf(arg_nodes), base::VectorOf(return_nodes),
             decoder->position());
-        CheckForException(decoder, call);
+        CheckForException(decoder, call, true);
         break;
       }
       case CallInfo::kCallDirect: {
@@ -2471,14 +2530,14 @@ class WasmGraphBuildingInterface {
             call_info.callee_index(), base::VectorOf(arg_nodes),
             base::VectorOf(return_nodes), decoder->position());
         builder_->StoreCallCount(call, call_info.call_count());
-        CheckForException(decoder, call);
+        CheckForException(decoder, call, true);
         break;
       }
       case CallInfo::kCallRef: {
         TFNode* call = builder_->CallRef(
             sig, base::VectorOf(arg_nodes), base::VectorOf(return_nodes),
             call_info.null_check(), decoder->position());
-        CheckForException(decoder, call);
+        CheckForException(decoder, call, true);
         break;
       }
     }
@@ -2607,11 +2666,45 @@ class WasmGraphBuildingInterface {
     DCHECK_LT(value->type.kind(), kBottom);
     value->node = builder_->SetType(node, value->type);
   }
+
+  // In order to determine the memory index to cache in an SSA value, we try to
+  // determine the first memory index that will be accessed in the function. If
+  // we do not find a memory access this method returns -1.
+  // This is a best-effort implementation: It ignores potential control flow and
+  // only looks for basic memory load and store operations.
+  int FindFirstUsedMemoryIndex(base::Vector<const uint8_t> body, Zone* zone) {
+    BodyLocalDecls locals;
+    for (BytecodeIterator it{body.begin(), body.end(), &locals, zone};
+         it.has_next(); it.next()) {
+      WasmOpcode opcode = it.current();
+      constexpr bool kConservativelyAssumeMemory64 = true;
+      constexpr bool kConservativelyAssumeMultiMemory = true;
+      switch (opcode) {
+        default:
+          break;
+#define CASE(name, ...) case kExpr##name:
+          FOREACH_LOAD_MEM_OPCODE(CASE)
+          FOREACH_STORE_MEM_OPCODE(CASE)
+#undef CASE
+          MemoryAccessImmediate imm(
+              &it, it.pc() + 1, UINT32_MAX, kConservativelyAssumeMemory64,
+              kConservativelyAssumeMultiMemory, Decoder::kNoValidation);
+          return imm.mem_index;
+      }
+    }
+    return -1;
+  }
+
+  void ThrowRef(FullDecoder* decoder, TFNode* exception) {
+    DCHECK_NOT_NULL(exception);
+    CheckForException(decoder, builder_->Rethrow(exception), false);
+    builder_->TerminateThrow(effect(), control());
+  }
 };
 
 }  // namespace
 
-void BuildTFGraph(AccountingAllocator* allocator, const WasmFeatures& enabled,
+void BuildTFGraph(AccountingAllocator* allocator, WasmFeatures enabled,
                   const WasmModule* module, compiler::WasmGraphBuilder* builder,
                   WasmFeatures* detected, const FunctionBody& body,
                   std::vector<compiler::WasmLoopInfo>* loop_infos,
@@ -2639,6 +2732,4 @@ void BuildTFGraph(AccountingAllocator* allocator, const WasmFeatures& enabled,
   CHECK(decoder.ok());
 }
 
-}  // namespace wasm
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::wasm

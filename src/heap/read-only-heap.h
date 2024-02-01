@@ -72,19 +72,19 @@ class ReadOnlyHeap {
   // Returns whether the address is within the read-only space.
   V8_EXPORT_PRIVATE static bool Contains(Address address);
   // Returns whether the object resides in the read-only space.
-  V8_EXPORT_PRIVATE static bool Contains(HeapObject object);
+  V8_EXPORT_PRIVATE static bool Contains(Tagged<HeapObject> object);
   // Gets read-only roots from an appropriate root list. Shared read only root
   // must be initialized
   V8_EXPORT_PRIVATE inline static ReadOnlyRoots GetReadOnlyRoots(
-      HeapObject object);
+      Tagged<HeapObject> object);
   // Returns the current isolates roots table during initialization as opposed
   // to the shared one in case the latter is not initialized yet.
   V8_EXPORT_PRIVATE inline static ReadOnlyRoots EarlyGetReadOnlyRoots(
-      HeapObject object);
+      Tagged<HeapObject> object);
 
   ReadOnlySpace* read_only_space() const { return read_only_space_; }
 
-#ifdef V8_CODE_POINTER_SANDBOXING
+#ifdef V8_ENABLE_SANDBOX
   CodePointerTable::Space* code_pointer_space() { return &code_pointer_space_; }
 #endif
 
@@ -107,7 +107,7 @@ class ReadOnlyHeap {
 
   // Creates a new read-only heap and attaches it to the provided isolate. Only
   // used the first time when creating a ReadOnlyHeap for sharing.
-  static ReadOnlyHeap* CreateInitalHeapForBootstrapping(
+  static ReadOnlyHeap* CreateInitialHeapForBootstrapping(
       Isolate* isolate, std::shared_ptr<ReadOnlyArtifacts> artifacts);
   // Runs the read-only deserializer and calls InitFromIsolate to complete
   // read-only heap initialization.
@@ -123,11 +123,11 @@ class ReadOnlyHeap {
   bool roots_init_complete_ = false;
   ReadOnlySpace* read_only_space_ = nullptr;
 
-#ifdef V8_CODE_POINTER_SANDBOXING
+#ifdef V8_ENABLE_SANDBOX
   // The read-only heap has its own code pointer space. Entries in this space
   // are never deallocated.
   CodePointerTable::Space code_pointer_space_;
-#endif  // V8_CODE_POINTER_SANDBOXING
+#endif  // V8_ENABLE_SANDBOX
 
   // Returns whether shared memory can be allocated and then remapped to
   // additional addresses.
@@ -171,7 +171,7 @@ class V8_EXPORT_PRIVATE ReadOnlyPageObjectIterator final {
                              SkipFreeSpaceOrFiller skip_free_space_or_filler =
                                  SkipFreeSpaceOrFiller::kYes);
 
-  HeapObject Next();
+  Tagged<HeapObject> Next();
 
  private:
   void Reset(const ReadOnlyPage* page);

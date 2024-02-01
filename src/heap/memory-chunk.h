@@ -60,7 +60,7 @@ class MemoryChunk : public BasicMemoryChunk {
   }
 
   // Only works if the object is in the first kPageSize of the MemoryChunk.
-  static MemoryChunk* FromHeapObject(HeapObject o) {
+  static MemoryChunk* FromHeapObject(Tagged<HeapObject> o) {
     return cast(BasicMemoryChunk::FromHeapObject(o));
   }
 
@@ -159,7 +159,7 @@ class MemoryChunk : public BasicMemoryChunk {
     return typed_slot_set;
   }
 
-  int FreeListsLength();
+  int ComputeFreeListsLength();
 
   // Approximate amount of physical memory committed for this chunk.
   V8_EXPORT_PRIVATE size_t CommittedPhysicalMemory() const;
@@ -176,7 +176,7 @@ class MemoryChunk : public BasicMemoryChunk {
                                                  size_t amount);
 
   size_t ExternalBackingStoreBytes(ExternalBackingStoreType type) const {
-    return external_backing_store_bytes_[type];
+    return external_backing_store_bytes_[static_cast<int>(type)];
   }
 
   Space* owner() const {
@@ -195,21 +195,10 @@ class MemoryChunk : public BasicMemoryChunk {
     DCHECK(!V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT);
     // On MacOS on ARM64 RWX permissions are allowed to be set only when
     // fast W^X is enabled (see V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT).
-    return !V8_HAS_PTHREAD_JIT_WRITE_PROTECT && v8_flags.write_code_using_rwx
+    return !V8_HAS_PTHREAD_JIT_WRITE_PROTECT && !v8_flags.jitless
                ? PageAllocator::kReadWriteExecute
                : PageAllocator::kReadWrite;
   }
-
-  V8_EXPORT_PRIVATE void SetReadable();
-  V8_EXPORT_PRIVATE void SetReadAndExecutable();
-
-  // Used by the mprotect version of CodePageMemoryModificationScope to toggle
-  // the writable permission bit of the MemoryChunk.
-  // The returned MutexGuard protects the page from concurrent access. The
-  // caller needs to call SetDefaultCodePermissions before releasing the
-  // MutexGuard.
-  V8_EXPORT_PRIVATE base::MutexGuard SetCodeModificationPermissions();
-  V8_EXPORT_PRIVATE void SetDefaultCodePermissions();
 
   heap::ListNode<MemoryChunk>& list_node() { return list_node_; }
   const heap::ListNode<MemoryChunk>& list_node() const { return list_node_; }
@@ -254,13 +243,13 @@ class MemoryChunk : public BasicMemoryChunk {
 
   void SetLiveBytes(size_t value) {
     DCHECK_IMPLIES(V8_COMPRESS_POINTERS_8GB_BOOL,
-                   IsAligned(value, kObjectAlignment8GbHeap));
+                   ::IsAligned(value, kObjectAlignment8GbHeap));
     live_byte_count_.store(value, std::memory_order_relaxed);
   }
 
   void IncrementLiveBytesAtomically(intptr_t diff) {
     DCHECK_IMPLIES(V8_COMPRESS_POINTERS_8GB_BOOL,
-                   IsAligned(diff, kObjectAlignment8GbHeap));
+                   ::IsAligned(diff, kObjectAlignment8GbHeap));
     live_byte_count_.fetch_add(diff, std::memory_order_relaxed);
   }
 
@@ -270,11 +259,6 @@ class MemoryChunk : public BasicMemoryChunk {
   // Release all memory allocated by the chunk. Should be called when memory
   // chunk is about to be freed.
   void ReleaseAllAllocatedMemory();
-
-  // Sets the requested page permissions only if the write unprotect counter
-  // has reached 0.
-  void DecrementWriteUnprotectCounterAndMaybeSetPermissions(
-      PageAllocator::Permission permission);
 
 #ifdef DEBUG
   static void ValidateOffsets(MemoryChunk* chunk);
@@ -323,7 +307,8 @@ class MemoryChunk : public BasicMemoryChunk {
       ConcurrentSweepingState::kDone};
 
   // Tracks off-heap memory used by this memory chunk.
-  std::atomic<size_t> external_backing_store_bytes_[kNumTypes] = {0};
+  std::atomic<size_t> external_backing_store_bytes_[static_cast<int>(
+      ExternalBackingStoreType::kNumValues)] = {0};
 
   heap::ListNode<MemoryChunk> list_node_;
 
@@ -357,6 +342,16 @@ class MemoryChunk : public BasicMemoryChunk {
 };
 
 }  // namespace internal
+
+namespace base {
+// Define special hash function for chunk pointers, to be used with std data
+// structures, e.g. std::unordered_set<MemoryChunk*, base::hash<MemoryChunk*>
+template <>
+struct hash<i::MemoryChunk*> : hash<i::BasicMemoryChunk*> {};
+template <>
+struct hash<const i::MemoryChunk*> : hash<const i::BasicMemoryChunk*> {};
+}  // namespace base
+
 }  // namespace v8
 
 #endif  // V8_HEAP_MEMORY_CHUNK_H_

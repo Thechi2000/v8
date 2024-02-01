@@ -8,6 +8,7 @@
 #include "src/common/globals.h"
 #include "src/flags/flags.h"
 #include "src/objects/js-objects.h"
+#include "src/runtime/runtime.h"
 
 namespace v8 {
 namespace internal {
@@ -31,6 +32,18 @@ enum class StackCheckKind : uint8_t {
   kCodeStubAssembler,
   kWasm,
 };
+
+inline Runtime::FunctionId GetBuiltinForStackCheckKind(StackCheckKind kind) {
+  if (kind == StackCheckKind::kJSFunctionEntry) {
+    return Runtime::kStackGuardWithGap;
+  } else if (kind == StackCheckKind::kJSIterationBody) {
+    return Runtime::kHandleNoHeapWritesInterrupts;
+  } else {
+    return Runtime::kStackGuard;
+  }
+}
+
+enum class CanThrow : uint8_t { kNo, kYes };
 
 inline std::ostream& operator<<(std::ostream& os, StackCheckKind kind) {
   switch (kind) {
@@ -102,6 +115,16 @@ const int kMaxFastLiteralDepth = 3;
 const int kMaxFastLiteralProperties = JSObject::kMaxInObjectProperties;
 
 enum BaseTaggedness : uint8_t { kUntaggedBase, kTaggedBase };
+
+enum class MemoryAccessKind : uint8_t {
+  kNormal,
+  kUnaligned,
+  kProtected,
+};
+
+size_t hash_value(MemoryAccessKind);
+
+V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&, MemoryAccessKind);
 
 }  // namespace compiler
 }  // namespace internal

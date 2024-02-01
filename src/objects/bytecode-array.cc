@@ -62,7 +62,7 @@ void BytecodeArray::PrintJson(std::ostream& os) {
   if (constant_pool_lenght > 0) {
     os << ", \"constantPool\": [";
     for (int i = 0; i < constant_pool_lenght; i++) {
-      Object object = constant_pool()->get(i);
+      Tagged<Object> object = constant_pool()->get(i);
       if (i > 0) os << ", ";
       os << "\"" << object << "\"";
     }
@@ -134,7 +134,7 @@ void BytecodeArray::Disassemble(Handle<BytecodeArray> handle,
   os << "Constant pool (size = " << handle->constant_pool()->length() << ")\n";
 #ifdef OBJECT_PRINT
   if (handle->constant_pool()->length() > 0) {
-    handle->constant_pool().Print(os);
+    Print(handle->constant_pool(), os);
   }
 #endif
 
@@ -146,7 +146,7 @@ void BytecodeArray::Disassemble(Handle<BytecodeArray> handle,
   }
 #endif
 
-  ByteArray source_position_table = handle->SourcePositionTable();
+  Tagged<ByteArray> source_position_table = handle->SourcePositionTable();
   os << "Source Position Table (size = " << source_position_table->length()
      << ")\n";
 #ifdef OBJECT_PRINT
@@ -156,7 +156,7 @@ void BytecodeArray::Disassemble(Handle<BytecodeArray> handle,
 #endif
 }
 
-void BytecodeArray::CopyBytecodesTo(BytecodeArray to) {
+void BytecodeArray::CopyBytecodesTo(Tagged<BytecodeArray> to) {
   BytecodeArray from = *this;
   DCHECK_EQ(from->length(), to->length());
   CopyBytes(reinterpret_cast<uint8_t*>(to->GetFirstBytecodeAddress()),

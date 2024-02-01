@@ -12,7 +12,9 @@
 #include "src/interpreter/bytecode-register.h"
 #include "src/maglev/maglev-compilation-unit.h"
 #include "src/maglev/maglev-ir.h"
+#ifdef V8_ENABLE_MAGLEV
 #include "src/maglev/maglev-regalloc-data.h"
+#endif
 #include "src/maglev/maglev-register-frame-array.h"
 #include "src/zone/zone.h"
 
@@ -64,68 +66,197 @@ void DestructivelyIntersect(ZoneMap<Key, Value>& lhs_map,
   }
 }
 
-struct NodeInfo {
-  NodeType type = NodeType::kUnknown;
+using PossibleMaps = compiler::ZoneRefSet<Map>;
+
+class NodeInfo {
+ public:
+  NodeInfo() = default;
+
+  struct ClearUnstableMapsOnCopy {
+    const NodeInfo& val;
+  };
+  explicit NodeInfo(ClearUnstableMapsOnCopy other) V8_NOEXCEPT {
+    type_ = other.val.type_;
+    alternative_ = other.val.alternative_;
+    if (other.val.possible_maps_are_known_ && !other.val.any_map_is_unstable_) {
+      possible_maps_ = other.val.possible_maps_;
+      possible_maps_are_known_ = true;
+    }
+  }
+
+  NodeType type() const { return type_; }
+  NodeType CombineType(NodeType other) {
+    return type_ = maglev::CombineType(type_, other);
+  }
+  NodeType IntersectType(NodeType other) {
+    return type_ = maglev::IntersectType(type_, other);
+  }
 
   // Optional alternative nodes with the equivalent value but a different
   // representation.
-  // TODO(leszeks): At least one of these is redundant for every node, consider
-  // a more compressed form or even linked list.
-  ValueNode* tagged_alternative = nullptr;
-  ValueNode* int32_alternative = nullptr;
-  ValueNode* float64_alternative = nullptr;
-  ValueNode* constant_alternative = nullptr;
-  // Alternative nodes with a value equivalent to the ToNumber of this node.
-  ValueNode* truncated_int32_to_number = nullptr;
+  class AlternativeNodes {
+   public:
+    AlternativeNodes() { store_.fill(nullptr); }
 
-  bool is_empty() const {
-    return type == NodeType::kUnknown && tagged_alternative == nullptr &&
-           int32_alternative == nullptr && float64_alternative == nullptr &&
-           truncated_int32_to_number == nullptr &&
-           constant_alternative == nullptr;
+#define ALTERNATIVES(V)                                \
+  V(tagged, Tagged)                                    \
+  V(int32, Int32)                                      \
+  V(truncated_int32_to_number, TruncatedInt32ToNumber) \
+  V(float64, Float64)                                  \
+  V(constant, Constant)
+
+    enum Kind {
+#define KIND(name, Name) k##Name,
+      ALTERNATIVES(KIND)
+#undef KIND
+          kNumberOfAlternatives
+    };
+
+#define API(name, Name)                                      \
+  ValueNode* name() const { return store_[Kind::k##Name]; }  \
+  ValueNode* set_##name(ValueNode* val) {                    \
+    return store_[Kind::k##Name] = val;                      \
+  }                                                          \
+  template <typename Function>                               \
+  ValueNode* get_or_set_##name(Function create) {            \
+    if (store_[Kind::k##Name]) return store_[Kind::k##Name]; \
+    return store_[Kind::k##Name] = create();                 \
+  }
+    ALTERNATIVES(API)
+#undef API
+#undef ALTERNATIVES
+
+    bool has_none() const { return store_ == AlternativeNodes().store_; }
+
+    void MergeWith(const AlternativeNodes& other) {
+      for (size_t i = 0; i < Kind::kNumberOfAlternatives; ++i) {
+        if (store_[i] && store_[i] != other.store_[i]) {
+          store_[i] = nullptr;
+        }
+      }
+    }
+
+   private:
+    // TODO(leszeks): At least one of these is redundant for every node,
+    // consider a more compressed form or even linked list.
+    std::array<ValueNode*, Kind::kNumberOfAlternatives> store_;
+
+    // Prevent callers from copying these when they try to update the
+    // alternatives by making these private.
+    AlternativeNodes(const AlternativeNodes&) V8_NOEXCEPT = default;
+    AlternativeNodes& operator=(const AlternativeNodes&) V8_NOEXCEPT = default;
+    friend class NodeInfo;
+  };
+
+  const AlternativeNodes& alternative() const { return alternative_; }
+  AlternativeNodes& alternative() { return alternative_; }
+
+  bool no_info_available() const {
+    return type_ == NodeType::kUnknown && alternative_.has_none() &&
+           !possible_maps_are_known_;
   }
 
-  bool is_smi() const { return NodeTypeIsSmi(type); }
-  bool is_any_heap_object() const { return NodeTypeIsAnyHeapObject(type); }
-  bool is_string() const { return NodeTypeIsString(type); }
+  bool is_smi() const { return NodeTypeIsSmi(type_); }
+  bool is_any_heap_object() const { return NodeTypeIsAnyHeapObject(type_); }
+  bool is_string() const { return NodeTypeIsString(type_); }
   bool is_internalized_string() const {
-    return NodeTypeIsInternalizedString(type);
+    return NodeTypeIsInternalizedString(type_);
   }
-  bool is_symbol() const { return NodeTypeIsSymbol(type); }
-  bool is_constant() const { return constant_alternative != nullptr; }
+  bool is_symbol() const { return NodeTypeIsSymbol(type_); }
 
   // Mutate this node info by merging in another node info, with the result
   // being a node info that is the subset of information valid in both inputs.
-  void MergeWith(const NodeInfo& other) {
-    type = IntersectType(type, other.type);
-    tagged_alternative = tagged_alternative == other.tagged_alternative
-                             ? tagged_alternative
-                             : nullptr;
-    int32_alternative = int32_alternative == other.int32_alternative
-                            ? int32_alternative
-                            : nullptr;
-    float64_alternative = float64_alternative == other.float64_alternative
-                              ? float64_alternative
-                              : nullptr;
-    constant_alternative = constant_alternative == other.constant_alternative
-                               ? constant_alternative
-                               : nullptr;
-    truncated_int32_to_number =
-        truncated_int32_to_number == other.truncated_int32_to_number
-            ? truncated_int32_to_number
-            : nullptr;
+  void MergeWith(const NodeInfo& other, Zone* zone,
+                 bool& any_merged_map_is_unstable) {
+    IntersectType(other.type_);
+    alternative_.MergeWith(other.alternative_);
+    if (possible_maps_are_known_) {
+      if (other.possible_maps_are_known_) {
+        // Map sets are the set of _possible_ maps, so on a merge we need to
+        // _union_ them together (i.e. intersect the set of impossible maps).
+        // Remember whether _any_ of these merges observed unstable maps.
+        possible_maps_.Union(other.possible_maps_, zone);
+      } else {
+        possible_maps_.clear();
+        possible_maps_are_known_ = false;
+      }
+    }
+
+    any_map_is_unstable_ = possible_maps_are_known_ &&
+                           (any_map_is_unstable_ || other.any_map_is_unstable_);
+    any_merged_map_is_unstable =
+        any_merged_map_is_unstable || any_map_is_unstable_;
   }
+
+  bool possible_maps_are_unstable() const { return any_map_is_unstable_; }
+
+  void ClearUnstableMaps() {
+    if (!any_map_is_unstable_) return;
+    possible_maps_.clear();
+    possible_maps_are_known_ = false;
+    any_map_is_unstable_ = false;
+  }
+
+  bool possible_maps_are_known() const { return possible_maps_are_known_; }
+
+  const PossibleMaps& possible_maps() const {
+    // If !possible_maps_are_known_ then every map is possible and using the
+    // (probably empty) possible_maps_ set is definetly wrong.
+    CHECK(possible_maps_are_known_);
+    return possible_maps_;
+  }
+
+  void SetPossibleMaps(const PossibleMaps& possible_maps,
+                       bool any_map_is_unstable, NodeType possible_type) {
+    possible_maps_ = possible_maps;
+    possible_maps_are_known_ = true;
+    any_map_is_unstable_ = any_map_is_unstable;
+#ifdef DEBUG
+    if (possible_maps.size()) {
+      NodeType expected = StaticTypeForMap(*possible_maps.begin());
+      for (auto map : possible_maps) {
+        expected = maglev::IntersectType(StaticTypeForMap(map), expected);
+      }
+      // Ensure the claimed type is not narrower than what can be learned from
+      // the map checks.
+      DCHECK(NodeTypeIs(expected, possible_type));
+    } else {
+      DCHECK_EQ(possible_type, NodeType::kUnknown);
+    }
+#endif
+    CombineType(possible_type);
+  }
+
+  bool any_map_is_unstable() const { return any_map_is_unstable_; }
+
+ private:
+  NodeType type_ = NodeType::kUnknown;
+
+  bool any_map_is_unstable_ = false;
+
+  // Maps for a node. Sets of maps that only contain stable maps are valid
+  // across side-effecting calls, as long as we install a dependency, otherwise
+  // they are cleared on side-effects.
+  // TODO(v8:7700): Investigate a better data structure to use than ZoneMap.
+  bool possible_maps_are_known_ = false;
+  PossibleMaps possible_maps_;
+
+  AlternativeNodes alternative_;
 };
 
 struct KnownNodeAspects {
+  // Permanently valid if checked in a dominator.
+  using NodeInfos = ZoneMap<ValueNode*, NodeInfo>;
+
   explicit KnownNodeAspects(Zone* zone)
-      : node_infos(zone),
-        possible_maps(zone),
-        any_map_for_any_node_is_unstable(false),
+      : any_map_for_any_node_is_unstable(false),
         loaded_constant_properties(zone),
         loaded_properties(zone),
         loaded_context_constants(zone),
-        loaded_context_slots(zone) {}
+        loaded_context_slots(zone),
+        available_expressions(zone),
+        node_infos(zone),
+        effect_epoch_(0) {}
 
   // Copy constructor is defaulted but private so that we explicitly call the
   // Clone method.
@@ -143,15 +274,26 @@ struct KnownNodeAspects {
   // calls, and we don't know about these until it's too late.
   KnownNodeAspects* CloneForLoopHeader(Zone* zone) const {
     KnownNodeAspects* clone = zone->New<KnownNodeAspects>(zone);
-    clone->node_infos = node_infos;
-    clone->possible_maps = possible_maps;
-    if (any_map_for_any_node_is_unstable) {
-      clone->any_map_for_any_node_is_unstable = true;
-      clone->ClearUnstableMaps();
-      DCHECK(!clone->any_map_for_any_node_is_unstable);
+    if (!any_map_for_any_node_is_unstable) {
+      clone->node_infos = node_infos;
+#ifdef DEBUG
+      for (const auto& it : node_infos) {
+        DCHECK(!it.second.any_map_is_unstable());
+      }
+#endif
+    } else {
+      for (const auto& it : node_infos) {
+        clone->node_infos.emplace(it.first,
+                                  NodeInfo::ClearUnstableMapsOnCopy{it.second});
+      }
     }
     clone->loaded_constant_properties = loaded_constant_properties;
     clone->loaded_context_constants = loaded_context_constants;
+
+    // To account for the back-jump we must not allow effects to be reshuffled
+    // across loop headers.
+    // TODO(olivf): Only do this if the loop contains write effects.
+    clone->effect_epoch_++;
     return clone;
   }
 
@@ -163,36 +305,45 @@ struct KnownNodeAspects {
     // same map. Unstable maps can also transition to stable ones, so we have to
     // clear _all_ maps for a node if it had _any_ unstable map.
     if (!any_map_for_any_node_is_unstable) return;
-    for (auto it = possible_maps.begin(); it != possible_maps.end();) {
-      if (it->second.any_map_is_unstable) {
-        it = possible_maps.erase(it);
-      } else {
-        ++it;
-      }
+    for (auto& it : node_infos) {
+      it.second.ClearUnstableMaps();
     }
     any_map_for_any_node_is_unstable = false;
   }
 
-  ZoneMap<ValueNode*, NodeInfo>::iterator FindInfo(ValueNode* node) {
+  void ClearAvailableExpressions() { available_expressions.clear(); }
+
+  NodeInfos::iterator FindInfo(ValueNode* node) {
     return node_infos.find(node);
   }
-  ZoneMap<ValueNode*, NodeInfo>::const_iterator FindInfo(
-      ValueNode* node) const {
+  NodeInfos::const_iterator FindInfo(ValueNode* node) const {
     return node_infos.find(node);
   }
-  bool IsValid(ZoneMap<ValueNode*, NodeInfo>::iterator& it) {
-    return it != node_infos.end();
-  }
-  bool IsValid(ZoneMap<ValueNode*, NodeInfo>::const_iterator& it) const {
+  bool IsValid(NodeInfos::iterator& it) { return it != node_infos.end(); }
+  bool IsValid(NodeInfos::const_iterator& it) const {
     return it != node_infos.end();
   }
 
   const NodeInfo* TryGetInfoFor(ValueNode* node) const {
+    return const_cast<KnownNodeAspects*>(this)->TryGetInfoFor(node);
+  }
+  NodeInfo* TryGetInfoFor(ValueNode* node) {
     auto info_it = FindInfo(node);
     if (!IsValid(info_it)) return nullptr;
     return &info_it->second;
   }
-  NodeInfo* GetOrCreateInfoFor(ValueNode* node) { return &node_infos[node]; }
+  NodeInfo* GetOrCreateInfoFor(ValueNode* node) {
+    auto info_it = FindInfo(node);
+    if (IsValid(info_it)) return &info_it->second;
+    return &node_infos.emplace(node, NodeInfo()).first->second;
+  }
+
+  NodeType NodeTypeFor(ValueNode* node) const {
+    if (auto info = TryGetInfoFor(node)) {
+      return info->type();
+    }
+    return NodeType::kUnknown;
+  }
 
   void Merge(const KnownNodeAspects& other, Zone* zone);
 
@@ -200,29 +351,61 @@ struct KnownNodeAspects {
   // particular, clear out entries that are no longer reachable, perhaps also
   // allow lookup by interpreter register rather than by node pointer.
 
-  // Permanently valid if checked in a dominator.
-  ZoneMap<ValueNode*, NodeInfo> node_infos;
-
-  struct PossibleMaps {
-    // TODO(v8:7700): Investigate a better data structure to use than
-    // compiler::ZoneRefSet.
-    compiler::ZoneRefSet<Map> possible_maps;
-    // TODO(leszeks): Consider storing this in a more compact way.
-    bool any_map_is_unstable;
-  };
-  // Maps for a node. Sets of maps that only contain stable maps are valid
-  // across side-effecting calls, as long as we install a dependency, otherwise
-  // they are cleared on side-effects.
-  // TODO(v8:7700): Investigate a better data structure to use than ZoneMap.
-  ZoneMap<ValueNode*, PossibleMaps> possible_maps;
   bool any_map_for_any_node_is_unstable;
 
   // Cached property loads.
 
-  // Maps name->object->value, so that stores to a name can invalidate all loads
-  // of that name (in case the objects are aliasing).
+  // Represents a key into the cache. This is either a NameRef, or an enum
+  // value.
+  class LoadedPropertyMapKey {
+   public:
+    enum Type {
+      // kName must be zero so that pointers are unaffected.
+      kName = 0,
+      kTypedArrayLength
+    };
+    static constexpr int kTypeMask = 0x3;
+    static_assert((kName & ~kTypeMask) == 0);
+    static_assert((kTypedArrayLength & ~kTypeMask) == 0);
+
+    static LoadedPropertyMapKey TypedArrayLength() {
+      return LoadedPropertyMapKey(kTypedArrayLength);
+    }
+
+    // Allow implicit conversion from NameRef to key, so that callers in the
+    // common path can use a NameRef directly.
+    // NOLINTNEXTLINE
+    LoadedPropertyMapKey(compiler::NameRef ref)
+        : data_(reinterpret_cast<Address>(ref.data())) {
+      DCHECK_EQ(data_ & kTypeMask, kName);
+    }
+
+    bool operator==(const LoadedPropertyMapKey& other) const {
+      return data_ == other.data_;
+    }
+    bool operator<(const LoadedPropertyMapKey& other) const {
+      return data_ < other.data_;
+    }
+
+    compiler::NameRef name() {
+      DCHECK_EQ(type(), kName);
+      return compiler::NameRef(reinterpret_cast<compiler::ObjectData*>(data_),
+                               false);
+    }
+
+    Type type() { return static_cast<Type>(data_ & kTypeMask); }
+
+   private:
+    explicit LoadedPropertyMapKey(Type type) : data_(type) {
+      DCHECK_NE(type, kName);
+    }
+
+    Address data_;
+  };
+  // Maps key->object->value, so that stores to a key can invalidate all loads
+  // of that key (in case the objects are aliasing).
   using LoadedPropertyMap =
-      ZoneMap<compiler::NameRef, ZoneMap<ValueNode*, ValueNode*>>;
+      ZoneMap<LoadedPropertyMapKey, ZoneMap<ValueNode*, ValueNode*>>;
 
   // Valid across side-effecting calls, as long as we install a dependency.
   LoadedPropertyMap loaded_constant_properties;
@@ -234,7 +417,18 @@ struct KnownNodeAspects {
   // Flushed after side-effecting calls.
   ZoneMap<std::tuple<ValueNode*, int>, ValueNode*> loaded_context_slots;
 
+  struct AvailableExpression {
+    NodeBase* node;
+    uint32_t effect_epoch;
+  };
+  ZoneMap<uint32_t, AvailableExpression> available_expressions;
+  uint32_t effect_epoch() const { return effect_epoch_; }
+  void increment_effect_epoch() { effect_epoch_++; }
+
  private:
+  NodeInfos node_infos;
+  uint32_t effect_epoch_;
+
   friend KnownNodeAspects* Zone::New<KnownNodeAspects, const KnownNodeAspects&>(
       const KnownNodeAspects&);
   KnownNodeAspects(const KnownNodeAspects& other) V8_NOEXCEPT = default;
@@ -456,6 +650,7 @@ class CompactInterpreterFrameState {
 };
 
 class MergePointRegisterState {
+#ifdef V8_ENABLE_MAGLEV
  public:
   bool is_initialized() const { return values_[0].GetPayload().is_initialized; }
 
@@ -481,6 +676,7 @@ class MergePointRegisterState {
  private:
   RegisterState values_[kAllocatableGeneralRegisterCount] = {{}};
   RegisterState double_values_[kAllocatableDoubleRegisterCount] = {{}};
+#endif  // V8_ENABLE_MAGLEV
 };
 
 class MergePointInterpreterFrameState {
@@ -533,15 +729,16 @@ class MergePointInterpreterFrameState {
 
   // Merges a dead framestate (e.g. one which has been early terminated with a
   // deopt).
-  void MergeDead(const MaglevCompilationUnit& compilation_unit) {
-    DCHECK_GE(predecessor_count_, 1);
+  void MergeDead(const MaglevCompilationUnit& compilation_unit,
+                 unsigned num = 1) {
+    DCHECK_GE(predecessor_count_, num);
     DCHECK_LT(predecessors_so_far_, predecessor_count_);
-    predecessor_count_--;
+    predecessor_count_ -= num;
     DCHECK_LE(predecessors_so_far_, predecessor_count_);
 
     frame_state_.ForEachValue(compilation_unit,
                               [&](ValueNode* value, interpreter::Register reg) {
-                                ReducePhiPredecessorCount(reg, value);
+                                ReducePhiPredecessorCount(reg, value, num);
                               });
   }
 
@@ -579,6 +776,8 @@ class MergePointInterpreterFrameState {
   }
 
   int predecessor_count() const { return predecessor_count_; }
+
+  int predecessors_so_far() const { return predecessors_so_far_; }
 
   BasicBlock* predecessor_at(int i) const {
     // DCHECK_EQ(predecessors_so_far_, predecessor_count_);
@@ -644,8 +843,8 @@ class MergePointInterpreterFrameState {
     using List = base::ThreadedList<Alternatives>;
 
     explicit Alternatives(const NodeInfo* node_info)
-        : node_type_(node_info ? node_info->type : NodeType::kUnknown),
-          tagged_alternative_(node_info ? node_info->tagged_alternative
+        : node_type_(node_info ? node_info->type() : NodeType::kUnknown),
+          tagged_alternative_(node_info ? node_info->alternative().tagged()
                                         : nullptr) {}
 
     NodeType node_type() const { return node_type_; }
@@ -676,8 +875,8 @@ class MergePointInterpreterFrameState {
                         ValueNode* merged, ValueNode* unmerged,
                         Alternatives::List* per_predecessor_alternatives);
 
-  void ReducePhiPredecessorCount(interpreter::Register owner,
-                                 ValueNode* merged);
+  void ReducePhiPredecessorCount(interpreter::Register owner, ValueNode* merged,
+                                 unsigned num = 1);
 
   void MergeLoopValue(MaglevGraphBuilder* graph_builder,
                       interpreter::Register owner,

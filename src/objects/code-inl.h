@@ -12,6 +12,7 @@
 #include "src/objects/deoptimization-data-inl.h"
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/instruction-stream-inl.h"
+#include "src/objects/trusted-object-inl.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -20,13 +21,13 @@
 namespace v8 {
 namespace internal {
 
-OBJECT_CONSTRUCTORS_IMPL(Code, HeapObject)
+OBJECT_CONSTRUCTORS_IMPL(Code, ExposedTrustedObject)
 OBJECT_CONSTRUCTORS_IMPL(GcSafeCode, HeapObject)
 
 CAST_ACCESSOR(GcSafeCode)
 CAST_ACCESSOR(Code)
 
-Code GcSafeCode::UnsafeCastToCode() const {
+Tagged<Code> GcSafeCode::UnsafeCastToCode() const {
   return Code::unchecked_cast(*this);
 }
 
@@ -45,7 +46,7 @@ GCSAFE_CODE_FWD_ACCESSOR(bool, is_maglevved)
 GCSAFE_CODE_FWD_ACCESSOR(bool, is_turbofanned)
 GCSAFE_CODE_FWD_ACCESSOR(bool, has_tagged_outgoing_params)
 GCSAFE_CODE_FWD_ACCESSOR(bool, marked_for_deoptimization)
-GCSAFE_CODE_FWD_ACCESSOR(Object, raw_instruction_stream)
+GCSAFE_CODE_FWD_ACCESSOR(Tagged<Object>, raw_instruction_stream)
 GCSAFE_CODE_FWD_ACCESSOR(int, stack_slots)
 GCSAFE_CODE_FWD_ACCESSOR(Address, constant_pool)
 GCSAFE_CODE_FWD_ACCESSOR(Address, safepoint_table_address)
@@ -64,26 +65,23 @@ Address GcSafeCode::InstructionEnd(Isolate* isolate, Address pc) const {
   return UnsafeCastToCode()->InstructionEnd(isolate, pc);
 }
 
-Address GcSafeCode::constant_pool(InstructionStream istream) const {
-  return UnsafeCastToCode()->constant_pool(istream);
-}
-
 bool GcSafeCode::CanDeoptAt(Isolate* isolate, Address pc) const {
-  DeoptimizationData deopt_data = DeoptimizationData::unchecked_cast(
+  if (!UnsafeCastToCode()->uses_deoptimization_data()) return false;
+  Tagged<DeoptimizationData> deopt_data = DeoptimizationData::unchecked_cast(
       UnsafeCastToCode()->unchecked_deoptimization_data());
   Address code_start_address = instruction_start();
   for (int i = 0; i < deopt_data->DeoptCount(); i++) {
     if (deopt_data->Pc(i).value() == -1) continue;
     Address address = code_start_address + deopt_data->Pc(i).value();
-    if (address == pc &&
-        deopt_data->GetBytecodeOffset(i) != BytecodeOffset::None()) {
+    if (address == pc && deopt_data->GetBytecodeOffsetOrBuiltinContinuationId(
+                             i) != BytecodeOffset::None()) {
       return true;
     }
   }
   return false;
 }
 
-Object GcSafeCode::raw_instruction_stream(
+Tagged<Object> GcSafeCode::raw_instruction_stream(
     PtrComprCageBase code_cage_base) const {
   return UnsafeCastToCode()->raw_instruction_stream(code_cage_base);
 }
@@ -93,27 +91,71 @@ INT_ACCESSORS(Code, metadata_size, kMetadataSizeOffset)
 INT_ACCESSORS(Code, handler_table_offset, kHandlerTableOffsetOffset)
 INT_ACCESSORS(Code, code_comments_offset, kCodeCommentsOffsetOffset)
 INT32_ACCESSORS(Code, unwinding_info_offset, kUnwindingInfoOffsetOffset)
-ACCESSORS_CHECKED2(Code, deoptimization_data, FixedArray,
-                   kDeoptimizationDataOrInterpreterDataOffset,
-                   kind() != CodeKind::BASELINE,
+
+inline Tagged<TrustedFixedArray> Code::deoptimization_data() const {
+  DCHECK(uses_deoptimization_data());
+  Isolate* isolate_for_sandbox = GetIsolateForSandbox(*this);
+  return TrustedFixedArray::cast(
+      ReadTrustedPointerField<kUnknownIndirectPointerTag>(
+          kDeoptimizationDataOrInterpreterDataOffset, isolate_for_sandbox));
+}
+
+inline void Code::set_deoptimization_data(Tagged<TrustedFixedArray> value,
+                                          WriteBarrierMode mode) {
+  DCHECK(uses_deoptimization_data());
+  DCHECK(!ObjectInYoungGeneration(value));
+  WriteTrustedPointerField<kUnknownIndirectPointerTag>(
+      kDeoptimizationDataOrInterpreterDataOffset, value);
+  CONDITIONAL_TRUSTED_POINTER_WRITE_BARRIER(
+      *this, kDeoptimizationDataOrInterpreterDataOffset,
+      kUnknownIndirectPointerTag, value, mode);
+}
+
+inline bool Code::uses_deoptimization_data() const {
+  return kind() == CodeKind::MAGLEV || kind() == CodeKind::TURBOFAN;
+}
+
+inline void Code::clear_deoptimization_data_and_interpreter_data() {
+  ClearTrustedPointerField(kDeoptimizationDataOrInterpreterDataOffset);
+}
+
+inline bool Code::has_deoptimization_data_or_interpreter_data() const {
+  return !IsTrustedPointerFieldCleared(
+      kDeoptimizationDataOrInterpreterDataOffset);
+}
+
+Tagged<HeapObject> Code::bytecode_or_interpreter_data(
+    IsolateForSandbox isolate) const {
+  DCHECK_EQ(kind(), CodeKind::BASELINE);
+  return ReadTrustedPointerField<kUnknownIndirectPointerTag>(
+      kDeoptimizationDataOrInterpreterDataOffset, isolate);
+}
+void Code::set_bytecode_or_interpreter_data(Tagged<ExposedTrustedObject> value,
+                                            WriteBarrierMode mode) {
+  DCHECK(kind() == CodeKind::BASELINE);
+  DCHECK(!ObjectInYoungGeneration(value));
+  DCHECK(IsBytecodeArray(value) || IsInterpreterData(value));
+
+  WriteTrustedPointerField<kUnknownIndirectPointerTag>(
+      kDeoptimizationDataOrInterpreterDataOffset, value);
+  CONDITIONAL_TRUSTED_POINTER_WRITE_BARRIER(
+      *this, kDeoptimizationDataOrInterpreterDataOffset,
+      kUnknownIndirectPointerTag, value, mode);
+}
+
+ACCESSORS_CHECKED2(Code, source_position_table, Tagged<ByteArray>,
+                   kPositionTableOffset, kind() != CodeKind::BASELINE,
                    kind() != CodeKind::BASELINE &&
                        !ObjectInYoungGeneration(value))
-ACCESSORS_CHECKED2(Code, bytecode_or_interpreter_data, HeapObject,
-                   kDeoptimizationDataOrInterpreterDataOffset,
-                   kind() == CodeKind::BASELINE,
-                   kind() == CodeKind::BASELINE &&
-                       !ObjectInYoungGeneration(value))
-ACCESSORS_CHECKED2(Code, source_position_table, ByteArray, kPositionTableOffset,
-                   kind() != CodeKind::BASELINE,
-                   kind() != CodeKind::BASELINE &&
-                       !ObjectInYoungGeneration(value))
-ACCESSORS_CHECKED2(Code, bytecode_offset_table, ByteArray, kPositionTableOffset,
-                   kind() == CodeKind::BASELINE,
+ACCESSORS_CHECKED2(Code, bytecode_offset_table, Tagged<ByteArray>,
+                   kPositionTableOffset, kind() == CodeKind::BASELINE,
                    kind() == CodeKind::BASELINE &&
                        !ObjectInYoungGeneration(value))
 
-ByteArray Code::SourcePositionTable(Isolate* isolate,
-                                    SharedFunctionInfo sfi) const {
+ACCESSORS(Code, wrapper, Tagged<CodeWrapper>, kWrapperOffset)
+
+Tagged<ByteArray> Code::SourcePositionTable(
+    Isolate* isolate, Tagged<SharedFunctionInfo> sfi) const {
   if (!has_instruction_stream()) {
     return GetReadOnlyRoots().empty_byte_array();
   }
@@ -203,10 +245,11 @@ int Code::constant_pool_size() const {
 
 bool Code::has_constant_pool() const { return constant_pool_size() > 0; }
 
-FixedArray Code::unchecked_deoptimization_data() const {
-  return FixedArray::unchecked_cast(
-      TaggedField<HeapObject, kDeoptimizationDataOrInterpreterDataOffset>::load(
-          *this));
+Tagged<TrustedFixedArray> Code::unchecked_deoptimization_data() const {
+  Isolate* isolate_for_sandbox = GetIsolateForSandbox(*this);
+  return TrustedFixedArray::unchecked_cast(
+      ReadTrustedPointerField<kUnknownIndirectPointerTag>(
+          kDeoptimizationDataOrInterpreterDataOffset, isolate_for_sandbox));
 }
 
 uint8_t* Code::relocation_start() const {
@@ -240,7 +283,7 @@ int Code::InstructionStreamObjectSize() const {
 int Code::SizeIncludingMetadata() const {
   int size = InstructionStreamObjectSize();
   size += relocation_size();
-  if (kind() != CodeKind::BASELINE) {
+  if (uses_deoptimization_data()) {
     size += deoptimization_data()->Size();
   }
   return size;
@@ -249,7 +292,7 @@ int Code::SizeIncludingMetadata() const {
 CodeKind Code::kind() const { return KindField::decode(flags(kRelaxedLoad)); }
 
 int Code::GetBytecodeOffsetForBaselinePC(Address baseline_pc,
-                                         BytecodeArray bytecodes) {
+                                         Tagged<BytecodeArray> bytecodes) {
   DisallowGarbageCollection no_gc;
   CHECK(!is_baseline_trampoline_builtin());
   if (is_baseline_leave_frame_builtin()) return kFunctionExitBytecodeOffset;
@@ -261,9 +304,9 @@ int Code::GetBytecodeOffsetForBaselinePC(Address baseline_pc,
   return offset_iterator.current_bytecode_offset();
 }
 
-uintptr_t Code::GetBaselinePCForBytecodeOffset(int bytecode_offset,
-                                               BytecodeToPCPosition position,
-                                               BytecodeArray bytecodes) {
+uintptr_t Code::GetBaselinePCForBytecodeOffset(
+    int bytecode_offset, BytecodeToPCPosition position,
+    Tagged<BytecodeArray> bytecodes) {
   DisallowGarbageCollection no_gc;
   CHECK_EQ(kind(), CodeKind::BASELINE);
   baseline::BytecodeOffsetIterator offset_iterator(
@@ -279,20 +322,20 @@ uintptr_t Code::GetBaselinePCForBytecodeOffset(int bytecode_offset,
   return pc;
 }
 
-uintptr_t Code::GetBaselineStartPCForBytecodeOffset(int bytecode_offset,
-                                                    BytecodeArray bytecodes) {
+uintptr_t Code::GetBaselineStartPCForBytecodeOffset(
+    int bytecode_offset, Tagged<BytecodeArray> bytecodes) {
   return GetBaselinePCForBytecodeOffset(bytecode_offset, kPcAtStartOfBytecode,
                                         bytecodes);
 }
 
-uintptr_t Code::GetBaselineEndPCForBytecodeOffset(int bytecode_offset,
-                                                  BytecodeArray bytecodes) {
+uintptr_t Code::GetBaselineEndPCForBytecodeOffset(
+    int bytecode_offset, Tagged<BytecodeArray> bytecodes) {
   return GetBaselinePCForBytecodeOffset(bytecode_offset, kPcAtEndOfBytecode,
                                         bytecodes);
 }
 
-uintptr_t Code::GetBaselinePCForNextExecutedBytecode(int bytecode_offset,
-                                                     BytecodeArray bytecodes) {
+uintptr_t Code::GetBaselinePCForNextExecutedBytecode(
+    int bytecode_offset, Tagged<BytecodeArray> bytecodes) {
   DisallowGarbageCollection no_gc;
   CHECK_EQ(kind(), CodeKind::BASELINE);
   baseline::BytecodeOffsetIterator offset_iterator(
@@ -427,13 +470,6 @@ Address Code::constant_pool() const {
   return metadata_start() + constant_pool_offset();
 }
 
-Address Code::constant_pool(InstructionStream instruction_stream) const {
-  if (!has_constant_pool()) return kNullAddress;
-  static_assert(InstructionStream::kOnHeapBodyIsContiguous);
-  return instruction_stream->instruction_start() + instruction_size() +
-         constant_pool_offset();
-}
-
 Address Code::code_comments() const {
   return metadata_start() + code_comments_offset();
 }
@@ -457,7 +493,7 @@ int Code::unwinding_info_size() const {
 bool Code::has_unwinding_info() const { return unwinding_info_size() > 0; }
 
 // static
-Code Code::FromTargetAddress(Address address) {
+Tagged<Code> Code::FromTargetAddress(Address address) {
   return InstructionStream::FromTargetAddress(address)->code(kAcquireLoad);
 }
 
@@ -465,12 +501,12 @@ bool Code::CanContainWeakObjects() {
   return is_optimized_code() && can_have_weak_objects();
 }
 
-bool Code::IsWeakObject(HeapObject object) {
+bool Code::IsWeakObject(Tagged<HeapObject> object) {
   return (CanContainWeakObjects() && IsWeakObjectInOptimizedCode(object));
 }
 
-bool Code::IsWeakObjectInOptimizedCode(HeapObject object) {
-  Map map_object = object->map(kAcquireLoad);
+bool Code::IsWeakObjectInOptimizedCode(Tagged<HeapObject> object) {
+  Tagged<Map> map_object = object->map(kAcquireLoad);
   if (InstanceTypeChecker::IsMap(map_object)) {
     return Map::cast(object)->CanTransition();
   }
@@ -479,26 +515,30 @@ bool Code::IsWeakObjectInOptimizedCode(HeapObject object) {
          InstanceTypeChecker::IsContext(map_object);
 }
 
-bool Code::IsWeakObjectInDeoptimizationLiteralArray(Object object) {
+bool Code::IsWeakObjectInDeoptimizationLiteralArray(Tagged<Object> object) {
   // Maps must be strong because they can be used as part of the description for
   // how to materialize an object upon deoptimization, in which case it is
   // possible to reach the code that requires the Map without anything else
   // holding a strong pointer to that Map.
-  return object.IsHeapObject() && !object.IsMap() &&
+  return IsHeapObject(object) && !IsMap(object) &&
          Code::IsWeakObjectInOptimizedCode(HeapObject::cast(object));
 }
 
 void Code::IterateDeoptimizationLiterals(RootVisitor* v) {
-  if (kind() == CodeKind::BASELINE) return;
+  if (!uses_deoptimization_data()) {
+    DCHECK(kind() == CodeKind::BASELINE ||
+           !has_deoptimization_data_or_interpreter_data());
+    return;
+  }
 
   auto deopt_data = DeoptimizationData::cast(deoptimization_data());
   if (deopt_data->length() == 0) return;
 
-  DeoptimizationLiteralArray literals = deopt_data->LiteralArray();
+  Tagged<DeoptimizationLiteralArray> literals = deopt_data->LiteralArray();
   const int literals_length = literals->length();
   for (int i = 0; i < literals_length; ++i) {
-    MaybeObject maybe_literal = literals->Get(i);
-    HeapObject heap_literal;
+    MaybeObject maybe_literal = literals->get_raw(i);
+    Tagged<HeapObject> heap_literal;
     if (maybe_literal.GetHeapObject(&heap_literal)) {
       v->VisitRootPointer(Root::kStackRoots, "deoptimization literal",
                           FullObjectSlot(&heap_literal));
@@ -506,16 +546,17 @@ void Code::IterateDeoptimizationLiterals(RootVisitor* v) {
   }
 }
 
-Object Code::raw_instruction_stream() const {
+Tagged<Object> Code::raw_instruction_stream() const {
   PtrComprCageBase cage_base = code_cage_base();
   return Code::raw_instruction_stream(cage_base);
 }
 
-Object Code::raw_instruction_stream(PtrComprCageBase cage_base) const {
+Tagged<Object> Code::raw_instruction_stream(PtrComprCageBase cage_base) const {
   return ExternalCodeField<Object>::load(cage_base, *this);
 }
 
-void Code::set_raw_instruction_stream(Object value, WriteBarrierMode mode) {
+void Code::set_raw_instruction_stream(Tagged<Object> value,
+                                      WriteBarrierMode mode) {
   ExternalCodeField<Object>::Release_Store(*this, value);
   CONDITIONAL_WRITE_BARRIER(*this, kInstructionStreamOffset, value, mode);
 }
@@ -526,7 +567,7 @@ bool Code::has_instruction_stream() const {
 #else
   const uint64_t value = ReadField<uint64_t>(kInstructionStreamOffset);
 #endif
-  SLOW_DCHECK(value == 0 || !InReadOnlySpace());
+  SLOW_DCHECK(value == 0 || !InReadOnlySpace(*this));
   return value != 0;
 }
 
@@ -538,7 +579,7 @@ bool Code::has_instruction_stream(RelaxedLoadTag tag) const {
   const uint64_t value =
       RELAXED_READ_INT64_FIELD(*this, kInstructionStreamOffset);
 #endif
-  SLOW_DCHECK(value == 0 || !InReadOnlySpace());
+  SLOW_DCHECK(value == 0 || !InReadOnlySpace(*this));
   return value != 0;
 }
 
@@ -553,91 +594,98 @@ PtrComprCageBase Code::code_cage_base() const {
 #endif  // V8_EXTERNAL_CODE_SPACE
 }
 
-InstructionStream Code::instruction_stream() const {
+Tagged<InstructionStream> Code::instruction_stream() const {
   PtrComprCageBase cage_base = code_cage_base();
   return Code::instruction_stream(cage_base);
 }
 
-InstructionStream Code::unchecked_instruction_stream() const {
+Tagged<InstructionStream> Code::unchecked_instruction_stream() const {
   return InstructionStream::unchecked_cast(raw_instruction_stream());
 }
 
-InstructionStream Code::instruction_stream(PtrComprCageBase cage_base) const {
+Tagged<InstructionStream> Code::instruction_stream(
+    PtrComprCageBase cage_base) const {
   DCHECK(has_instruction_stream());
   return ExternalCodeField<InstructionStream>::load(cage_base, *this);
 }
 
-InstructionStream Code::instruction_stream(RelaxedLoadTag tag) const {
+Tagged<InstructionStream> Code::instruction_stream(RelaxedLoadTag tag) const {
   PtrComprCageBase cage_base = code_cage_base();
   return Code::instruction_stream(cage_base, tag);
 }
 
-InstructionStream Code::instruction_stream(PtrComprCageBase cage_base,
-                                           RelaxedLoadTag tag) const {
+Tagged<InstructionStream> Code::instruction_stream(PtrComprCageBase cage_base,
+                                                   RelaxedLoadTag tag) const {
   DCHECK(has_instruction_stream());
   return ExternalCodeField<InstructionStream>::Relaxed_Load(cage_base, *this);
 }
 
-Object Code::raw_instruction_stream(RelaxedLoadTag tag) const {
+Tagged<Object> Code::raw_instruction_stream(RelaxedLoadTag tag) const {
   PtrComprCageBase cage_base = code_cage_base();
   return Code::raw_instruction_stream(cage_base, tag);
 }
 
-Object Code::raw_instruction_stream(PtrComprCageBase cage_base,
-                                    RelaxedLoadTag tag) const {
+Tagged<Object> Code::raw_instruction_stream(PtrComprCageBase cage_base,
+                                            RelaxedLoadTag tag) const {
   return ExternalCodeField<Object>::Relaxed_Load(cage_base, *this);
 }
 
 DEF_GETTER(Code, instruction_start, Address) {
-  return ReadCodePointerField(kInstructionStartOffset);
+#ifdef V8_ENABLE_SANDBOX
+  return ReadCodeEntrypointViaCodePointerField(kSelfIndirectPointerOffset,
+                                               entrypoint_tag());
+#else
+  return ReadField<Address>(kInstructionStartOffset);
+#endif
 }
 
-void Code::init_instruction_start(Isolate* isolate, Address value) {
-  InitCodePointerField(kInstructionStartOffset, isolate, value);
+void Code::set_instruction_start(IsolateForSandbox isolate, Address value) {
+#ifdef V8_ENABLE_SANDBOX
+  WriteCodeEntrypointViaCodePointerField(kSelfIndirectPointerOffset, value,
+                                         entrypoint_tag());
+#else
+  WriteField<Address>(kInstructionStartOffset, value);
+#endif
 }
 
-void Code::set_instruction_start(Isolate* isolate, Address value) {
-  WriteCodePointerField(kInstructionStartOffset, value);
+CodeEntrypointTag Code::entrypoint_tag() const {
+  // Currently we only distinguish between bytecode handlers and other Code. In
+  // the future, we'll probably also want to distinguish between Wasm, RegExp,
+  // and JavaScript Code.
+  if (kind() == CodeKind::BYTECODE_HANDLER) {
+    return kBytecodeHandlerEntrypointTag;
+  } else {
+    return kDefaultCodeEntrypointTag;
+  }
 }
 
-void Code::SetInstructionStreamAndInstructionStart(Isolate* isolate_for_sandbox,
-                                                   InstructionStream code,
-                                                   WriteBarrierMode mode) {
+void Code::SetInstructionStreamAndInstructionStart(
+    IsolateForSandbox isolate, Tagged<InstructionStream> code,
+    WriteBarrierMode mode) {
   set_raw_instruction_stream(code, mode);
-  set_instruction_start(isolate_for_sandbox, code->instruction_start());
+  set_instruction_start(isolate, code->instruction_start());
 }
 
-void Code::SetInstructionStartForOffHeapBuiltin(Isolate* isolate_for_sandbox,
+void Code::SetInstructionStartForOffHeapBuiltin(IsolateForSandbox isolate,
                                                 Address entry) {
   DCHECK(!has_instruction_stream());
-  set_instruction_start(isolate_for_sandbox, entry);
+  set_instruction_start(isolate, entry);
 }
 
-CodePointer_t Code::ClearInstructionStartForSerialization(Isolate* isolate) {
-#ifdef V8_CODE_POINTER_SANDBOXING
-  auto previous_value = ReadField<CodePointerHandle>(kInstructionStartOffset);
-  WriteField<CodePointerHandle>(kInstructionStartOffset,
+void Code::ClearInstructionStartForSerialization(IsolateForSandbox isolate) {
+#ifdef V8_ENABLE_SANDBOX
+  // The instruction start is stored in this object's code pointer table.
+  WriteField<CodePointerHandle>(kSelfIndirectPointerOffset,
                                 kNullCodePointerHandle);
 #else
-  auto previous_value = instruction_start(isolate);
   set_instruction_start(isolate, kNullAddress);
-#endif  // V8_CODE_POINTER_SANDBOXING
-  return previous_value;
+#endif  // V8_ENABLE_SANDBOX
 }
 
-void Code::RestoreInstructionStartForSerialization(
-    Isolate* isolate, CodePointer_t previous_value) {
-#ifdef V8_CODE_POINTER_SANDBOXING
-  return WriteField<CodePointerHandle>(kInstructionStartOffset, previous_value);
-#else
-  set_instruction_start(isolate, previous_value);
-#endif  // V8_CODE_POINTER_SANDBOXING
-}
-
-void Code::UpdateInstructionStart(Isolate* isolate_for_sandbox,
-                                  InstructionStream istream) {
+void Code::UpdateInstructionStart(IsolateForSandbox isolate,
+                                  Tagged<InstructionStream> istream) {
   DCHECK_EQ(raw_instruction_stream(), istream);
-  set_instruction_start(isolate_for_sandbox, istream->instruction_start());
+  set_instruction_start(isolate, istream->instruction_start());
 }
 
 void Code::clear_padding() {
@@ -668,7 +716,8 @@ static_assert(Builtins::kBuiltinCount < std::numeric_limits<int16_t>::max());
 
 void Code::set_builtin_id(Builtin builtin_id) {
   static_assert(FIELD_SIZE(kBuiltinIdOffset) == kInt16Size);
-  WriteField<int16_t>(kBuiltinIdOffset, static_cast<int16_t>(builtin_id));
+  Relaxed_WriteField<int16_t>(kBuiltinIdOffset,
+                              static_cast<int16_t>(builtin_id));
 }
 
 Builtin Code::builtin_id() const {
@@ -698,6 +747,10 @@ inline bool Code::is_baseline_trampoline_builtin() const {
 inline bool Code::is_baseline_leave_frame_builtin() const {
   return builtin_id() == Builtin::kBaselineLeaveFrame;
 }
+
+CAST_ACCESSOR(CodeWrapper)
+OBJECT_CONSTRUCTORS_IMPL(CodeWrapper, Struct)
+CODE_POINTER_ACCESSORS(CodeWrapper, code, kCodeOffset)
 
 }  // namespace internal
 }  // namespace v8

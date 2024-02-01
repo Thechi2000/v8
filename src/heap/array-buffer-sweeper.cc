@@ -168,7 +168,8 @@ void ArrayBufferSweeper::RequestSweep(
                      TRACE_EVENT_FLAG_FLOW_OUT);
   Prepare(type, treat_all_young_as_promoted);
   if (!heap_->IsTearingDown() && !heap_->ShouldReduceMemory() &&
-      v8_flags.concurrent_array_buffer_sweeping) {
+      v8_flags.concurrent_array_buffer_sweeping &&
+      heap_->ShouldUseBackgroundThreads()) {
     auto task = MakeCancelableTask(heap_->isolate(), [this, type, trace_id] {
       GCTracer::Scope::ScopeId background_scope_id =
           type == SweepingType::kYoung
@@ -245,7 +246,7 @@ void ArrayBufferSweeper::ReleaseAll(ArrayBufferList* list) {
   *list = ArrayBufferList();
 }
 
-void ArrayBufferSweeper::Append(JSArrayBuffer object,
+void ArrayBufferSweeper::Append(Tagged<JSArrayBuffer> object,
                                 ArrayBufferExtension* extension) {
   size_t bytes = extension->accounting_length();
 
@@ -260,7 +261,7 @@ void ArrayBufferSweeper::Append(JSArrayBuffer object,
   IncrementExternalMemoryCounters(bytes);
 }
 
-void ArrayBufferSweeper::Detach(JSArrayBuffer object,
+void ArrayBufferSweeper::Detach(Tagged<JSArrayBuffer> object,
                                 ArrayBufferExtension* extension) {
   // Finish sweeping here first such that the code below is guaranteed to
   // observe the same sweeping state.

@@ -6,6 +6,7 @@
 #define V8_HEAP_MARKING_BARRIER_H_
 
 #include "include/v8-internal.h"
+#include "src/base/functional.h"
 #include "src/common/globals.h"
 #include "src/heap/mark-compact.h"
 #include "src/heap/marking-worklist.h"
@@ -41,15 +42,18 @@ class MarkingBarrier {
   static void DeactivateYoung(Heap* heap);
   V8_EXPORT_PRIVATE static void PublishYoung(Heap* heap);
 
-  void Write(HeapObject host, HeapObjectSlot, HeapObject value);
-  void Write(InstructionStream host, RelocInfo*, HeapObject value);
-  void Write(JSArrayBuffer host, ArrayBufferExtension*);
-  void Write(DescriptorArray, int number_of_own_descriptors);
+  template <typename TSlot>
+  void Write(Tagged<HeapObject> host, TSlot slot, Tagged<HeapObject> value);
+  void Write(Tagged<HeapObject> host, IndirectPointerSlot slot);
+  void Write(Tagged<InstructionStream> host, RelocInfo*,
+             Tagged<HeapObject> value);
+  void Write(Tagged<JSArrayBuffer> host, ArrayBufferExtension*);
+  void Write(Tagged<DescriptorArray>, int number_of_own_descriptors);
   // Only usable when there's no valid JS host object for this write, e.g., when
   // value is held alive from a global handle.
-  void WriteWithoutHost(HeapObject value);
+  void WriteWithoutHost(Tagged<HeapObject> value);
 
-  inline void MarkValue(HeapObject host, HeapObject value);
+  inline void MarkValue(Tagged<HeapObject> host, Tagged<HeapObject> value);
 
   bool is_minor() const { return marking_mode_ == MarkingMode::kMinorMarking; }
 
@@ -61,20 +65,20 @@ class MarkingBarrier {
 #endif  // DEBUG
 
  private:
-  inline void MarkValueShared(HeapObject value);
-  inline void MarkValueLocal(HeapObject value);
+  inline void MarkValueShared(Tagged<HeapObject> value);
+  inline void MarkValueLocal(Tagged<HeapObject> value);
 
-  inline bool WhiteToGreyAndPush(HeapObject value);
+  inline bool WhiteToGreyAndPush(Tagged<HeapObject> value);
 
-  void RecordRelocSlot(InstructionStream host, RelocInfo* rinfo,
-                       HeapObject target);
+  void RecordRelocSlot(Tagged<InstructionStream> host, RelocInfo* rinfo,
+                       Tagged<HeapObject> target);
 
-  bool IsCurrentMarkingBarrier(HeapObject verification_candidate);
+  bool IsCurrentMarkingBarrier(Tagged<HeapObject> verification_candidate);
 
   template <typename TSlot>
-  inline void MarkRange(HeapObject value, TSlot start, TSlot end);
+  inline void MarkRange(Tagged<HeapObject> value, TSlot start, TSlot end);
 
-  inline bool IsCompacting(HeapObject object) const;
+  inline bool IsCompacting(Tagged<HeapObject> object) const;
 
   bool is_major() const { return marking_mode_ == MarkingMode::kMajorMarking; }
 
@@ -88,7 +92,7 @@ class MarkingBarrier {
   base::Optional<MarkingWorklist::Local> shared_heap_worklist_;
   MarkingState marking_state_;
   std::unordered_map<MemoryChunk*, std::unique_ptr<TypedSlots>,
-                     MemoryChunk::Hasher>
+                     base::hash<MemoryChunk*>>
       typed_slots_map_;
   bool is_compacting_ = false;
   bool is_activated_ = false;

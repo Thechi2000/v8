@@ -219,6 +219,35 @@ template <typename T>
 T Abs(T a) {
   return std::abs(a);
 }
+
+template <typename T>
+T BitwiseNot(T a) {
+  return ~a;
+}
+
+template <typename T>
+T BitwiseAnd(T a, T b) {
+  return a & b;
+}
+
+template <typename T>
+T BitwiseOr(T a, T b) {
+  return a | b;
+}
+template <typename T>
+T BitwiseXor(T a, T b) {
+  return a ^ b;
+}
+template <typename T>
+T BitwiseAndNot(T a, T b) {
+  return a & (~b);
+}
+
+template <typename T>
+T BitwiseSelect(T a, T b, T c) {
+  return (a & c) | (b & ~c);
+}
+
 }  // namespace
 
 #define WASM_SIMD_CHECK_LANE_S(TYPE, value, LANE_TYPE, lane_value, lane_index) \
@@ -402,6 +431,119 @@ TEST(RunWasmTurbofan_F32x8UConvertI32x8) {
     }
   }
 }
+
+void RunSimd256ConstTest(const std::array<uint8_t, kSimd128Size>& expected) {
+  EXPERIMENTAL_FLAG_SCOPE(revectorize);
+  if (!CpuFeatures::IsSupported(AVX) || !CpuFeatures::IsSupported(AVX2)) return;
+  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kTurbofan);
+  uint8_t* memory = r.builder().AddMemoryElems<uint8_t>(32);
+  uint8_t param1 = 0;
+  constexpr uint8_t offset = 16;
+
+  BUILD_AND_CHECK_REVEC_NODE(
+      r, compiler::IrOpcode::kS256Const,
+      WASM_SIMD_STORE_MEM(WASM_LOCAL_GET(param1), WASM_SIMD_CONSTANT(expected)),
+      WASM_SIMD_STORE_MEM_OFFSET(offset, WASM_LOCAL_GET(param1),
+                                 WASM_SIMD_CONSTANT(expected)),
+      WASM_ONE);
+
+  CHECK_EQ(1, r.Call(0));
+  for (size_t i = 0; i < expected.size(); i++) {
+    CHECK_EQ(memory[i], expected[i]);
+    CHECK_EQ(memory[i + 16], expected[i]);
+  }
+}
+
+TEST(RunWasmTurbofan_S256Const) {
+  // All zeroes
+  std::array<uint8_t, kSimd128Size> expected = {0};
+  RunSimd256ConstTest(expected);
+
+  // All ones
+  for (int i = 0; i < kSimd128Size; i++) {
+    expected[i] = 0xff;
+  }
+  RunSimd256ConstTest(expected);
+
+  // Test for generic constant
+  for (int i = 0; i < kSimd128Size; i++) {
+    expected[i] = i;
+  }
+  RunSimd256ConstTest(expected);
+
+  // Keep the first 4 lanes as 0, set the remaining ones.
+  for (int i = 0; i < 4; i++) {
+    expected[i] = 0;
+  }
+  for (int i = 4; i < kSimd128Size; i++) {
+    expected[i] = i;
+  }
+  RunSimd256ConstTest(expected);
+
+  // Check sign extension logic used to pack int32s into int64.
+  expected = {0};
+  // Set the top bit of lane 3 (top bit of first int32), the rest can be 0.
+  expected[3] = 0x80;
+  RunSimd256ConstTest(expected);
+}
+
+TEST(RunWasmTurbofan_ExtractF128) {
+  EXPERIMENTAL_FLAG_SCOPE(revectorize);
+  if (!CpuFeatures::IsSupported(AVX) || !CpuFeatures::IsSupported(AVX2)) return;
+  WasmRunner<int64_t, int32_t, int32_t, int32_t> r(
+      TestExecutionTier::kTurbofan);
+  int64_t* memory = r.builder().AddMemoryElems<int64_t>(12);
+  // Add two 256 bit vectors a and b, store the result in c and return the sum
+  // of all the int64 elements in c:
+  //   simd128 *a,*b,*c,*d;
+  //   *c = *a + *b;
+  //   *(c+1) = *(a+1) + *(b+1);
+  //   *d = *c + *(c+1);
+  //   return LANE(d, 0) + LANE(d,1);
+  uint8_t param1 = 0;
+  uint8_t param2 = 1;
+  uint8_t param3 = 2;
+  uint8_t temp1 = r.AllocateLocal(kWasmS128);
+  uint8_t temp2 = r.AllocateLocal(kWasmS128);
+  uint8_t temp3 = r.AllocateLocal(kWasmS128);
+  constexpr uint8_t offset = 16;
+
+  BUILD_AND_CHECK_REVEC_NODE(
+      r, compiler::IrOpcode::kI64x4Add,
+      WASM_LOCAL_SET(
+          temp1, WASM_SIMD_BINOP(kExprI64x2Add,
+                                 WASM_SIMD_LOAD_MEM(WASM_LOCAL_GET(param1)),
+                                 WASM_SIMD_LOAD_MEM(WASM_LOCAL_GET(param2)))),
+      WASM_LOCAL_SET(
+          temp2,
+          WASM_SIMD_BINOP(
+              kExprI64x2Add,
+              WASM_SIMD_LOAD_MEM_OFFSET(offset, WASM_LOCAL_GET(param1)),
+              WASM_SIMD_LOAD_MEM_OFFSET(offset, WASM_LOCAL_GET(param2)))),
+      WASM_SIMD_STORE_MEM(WASM_LOCAL_GET(param3), WASM_LOCAL_GET(temp1)),
+      WASM_SIMD_STORE_MEM_OFFSET(offset, WASM_LOCAL_GET(param3),
+                                 WASM_LOCAL_GET(temp2)),
+      WASM_LOCAL_SET(temp3,
+                     WASM_SIMD_BINOP(kExprI64x2Add, WASM_LOCAL_GET(temp1),
+                                     WASM_LOCAL_GET(temp2))),
+      WASM_I64_ADD(WASM_SIMD_I64x2_EXTRACT_LANE(0, WASM_LOCAL_GET(temp3)),
+                   WASM_SIMD_I64x2_EXTRACT_LANE(1, WASM_LOCAL_GET(temp3))));
+
+  for (int64_t x : compiler::ValueHelper::GetVector<int64_t>()) {
+    for (int64_t y : compiler::ValueHelper::GetVector<int64_t>()) {
+      for (int i = 0; i < 4; i++) {
+        r.builder().WriteMemory(&memory[i], x);
+        r.builder().WriteMemory(&memory[i + 4], y);
+      }
+      int64_t expected = base::AddWithWraparound(x, y);
+      CHECK_EQ(r.Call(0, 32, 64), expected * 4);
+      for (int i = 0; i < 4; i++) {
+        CHECK_EQ(expected, memory[i + 8]);
+      }
+    }
+  }
+}
+
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 template <typename FloatType, typename ScalarType>
@@ -421,7 +563,7 @@ void RunF128CompareOpConstImmTest(
     uint8_t const_buffer[kSimd128Size];
     for (size_t i = 0; i < kSimd128Size / sizeof(FloatType); i++) {
       WriteLittleEndianValue<FloatType>(
-          base::bit_cast<FloatType*>(&const_buffer[0]) + i, x);
+          reinterpret_cast<FloatType*>(&const_buffer[0]) + i, x);
     }
     r.Build(
         {WASM_LOCAL_SET(temp,
@@ -786,7 +928,7 @@ void RunICompareOpConstImmTest(TestExecutionTier execution_tier,
     uint8_t const_buffer[kSimd128Size];
     for (size_t i = 0; i < kSimd128Size / sizeof(ScalarType); i++) {
       WriteLittleEndianValue<ScalarType>(
-          base::bit_cast<ScalarType*>(&const_buffer[0]) + i, x);
+          reinterpret_cast<ScalarType*>(&const_buffer[0]) + i, x);
     }
     r.Build(
         {WASM_LOCAL_SET(temp,
@@ -1853,7 +1995,7 @@ void RunS128ConstBinOpTest(TestExecutionTier execution_tier,
     uint8_t const_buffer[16];
     for (size_t i = 0; i < kSimd128Size / sizeof(ScalarType); i++) {
       WriteLittleEndianValue<ScalarType>(
-          base::bit_cast<ScalarType*>(&const_buffer[0]) + i, x);
+          reinterpret_cast<ScalarType*>(&const_buffer[0]) + i, x);
     }
     switch (const_side) {
       case kConstLeft:
@@ -1930,6 +2072,90 @@ WASM_EXEC_TEST(S128AndNotImm) {
       execution_tier, kConstRight, kExprS128AndNot, kExprI16x8Splat,
       [](int16_t x, int16_t y) { return static_cast<int16_t>(x & ~y); });
 }
+
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+TEST(RunWasmTurbofan_S256Not) {
+  RunI32x8UnOpRevecTest(kExprS128Not, BitwiseNot, compiler::IrOpcode::kS256Not);
+}
+
+TEST(RunWasmTurbofan_S256And) {
+  RunI32x8BinOpRevecTest(kExprS128And, BitwiseAnd,
+                         compiler::IrOpcode::kS256And);
+}
+
+TEST(RunWasmTurbofan_S256Or) {
+  RunI32x8BinOpRevecTest(kExprS128Or, BitwiseOr, compiler::IrOpcode::kS256Or);
+}
+
+TEST(RunWasmTurbofan_S256Xor) {
+  RunI32x8BinOpRevecTest(kExprS128Xor, BitwiseXor,
+                         compiler::IrOpcode::kS256Xor);
+}
+
+TEST(RunWasmTurbofan_S256AndNot) {
+  RunI32x8BinOpRevecTest(kExprS128AndNot, BitwiseAndNot,
+                         compiler::IrOpcode::kS256AndNot);
+}
+
+TEST(RunWasmTurbofan_S256Select) {
+  EXPERIMENTAL_FLAG_SCOPE(revectorize);
+  if (!CpuFeatures::IsSupported(AVX) || !CpuFeatures::IsSupported(AVX2)) return;
+  WasmRunner<int32_t, int32_t, int32_t, int32_t, int32_t> r(
+      TestExecutionTier::kTurbofan);
+  int32_t* memory = r.builder().AddMemoryElems<int32_t>(32);
+  // Build fn perform bitwise selection on two 256 bit vectors a and b, mask c,
+  // store the result in d:
+  //   simd128 *a,*b,*c,*d;
+  //   *d = select(*a, *b, *c);
+  //   *(d+1) = select(*(a+1), *(b+1), *(c+1))
+  uint8_t param1 = 0;
+  uint8_t param2 = 1;
+  uint8_t param3 = 2;
+  uint8_t param4 = 3;
+  uint8_t temp1 = r.AllocateLocal(kWasmS128);
+  uint8_t temp2 = r.AllocateLocal(kWasmS128);
+  constexpr uint8_t offset = 16;
+
+  BUILD_AND_CHECK_REVEC_NODE(
+      r, compiler::IrOpcode::kS256Select,
+      WASM_LOCAL_SET(
+          temp1,
+          WASM_SIMD_SELECT(32x4, WASM_SIMD_LOAD_MEM(WASM_LOCAL_GET(param1)),
+                           WASM_SIMD_LOAD_MEM(WASM_LOCAL_GET(param2)),
+                           WASM_SIMD_LOAD_MEM(WASM_LOCAL_GET(param3)))),
+      WASM_LOCAL_SET(
+          temp2,
+          WASM_SIMD_SELECT(
+              32x4, WASM_SIMD_LOAD_MEM_OFFSET(offset, WASM_LOCAL_GET(param1)),
+              WASM_SIMD_LOAD_MEM_OFFSET(offset, WASM_LOCAL_GET(param2)),
+              WASM_SIMD_LOAD_MEM_OFFSET(offset, WASM_LOCAL_GET(param3)))),
+      WASM_SIMD_STORE_MEM(WASM_LOCAL_GET(param4), WASM_LOCAL_GET(temp1)),
+      WASM_SIMD_STORE_MEM_OFFSET(offset, WASM_LOCAL_GET(param4),
+                                 WASM_LOCAL_GET(temp2)),
+      WASM_ONE);
+
+  for (auto x : compiler::ValueHelper::GetVector<int32_t>()) {
+    for (auto y : compiler::ValueHelper::GetVector<int32_t>()) {
+      for (auto z : compiler::ValueHelper::GetVector<int32_t>()) {
+        for (int i = 0; i < 4; i++) {
+          r.builder().WriteMemory(&memory[i], x);
+          r.builder().WriteMemory(&memory[i + 4], x);
+          r.builder().WriteMemory(&memory[i + 8], y);
+          r.builder().WriteMemory(&memory[i + 12], y);
+          r.builder().WriteMemory(&memory[i + 16], z);
+          r.builder().WriteMemory(&memory[i + 20], z);
+        }
+        CHECK_EQ(1, r.Call(0, 32, 64, 96));
+        int32_t expected = BitwiseSelect(x, y, z);
+        for (int i = 0; i < 4; i++) {
+          CHECK_EQ(expected, memory[i + 24]);
+          CHECK_EQ(expected, memory[i + 28]);
+        }
+      }
+    }
+  }
+}
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 WASM_EXEC_TEST(I32x4Eq) {
   RunI32x4BinOpTest(execution_tier, kExprI32x4Eq, Equal);
@@ -2228,6 +2454,28 @@ WASM_EXEC_TEST(I16x8SubSatU) {
   RunI16x8BinOpTest<uint16_t>(execution_tier, kExprI16x8SubSatU,
                               SaturateSub<uint16_t>);
 }
+
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+TEST(RunWasmTurbofan_I16x16AddSatS) {
+  RunI16x16BinOpRevecTest<int16_t>(kExprI16x8AddSatS, SaturateAdd,
+                                   compiler::IrOpcode::kI16x16AddSatS);
+}
+
+TEST(RunWasmTurbofan_I16x16SubSatS) {
+  RunI16x16BinOpRevecTest<int16_t>(kExprI16x8SubSatS, SaturateSub,
+                                   compiler::IrOpcode::kI16x16SubSatS);
+}
+
+TEST(RunWasmTurbofan_I16x16AddSatU) {
+  RunI16x16BinOpRevecTest<uint16_t>(kExprI16x8AddSatU, SaturateAdd,
+                                    compiler::IrOpcode::kI16x16AddSatU);
+}
+
+TEST(RunWasmTurbofan_I16x16SubSatU) {
+  RunI16x16BinOpRevecTest<uint16_t>(kExprI16x8SubSatU, SaturateSub,
+                                    compiler::IrOpcode::kI16x16SubSatU);
+}
+#endif
 
 WASM_EXEC_TEST(I16x8MinU) {
   RunI16x8BinOpTest(execution_tier, kExprI16x8MinU, UnsignedMinimum);
@@ -2681,6 +2929,28 @@ WASM_EXEC_TEST(I8x16SubSatU) {
   RunI8x16BinOpTest<uint8_t>(execution_tier, kExprI8x16SubSatU,
                              SaturateSub<uint8_t>);
 }
+
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+TEST(RunWasmTurbofan_I8x32AddSatS) {
+  RunI8x32BinOpRevecTest<int8_t>(kExprI8x16AddSatS, SaturateAdd,
+                                 compiler::IrOpcode::kI8x32AddSatS);
+}
+
+TEST(RunWasmTurbofan_I8x32SubSatS) {
+  RunI8x32BinOpRevecTest<int8_t>(kExprI8x16SubSatS, SaturateSub,
+                                 compiler::IrOpcode::kI8x32SubSatS);
+}
+
+TEST(RunWasmTurbofan_I8x32AddSatU) {
+  RunI8x32BinOpRevecTest<uint8_t>(kExprI8x16AddSatU, SaturateAdd,
+                                  compiler::IrOpcode::kI8x32AddSatU);
+}
+
+TEST(RunWasmTurbofan_I8x32SubSatU) {
+  RunI8x32BinOpRevecTest<uint8_t>(kExprI8x16SubSatU, SaturateSub,
+                                  compiler::IrOpcode::kI8x32SubSatU);
+}
+#endif
 
 WASM_EXEC_TEST(I8x16MinU) {
   RunI8x16BinOpTest(execution_tier, kExprI8x16MinU, UnsignedMinimum);
@@ -3705,6 +3975,51 @@ TEST(RunWasmTurbofan_F32x4ShuffleForSplatRevec) {
   r.builder().WriteMemory(&memory[10], 10.0f);
   CHECK_EQ(23.0f, r.Call(0, 32));
 }
+
+TEST(RunWasmTurbofan_ShuffleVpshufd) {
+  EXPERIMENTAL_FLAG_SCOPE(revectorize);
+  if (!CpuFeatures::IsSupported(AVX2)) return;
+  WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
+  int32_t* memory = r.builder().AddMemoryElems<int32_t>(16);
+  // I32x4, shuffle=[1,2,3,0]
+  constexpr std::array<int8_t, 16> shuffle = {4,  5,  6,  7,  8, 9, 10, 11,
+                                              12, 13, 14, 15, 0, 1, 2,  3};
+  uint8_t temp1 = r.AllocateLocal(kWasmS128);
+  uint8_t temp2 = r.AllocateLocal(kWasmS128);
+  BUILD_AND_CHECK_REVEC_NODE(
+      r, compiler::IrOpcode::kI8x32Shuffle,
+      WASM_LOCAL_SET(temp1, WASM_SIMD_LOAD_MEM(WASM_ZERO)),
+      WASM_LOCAL_SET(temp2, WASM_SIMD_LOAD_MEM_OFFSET(16, WASM_ZERO)),
+
+      WASM_SIMD_STORE_MEM_OFFSET(
+          16 * 2, WASM_ZERO,
+          WASM_SIMD_I8x16_SHUFFLE_OP(kExprI8x16Shuffle, shuffle,
+                                     WASM_LOCAL_GET(temp1),
+                                     WASM_LOCAL_GET(temp1))),
+      WASM_SIMD_STORE_MEM_OFFSET(
+          16 * 3, WASM_ZERO,
+          WASM_SIMD_I8x16_SHUFFLE_OP(kExprI8x16Shuffle, shuffle,
+                                     WASM_LOCAL_GET(temp2),
+                                     WASM_LOCAL_GET(temp2))),
+      WASM_ONE);
+
+  std::pair<std::vector<int>, std::vector<int>> test_case = {
+      {1, 2, 3, 4, 5, 6, 7, 8}, {2, 3, 4, 1, 6, 7, 8, 5}};
+
+  auto input = test_case.first;
+  auto expected_output = test_case.second;
+
+  for (int i = 0; i < 8; ++i) {
+    r.builder().WriteMemory(&memory[i], input[i]);
+  }
+
+  r.Call();
+
+  for (int i = 0; i < 8; ++i) {
+    CHECK_EQ(expected_output[i], r.builder().ReadMemory(&memory[i + 8]));
+  }
+}
+
 #endif
 
 WASM_EXEC_TEST(SimdLoadStoreLoad) {
@@ -3969,7 +4284,91 @@ TEST(RunWasmTurbofan_S256Load64Splat) {
                                  compiler::IrOpcode::kI64x4Add,
                                  base::AddWithWraparound);
 }
-#endif
+
+template <typename S, typename T>
+void RunLoadExtendRevecTest(WasmOpcode op) {
+  if (!CpuFeatures::IsSupported(AVX2)) return;
+
+  EXPERIMENTAL_FLAG_SCOPE(revectorize);
+  static_assert(sizeof(S) < sizeof(T),
+                "load extend should go from smaller to larger type");
+  constexpr int lanes_s = 16 / sizeof(S);
+  constexpr int lanes_t = 16 / sizeof(T);
+  constexpr uint8_t offset_s = 8;  // Load extend accesses 8 bytes value.
+  constexpr uint8_t offset = 16;
+  constexpr int mem_index = 0;  // Load from mem index 0 (bytes).
+
+#define BUILD_LOADEXTEND(get_op, index)                                      \
+  uint8_t temp1 = r.AllocateLocal(kWasmS128);                                \
+  uint8_t temp2 = r.AllocateLocal(kWasmS128);                                \
+                                                                             \
+  BUILD_AND_CHECK_REVEC_NODE(                                                \
+      r, compiler::IrOpcode::kStore,                                         \
+      WASM_LOCAL_SET(temp1, WASM_SIMD_LOAD_OP(op, get_op(index))),           \
+      WASM_LOCAL_SET(temp2,                                                  \
+                     WASM_SIMD_LOAD_OP_OFFSET(op, get_op(index), offset_s)), \
+                                                                             \
+      /* Store the result to the 16-th byte, which is lanes-th element (size \
+         S) of memory. */                                                    \
+      WASM_SIMD_STORE_MEM(WASM_I32V(16), WASM_LOCAL_GET(temp1)),             \
+      WASM_SIMD_STORE_MEM_OFFSET(offset, WASM_I32V(16),                      \
+                                 WASM_LOCAL_GET(temp2)),                     \
+      WASM_ONE);
+
+  {
+    WasmRunner<int32_t> r(TestExecutionTier::kTurbofan);
+    S* memory = r.builder().AddMemoryElems<S>(kWasmPageSize / sizeof(S));
+    BUILD_LOADEXTEND(WASM_I32V, mem_index)
+
+    for (S x : compiler::ValueHelper::GetVector<S>()) {
+      for (int i = 0; i < lanes_s; i++) {
+        r.builder().WriteMemory(&memory[i], x);
+      }
+      r.Call();
+      for (int i = 0; i < 2 * lanes_t; i++) {
+        CHECK_EQ(static_cast<T>(x), reinterpret_cast<T*>(&memory[lanes_s])[i]);
+      }
+    }
+  }
+
+  // Test for OOB.
+  {
+    WasmRunner<int32_t, uint32_t> r(TestExecutionTier::kTurbofan);
+    r.builder().AddMemoryElems<S>(kWasmPageSize / sizeof(S));
+    BUILD_LOADEXTEND(WASM_LOCAL_GET, 0)
+
+    // Load extends load 8 bytes, so should trap from -7.
+    for (uint32_t offset = kWasmPageSize - 7; offset < kWasmPageSize;
+         ++offset) {
+      CHECK_TRAP(r.Call(offset));
+    }
+  }
+}
+
+TEST(S128Load8x8U) {
+  RunLoadExtendRevecTest<uint8_t, uint16_t>(kExprS128Load8x8U);
+}
+
+TEST(S128Load8x8S) {
+  RunLoadExtendRevecTest<int8_t, int16_t>(kExprS128Load8x8S);
+}
+
+TEST(S128Load16x4U) {
+  RunLoadExtendRevecTest<uint16_t, uint32_t>(kExprS128Load16x4U);
+}
+
+TEST(S128Load16x4S) {
+  RunLoadExtendRevecTest<int16_t, int32_t>(kExprS128Load16x4S);
+}
+
+TEST(S128Load32x2U) {
+  RunLoadExtendRevecTest<uint32_t, uint64_t>(kExprS128Load32x2U);
+}
+
+TEST(S128Load32x2S) {
+  RunLoadExtendRevecTest<int32_t, int64_t>(kExprS128Load32x2S);
+}
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 template <typename S, typename T>
 void RunLoadExtendTest(TestExecutionTier execution_tier, WasmOpcode op) {

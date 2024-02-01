@@ -12,6 +12,7 @@
 #include "src/codegen/assembler.h"
 #include "src/codegen/loong64/assembler-loong64.h"
 #include "src/common/globals.h"
+#include "src/execution/frame-constants.h"
 #include "src/execution/isolate-data.h"
 #include "src/objects/tagged-index.h"
 
@@ -175,6 +176,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadFromConstantsTable(Register destination, int constant_index) final;
   void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
   void LoadRootRelative(Register destination, int32_t offset) final;
+  void StoreRootRelative(int32_t offset, Register value) final;
 
   // Operand pointing to an external reference.
   // May emit code to set up the scratch register. The operand is
@@ -216,12 +218,18 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void CallBuiltinByIndex(Register builtin_index, Register target);
   void CallBuiltin(Builtin builtin);
   void TailCallBuiltin(Builtin builtin);
+  void TailCallBuiltin(Builtin builtin, Condition cond, Register type,
+                       Operand range);
 
   // Load the code entry point from the Code object.
-  void LoadCodeInstructionStart(Register destination,
-                                Register code_data_container_object);
-  void CallCodeObject(Register code_data_container_object);
-  void JumpCodeObject(Register code_data_container_object,
+  void LoadCodeInstructionStart(Register destination, Register code_object);
+  void CallCodeObject(Register code_object);
+  void JumpCodeObject(Register code_object,
+                      JumpMode jump_mode = JumpMode::kJump);
+
+  // Convenience functions to call/jmp to the code of a JSFunction object.
+  void CallJSFunction(Register function_object);
+  void JumpJSFunction(Register function_object,
                       JumpMode jump_mode = JumpMode::kJump);
 
   // Generates an instruction sequence s.t. the return address points to the
@@ -253,7 +261,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void St_d(Register rd, const MemOperand& rj);
 
   void Push(Handle<HeapObject> handle);
-  void Push(Smi smi);
+  void Push(Tagged<Smi> smi);
 
   void Push(Register src) {
     Add_d(sp, sp, Operand(-kSystemPointerSize));
@@ -304,6 +312,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void CallEphemeronKeyBarrier(Register object, Operand offset,
                                SaveFPRegsMode fp_mode);
+
+  void CallIndirectPointerBarrier(Register object, Operand offset,
+                                  SaveFPRegsMode fp_mode,
+                                  IndirectPointerTag tag);
 
   void CallRecordWriteStubSaveRegisters(
       Register object, Operand offset, SaveFPRegsMode fp_mode,
@@ -622,7 +634,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void mov(Register rd, Register rj) { or_(rd, rj, zero_reg); }
 
   inline void Move(Register dst, Handle<HeapObject> handle) { li(dst, handle); }
-  inline void Move(Register dst, Smi smi) { li(dst, Operand(smi)); }
+  inline void Move(Register dst, Tagged<Smi> value) { li(dst, Operand(value)); }
 
   inline void Move(Register dst, Register src) {
     if (dst != src) {
@@ -691,6 +703,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   void LoadMap(Register destination, Register object);
   void LoadCompressedMap(Register dst, Register object);
+
+  void LoadFeedbackVector(Register dst, Register closure, Register scratch,
+                          Label* fbv_undef);
 
   // If the value is a NaN, canonicalize the value else, do nothing.
   void FPUCanonicalizeNaN(const DoubleRegister dst, const DoubleRegister src);
@@ -825,15 +840,65 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // point into the sandbox.
   void DecodeSandboxedPointer(Register value);
   void LoadSandboxedPointerField(Register destination,
-                                 const MemOperand& field_operand);
-  void StoreSandboxedPointerField(Register value,
-                                  const MemOperand& dst_field_operand);
+                                 MemOperand field_operand);
+  void StoreSandboxedPointerField(Register value, MemOperand dst_field_operand);
 
-  // Loads a field containing off-heap pointer and does necessary decoding
-  // if sandboxed external pointers are enabled.
+  // Loads a field containing an off-heap ("external") pointer and does
+  // necessary decoding if sandbox is enabled.
   void LoadExternalPointerField(Register destination, MemOperand field_operand,
                                 ExternalPointerTag tag,
                                 Register isolate_root = no_reg);
+
+  // Load a trusted pointer field.
+  // When the sandbox is enabled, these are indirect pointers using the trusted
+  // pointer table. Otherwise they are regular tagged fields.
+  void LoadTrustedPointerField(Register destination, MemOperand field_operand,
+                               IndirectPointerTag tag);
+
+  // Store a trusted pointer field.
+  void StoreTrustedPointerField(Register value, MemOperand dst_field_operand);
+
+  // Load a code pointer field.
+  // These are special versions of trusted pointers that, when the sandbox is
+  // enabled, reference code objects through the code pointer table.
+  void LoadCodePointerField(Register destination, MemOperand field_operand) {
+    LoadTrustedPointerField(destination, field_operand,
+                            kCodeIndirectPointerTag);
+  }
+  // Store a code pointer field.
+  void StoreCodePointerField(Register value, MemOperand dst_field_operand) {
+    StoreTrustedPointerField(value, dst_field_operand);
+  }
+
+  // Loads an indirect pointer field.
+  // Only available when the sandbox is enabled, but always visible to avoid
+  // having to place the #ifdefs into the caller.
+  void LoadIndirectPointerField(Register destination, MemOperand field_operand,
+                                IndirectPointerTag tag);
+
+  // Store an indirect pointer field.
+  // Only available when the sandbox is enabled, but always visible to avoid
+  // having to place the #ifdefs into the caller.
+  void StoreIndirectPointerField(Register value, MemOperand dst_field_operand);
+
+#ifdef V8_ENABLE_SANDBOX
+  // Retrieve the heap object referenced by the given indirect pointer handle,
+  // which can either be a trusted pointer handle or a code pointer handle.
+  void ResolveIndirectPointerHandle(Register destination, Register handle,
+                                    IndirectPointerTag tag);
+
+  // Retrieve the heap object referenced by the given trusted pointer handle.
+  void ResolveTrustedPointerHandle(Register destination, Register handle,
+                                   IndirectPointerTag tag);
+  // Retrieve the Code object referenced by the given code pointer handle.
+  void ResolveCodePointerHandle(Register destination, Register handle);
+
+  // Load the pointer to a Code's entrypoint via a code pointer.
+  // Only available when the sandbox is enabled as it requires the code pointer
+  // table.
+  void LoadCodeEntrypointViaCodePointer(Register destination,
+                                        MemOperand field_operand);
+#endif
 
   // Performs a truncating conversion of a floating point number as used by
   // the JS bitwise operations. See ECMA-262 9.5: ToInt32. Goes to 'done' if it
@@ -902,15 +967,17 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // stored.
   // The offset is the offset from the start of the object, not the offset from
   // the tagged HeapObject pointer. For use with FieldOperand(reg, off).
-  void RecordWriteField(Register object, int offset, Register value,
-                        RAStatus ra_status, SaveFPRegsMode save_fp,
-                        SmiCheck smi_check = SmiCheck::kInline);
+  void RecordWriteField(
+      Register object, int offset, Register value, RAStatus ra_status,
+      SaveFPRegsMode save_fp, SmiCheck smi_check = SmiCheck::kInline,
+      SlotDescriptor slot = SlotDescriptor::ForDirectPointerSlot());
 
   // For a given |object| notify the garbage collector that the slot at |offset|
   // has been written.  |value| is the object being stored.
-  void RecordWrite(Register object, Operand offset, Register value,
-                   RAStatus ra_status, SaveFPRegsMode save_fp,
-                   SmiCheck smi_check = SmiCheck::kInline);
+  void RecordWrite(
+      Register object, Operand offset, Register value, RAStatus ra_status,
+      SaveFPRegsMode save_fp, SmiCheck smi_check = SmiCheck::kInline,
+      SlotDescriptor slot = SlotDescriptor::ForDirectPointerSlot());
 
   // ---------------------------------------------------------------------------
   // Pseudo-instructions.
@@ -1078,6 +1145,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // enabled via --debug-code.
   void AssertGeneratorObject(Register object) NOOP_UNLESS_DEBUG_CODE;
 
+  // Like Assert(), but without condition.
+  // Use --debug_code to enable.
+  void AssertUnreachable(AbortReason reason) NOOP_UNLESS_DEBUG_CODE;
+
   // Abort execution if argument is not undefined or an AllocationSite, enabled
   // via --debug-code.
   void AssertUndefinedOrAllocationSite(Register object,
@@ -1085,6 +1156,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // ---------------------------------------------------------------------------
   // Tiering support.
+  void AssertFeedbackCell(Register object,
+                          Register scratch) NOOP_UNLESS_DEBUG_CODE;
   void AssertFeedbackVector(Register object,
                             Register scratch) NOOP_UNLESS_DEBUG_CODE;
   void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
@@ -1175,9 +1248,35 @@ struct MoveCycleState {
   base::Optional<DoubleRegister> scratch_fpreg;
 };
 
-#define ACCESS_MASM(masm) masm->
+// Provides access to exit frame parameters (GC-ed).
+inline MemOperand ExitFrameStackSlotOperand(int offset) {
+  // The slot at [sp] is reserved in all ExitFrames for storing the return
+  // address before doing the actual call, it's necessary for frame iteration
+  // (see StoreReturnAddressAndCall for details).
+  static constexpr int kSPOffset = 1 * kSystemPointerSize;
+  return MemOperand(sp, kSPOffset + offset);
+}
+
+// Provides access to exit frame parameters (GC-ed).
+inline MemOperand ExitFrameCallerStackSlotOperand(int index) {
+  return MemOperand(fp, (ExitFrameConstants::kFixedSlotCountAboveFp + index) *
+                            kSystemPointerSize);
+}
+
+// Calls an API function. Allocates HandleScope, extracts returned value
+// from handle and propagates exceptions.  Restores context.  On return removes
+// *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+// (GCed, includes the call JS arguments space and the additional space
+// allocated for the fast call).
+void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
+                              Register function_address,
+                              ExternalReference thunk_ref, Register thunk_arg,
+                              int stack_space, MemOperand* stack_space_operand,
+                              MemOperand return_value_operand);
 
 }  // namespace internal
 }  // namespace v8
+
+#define ACCESS_MASM(masm) masm->
 
 #endif  // V8_CODEGEN_LOONG64_MACRO_ASSEMBLER_LOONG64_H_

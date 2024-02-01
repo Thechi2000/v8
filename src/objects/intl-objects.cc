@@ -158,7 +158,7 @@ void ToUpperWithSharpS(base::Vector<const Char> src,
   }
 }
 
-inline int FindFirstUpperOrNonAscii(String s, int length) {
+inline int FindFirstUpperOrNonAscii(Tagged<String> s, int length) {
   for (int index = 0; index < length; ++index) {
     uint16_t ch = s->Get(index);
     if (V8_UNLIKELY(IsAsciiUpper(ch) || ch & ~0x7F)) {
@@ -288,11 +288,12 @@ MaybeHandle<String> LocaleConvertCase(Isolate* isolate, Handle<String> s,
 // strings and does not allocate. Note that {src} could still be, e.g., a
 // one-byte sliced string with a two-byte parent string.
 // Called from TF builtins.
-String Intl::ConvertOneByteToLower(String src, String dst) {
+Tagged<String> Intl::ConvertOneByteToLower(Tagged<String> src,
+                                           Tagged<String> dst) {
   DCHECK_EQ(src->length(), dst->length());
   DCHECK(src->IsOneByteRepresentation());
   DCHECK(src->IsFlat());
-  DCHECK(dst.IsSeqOneByteString());
+  DCHECK(IsSeqOneByteString(dst));
 
   DisallowGarbageCollection no_gc;
 
@@ -622,7 +623,8 @@ MaybeHandle<Object> Intl::LegacyUnwrapReceiver(Isolate* isolate,
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, obj_ordinary_has_instance,
       Object::OrdinaryHasInstance(isolate, constructor, receiver), Object);
-  bool ordinary_has_instance = obj_ordinary_has_instance->BooleanValue(isolate);
+  bool ordinary_has_instance =
+      Object::BooleanValue(*obj_ordinary_has_instance, isolate);
 
   // 2. If receiver does not have an [[Initialized...]] internal slot
   //    and ? OrdinaryHasInstance(constructor, receiver) is true, then
@@ -667,7 +669,7 @@ Maybe<std::string> CanonicalizeLanguageTag(Isolate* isolate,
                                            const std::string& locale_in) {
   std::string locale = locale_in;
 
-  if (locale.length() == 0 ||
+  if (locale.empty() ||
       !String::IsAscii(locale.data(), static_cast<int>(locale.length()))) {
     THROW_NEW_ERROR_RETURN_VALUE(
         isolate,
@@ -748,9 +750,9 @@ Maybe<std::string> CanonicalizeLanguageTag(Isolate* isolate,
   // 7c iv. If IsStructurallyValidLanguageTag(tag) is false, throw a
   // RangeError exception.
 
-  if (locale_in->IsString()) {
+  if (IsString(*locale_in)) {
     locale_str = Handle<String>::cast(locale_in);
-  } else if (locale_in->IsJSReceiver()) {
+  } else if (IsJSReceiver(*locale_in)) {
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, locale_str,
                                      Object::ToString(isolate, locale_in),
                                      Nothing<std::string>());
@@ -774,7 +776,7 @@ Maybe<std::string> CanonicalizeLanguageTag(Isolate* isolate,
 Maybe<std::vector<std::string>> Intl::CanonicalizeLocaleList(
     Isolate* isolate, Handle<Object> locales, bool only_return_one_result) {
   // 1. If locales is undefined, then
-  if (locales->IsUndefined(isolate)) {
+  if (IsUndefined(*locales, isolate)) {
     // 1a. Return a new empty List.
     return Just(std::vector<std::string>());
   }
@@ -782,14 +784,14 @@ Maybe<std::vector<std::string>> Intl::CanonicalizeLocaleList(
   std::vector<std::string> seen;
   // 3. If Type(locales) is String or locales has an [[InitializedLocale]]
   // internal slot,  then
-  if (locales->IsJSLocale()) {
+  if (IsJSLocale(*locales)) {
     // Since this value came from JSLocale, which is already went though the
     // CanonializeLanguageTag process once, therefore there are no need to
     // call CanonializeLanguageTag again.
     seen.push_back(JSLocale::ToString(Handle<JSLocale>::cast(locales)));
     return Just(seen);
   }
-  if (locales->IsString()) {
+  if (IsString(*locales)) {
     // 3a. Let O be CreateArrayFromList(« locales »).
     // Instead of creating a one-element array and then iterating over it,
     // we inline the body of the iteration:
@@ -815,7 +817,7 @@ Maybe<std::vector<std::string>> Intl::CanonicalizeLocaleList(
   // up to 2^53-1 if {length_obj} says so. Since cases above 2^32 probably
   // don't happen in practice (and would be very slow if they do), we'll keep
   // the code simple for now by using a saturating to-uint32 conversion.
-  double raw_length = length_obj->Number();
+  double raw_length = Object::Number(*length_obj);
   uint32_t len =
       raw_length >= kMaxUInt32 ? kMaxUInt32 : static_cast<uint32_t>(raw_length);
   // 6. Let k be 0.
@@ -837,7 +839,7 @@ Maybe<std::vector<std::string>> Intl::CanonicalizeLocaleList(
     // 7c iii. If Type(kValue) is Object and kValue has an [[InitializedLocale]]
     // internal slot, then
     std::string canonicalized_tag;
-    if (k_value->IsJSLocale()) {
+    if (IsJSLocale(*k_value)) {
       // 7c iii. 1. Let tag be kValue.[[Locale]].
       canonicalized_tag = JSLocale::ToString(Handle<JSLocale>::cast(k_value));
       // 7c iv. Else,
@@ -873,7 +875,7 @@ MaybeHandle<String> Intl::StringLocaleConvertCase(Isolate* isolate,
   if (!CanonicalizeLocaleList(isolate, locales, true).To(&requested_locales)) {
     return MaybeHandle<String>();
   }
-  std::string requested_locale = requested_locales.size() == 0
+  std::string requested_locale = requested_locales.empty()
                                      ? isolate->DefaultLocale()
                                      : requested_locales[0];
   size_t dash = requested_locale.find('-');
@@ -915,7 +917,7 @@ MaybeHandle<String> Intl::StringLocaleConvertCase(Isolate* isolate,
 template <class IsolateT>
 Intl::CompareStringsOptions Intl::CompareStringsOptionsFor(
     IsolateT* isolate, Handle<Object> locales, Handle<Object> options) {
-  if (!options->IsUndefined(isolate)) {
+  if (!IsUndefined(*options, isolate)) {
     return CompareStringsOptions::kNone;
   }
 
@@ -933,7 +935,7 @@ Intl::CompareStringsOptions Intl::CompareStringsOptionsFor(
       "sl",    "sv", "sw", "vi",    "en-DE", "en-GB",
   };
 
-  if (locales->IsUndefined(isolate)) {
+  if (IsUndefined(*locales, isolate)) {
     const std::string& default_locale = isolate->DefaultLocale();
     for (const char* fast_locale : kFastLocales) {
       if (strcmp(fast_locale, default_locale.c_str()) == 0) {
@@ -944,7 +946,7 @@ Intl::CompareStringsOptions Intl::CompareStringsOptionsFor(
     return CompareStringsOptions::kNone;
   }
 
-  if (!locales->IsString()) return CompareStringsOptions::kNone;
+  if (!IsString(*locales)) return CompareStringsOptions::kNone;
 
   Handle<String> locales_string = Handle<String>::cast(locales);
   for (const char* fast_locale : kFastLocales) {
@@ -969,8 +971,8 @@ base::Optional<int> Intl::StringLocaleCompare(
   // options is undefined, as that is the only case when the specified
   // side-effects of examining those arguments are unobservable.
   const bool can_cache =
-      (locales->IsString() || locales->IsUndefined(isolate)) &&
-      options->IsUndefined(isolate);
+      (IsString(*locales) || IsUndefined(*locales, isolate)) &&
+      IsUndefined(*options, isolate);
   // We may be able to take the fast path, depending on the `locales` and
   // `options` arguments.
   const CompareStringsOptions compare_strings_options =
@@ -1466,8 +1468,8 @@ MaybeHandle<String> Intl::NumberToLocaleString(Isolate* isolate,
   // We only cache the instance when locales is a string/undefined and
   // options is undefined, as that is the only case when the specified
   // side-effects of examining those arguments are unobservable.
-  bool can_cache = (locales->IsString() || locales->IsUndefined(isolate)) &&
-                   options->IsUndefined(isolate);
+  bool can_cache = (IsString(*locales) || IsUndefined(*locales, isolate)) &&
+                   IsUndefined(*options, isolate);
   if (can_cache) {
     icu::number::LocalizedNumberFormatter* cached_number_format =
         static_cast<icu::number::LocalizedNumberFormatter*>(
@@ -1595,27 +1597,14 @@ Maybe<Intl::NumberFormatDigitOptions> Intl::SetNumberFormatDigitOptions(
   // 6. Set intlObj.[[MinimumIntegerDigits]] to mnid.
   digit_options.minimum_integer_digits = mnid;
 
-  // 7. Let roundingPriority be ? GetOption(options, "roundingPriority",
-  // "string", « "auto", "morePrecision", "lessPrecision" », "auto").
-
-  Maybe<RoundingPriority> maybe_rounding_priority =
-      GetStringOption<RoundingPriority>(
-          isolate, options, "roundingPriority", service,
-          {"auto", "morePrecision", "lessPrecision"},
-          {RoundingPriority::kAuto, RoundingPriority::kMorePrecision,
-           RoundingPriority::kLessPrecision},
-          RoundingPriority::kAuto);
-  MAYBE_RETURN(maybe_rounding_priority, Nothing<NumberFormatDigitOptions>());
-  digit_options.rounding_priority = maybe_rounding_priority.FromJust();
-
-  // 8. Let roundingIncrement be ? GetNumberOption(options, "roundingIncrement",
+  // 7. Let roundingIncrement be ? GetNumberOption(options, "roundingIncrement",
   // 1, 5000, 1).
   Maybe<int> maybe_rounding_increment = GetNumberOption(
       isolate, options, factory->roundingIncrement_string(), 1, 5000, 1);
   if (!maybe_rounding_increment.To(&digit_options.rounding_increment)) {
     return Nothing<NumberFormatDigitOptions>();
   }
-  // 9. If roundingIncrement is not in « 1, 2, 5, 10, 20, 25, 50, 100, 200, 250,
+  // 8. If roundingIncrement is not in « 1, 2, 5, 10, 20, 25, 50, 100, 200, 250,
   // 500, 1000, 2000, 2500, 5000 », throw a RangeError exception.
   if (!IsValidRoundingIncrement(digit_options.rounding_increment)) {
     THROW_NEW_ERROR_RETURN_VALUE(
@@ -1625,7 +1614,7 @@ Maybe<Intl::NumberFormatDigitOptions> Intl::SetNumberFormatDigitOptions(
         Nothing<NumberFormatDigitOptions>());
   }
 
-  // 10. Let roundingMode be ? GetOption(options, "roundingMode", string, «
+  // 9. Let roundingMode be ? GetOption(options, "roundingMode", string, «
   // "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand",
   // "halfTrunc", "halfEven" », "halfExpand").
   Maybe<RoundingMode> maybe_rounding_mode = GetStringOption<RoundingMode>(
@@ -1639,6 +1628,19 @@ Maybe<Intl::NumberFormatDigitOptions> Intl::SetNumberFormatDigitOptions(
       RoundingMode::kHalfExpand);
   MAYBE_RETURN(maybe_rounding_mode, Nothing<NumberFormatDigitOptions>());
   digit_options.rounding_mode = maybe_rounding_mode.FromJust();
+
+  // 10. Let roundingPriority be ? GetOption(options, "roundingPriority",
+  // "string", « "auto", "morePrecision", "lessPrecision" », "auto").
+
+  Maybe<RoundingPriority> maybe_rounding_priority =
+      GetStringOption<RoundingPriority>(
+          isolate, options, "roundingPriority", service,
+          {"auto", "morePrecision", "lessPrecision"},
+          {RoundingPriority::kAuto, RoundingPriority::kMorePrecision,
+           RoundingPriority::kLessPrecision},
+          RoundingPriority::kAuto);
+  MAYBE_RETURN(maybe_rounding_priority, Nothing<NumberFormatDigitOptions>());
+  digit_options.rounding_priority = maybe_rounding_priority.FromJust();
 
   // 11. Let trailingZeroDisplay be ? GetOption(options, "trailingZeroDisplay",
   // string, « "auto", "stripIfInteger" », "auto").
@@ -1661,14 +1663,14 @@ Maybe<Intl::NumberFormatDigitOptions> Intl::SetNumberFormatDigitOptions(
   // 18. Else,
   // a. Set hasSd to false.
   bool has_sd =
-      (!mnsd_obj->IsUndefined(isolate)) || (!mxsd_obj->IsUndefined(isolate));
+      (!IsUndefined(*mnsd_obj, isolate)) || (!IsUndefined(*mxsd_obj, isolate));
 
   // 19. If mnfd is not undefined or mxfd is not undefined, then
   // a. Set hasFd to true.
   // 22. Else,
   // a. Set hasFd to false.
   bool has_fd =
-      (!mnfd_obj->IsUndefined(isolate)) || (!mxfd_obj->IsUndefined(isolate));
+      (!IsUndefined(*mnfd_obj, isolate)) || (!IsUndefined(*mxfd_obj, isolate));
 
   // 21. Let needSd be true.
   bool need_sd = true;
@@ -1735,9 +1737,9 @@ Maybe<Intl::NumberFormatDigitOptions> Intl::SetNumberFormatDigitOptions(
         return Nothing<NumberFormatDigitOptions>();
       }
       // iii. If mnfd is undefined, set mnfd to min(mnfdDefault, mxfd).
-      if (mnfd_obj->IsUndefined(isolate)) {
+      if (IsUndefined(*mnfd_obj, isolate)) {
         mnfd = std::min(mnfd_default, mxfd);
-      } else if (mxfd_obj->IsUndefined(isolate)) {
+      } else if (IsUndefined(*mxfd_obj, isolate)) {
         // iv. Else if mxfd is undefined, set mxfd to max(mxfdDefault,
         // mnfd).
         mxfd = std::max(mxfd_default, mnfd);
@@ -2151,7 +2153,7 @@ MaybeHandle<JSArray> VectorToJSArray(Isolate* isolate,
   Handle<FixedArray> fixed_array =
       factory->NewFixedArray(static_cast<int32_t>(array.size()));
   int32_t index = 0;
-  for (std::string item : array) {
+  for (const std::string& item : array) {
     Handle<String> str = factory->NewStringFromAsciiChecked(item.c_str());
     fixed_array->set(index++, *str);
   }
@@ -2254,7 +2256,7 @@ MaybeHandle<JSArray> AvailableUnits(Isolate* isolate) {
   Handle<FixedArray> fixed_array =
       factory->NewFixedArray(static_cast<int32_t>(sanctioned.size()));
   int32_t index = 0;
-  for (std::string item : sanctioned) {
+  for (const std::string& item : sanctioned) {
     Handle<String> str = factory->NewStringFromAsciiChecked(item.c_str());
     fixed_array->set(index++, *str);
   }
@@ -2385,7 +2387,7 @@ bool Intl::IsValidNumberingSystem(const std::string& value) {
   UErrorCode status = U_ZERO_ERROR;
   std::unique_ptr<icu::NumberingSystem> numbering_system(
       icu::NumberingSystem::createInstanceByName(value.c_str(), status));
-  return U_SUCCESS(status) && numbering_system.get() != nullptr &&
+  return U_SUCCESS(status) && numbering_system != nullptr &&
          !numbering_system->isAlgorithmic();
 }
 
@@ -2578,7 +2580,7 @@ MaybeHandle<String> Intl::Normalize(Isolate* isolate, Handle<String> string,
                                     Handle<Object> form_input) {
   const char* form_name;
   UNormalization2Mode form_mode;
-  if (form_input->IsUndefined(isolate)) {
+  if (IsUndefined(*form_input, isolate)) {
     // default is FNC
     form_name = "nfc";
     form_mode = UNORM2_COMPOSE;

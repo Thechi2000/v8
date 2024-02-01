@@ -29,18 +29,19 @@ enum class CopyAndForwardResult {
   FAILURE
 };
 
-using ObjectAndSize = std::pair<HeapObject, int>;
+using ObjectAndSize = std::pair<Tagged<HeapObject>, int>;
 using SurvivingNewLargeObjectsMap =
-    std::unordered_map<HeapObject, Map, Object::Hasher>;
-using SurvivingNewLargeObjectMapEntry = std::pair<HeapObject, Map>;
+    std::unordered_map<Tagged<HeapObject>, Tagged<Map>, Object::Hasher>;
+using SurvivingNewLargeObjectMapEntry =
+    std::pair<Tagged<HeapObject>, Tagged<Map>>;
 
 class ScavengerCollector;
 
 class Scavenger {
  public:
   struct PromotionListEntry {
-    HeapObject heap_object;
-    Map map;
+    Tagged<HeapObject> heap_object;
+    Tagged<Map> map;
     int size;
   };
 
@@ -60,8 +61,9 @@ class Scavenger {
      public:
       explicit Local(PromotionList* promotion_list);
 
-      inline void PushRegularObject(HeapObject object, int size);
-      inline void PushLargeObject(HeapObject object, Map map, int size);
+      inline void PushRegularObject(Tagged<HeapObject> object, int size);
+      inline void PushLargeObject(Tagged<HeapObject> object, Tagged<Map> map,
+                                  int size);
       inline size_t LocalPushSegmentSize() const;
       inline bool Pop(struct PromotionListEntry* entry);
       inline bool IsGlobalPoolEmpty() const;
@@ -105,7 +107,7 @@ class Scavenger {
   void Finalize();
   void Publish();
 
-  void AddEphemeronHashTable(EphemeronHashTable table);
+  void AddEphemeronHashTable(Tagged<EphemeronHashTable> table);
 
   size_t bytes_copied() const { return copied_size_; }
   size_t bytes_promoted() const { return promoted_size_; }
@@ -139,60 +141,64 @@ class Scavenger {
   // to be in from space.
   template <typename THeapObjectSlot>
   inline SlotCallbackResult ScavengeObject(THeapObjectSlot p,
-                                           HeapObject object);
+                                           Tagged<HeapObject> object);
 
   // Copies |source| to |target| and sets the forwarding pointer in |source|.
-  V8_INLINE bool MigrateObject(Map map, HeapObject source, HeapObject target,
-                               int size,
+  V8_INLINE bool MigrateObject(Tagged<Map> map, Tagged<HeapObject> source,
+                               Tagged<HeapObject> target, int size,
                                PromotionHeapChoice promotion_heap_choice);
 
   V8_INLINE SlotCallbackResult
   RememberedSetEntryNeeded(CopyAndForwardResult result);
 
   template <typename THeapObjectSlot>
-  V8_INLINE CopyAndForwardResult
-  SemiSpaceCopyObject(Map map, THeapObjectSlot slot, HeapObject object,
-                      int object_size, ObjectFields object_fields);
+  V8_INLINE CopyAndForwardResult SemiSpaceCopyObject(
+      Tagged<Map> map, THeapObjectSlot slot, Tagged<HeapObject> object,
+      int object_size, ObjectFields object_fields);
 
   template <typename THeapObjectSlot,
             PromotionHeapChoice promotion_heap_choice = kPromoteIntoLocalHeap>
-  V8_INLINE CopyAndForwardResult PromoteObject(Map map, THeapObjectSlot slot,
-                                               HeapObject object,
+  V8_INLINE CopyAndForwardResult PromoteObject(Tagged<Map> map,
+                                               THeapObjectSlot slot,
+                                               Tagged<HeapObject> object,
                                                int object_size,
                                                ObjectFields object_fields);
 
   template <typename THeapObjectSlot>
-  V8_INLINE SlotCallbackResult EvacuateObject(THeapObjectSlot slot, Map map,
-                                              HeapObject source);
+  V8_INLINE SlotCallbackResult EvacuateObject(THeapObjectSlot slot,
+                                              Tagged<Map> map,
+                                              Tagged<HeapObject> source);
 
-  V8_INLINE bool HandleLargeObject(Map map, HeapObject object, int object_size,
-                                   ObjectFields object_fields);
+  V8_INLINE bool HandleLargeObject(Tagged<Map> map, Tagged<HeapObject> object,
+                                   int object_size, ObjectFields object_fields);
 
   // Different cases for object evacuation.
   template <typename THeapObjectSlot,
             PromotionHeapChoice promotion_heap_choice = kPromoteIntoLocalHeap>
-  V8_INLINE SlotCallbackResult
-  EvacuateObjectDefault(Map map, THeapObjectSlot slot, HeapObject object,
-                        int object_size, ObjectFields object_fields);
+  V8_INLINE SlotCallbackResult EvacuateObjectDefault(
+      Tagged<Map> map, THeapObjectSlot slot, Tagged<HeapObject> object,
+      int object_size, ObjectFields object_fields);
 
   template <typename THeapObjectSlot>
-  inline SlotCallbackResult EvacuateThinString(Map map, THeapObjectSlot slot,
-                                               ThinString object,
+  inline SlotCallbackResult EvacuateThinString(Tagged<Map> map,
+                                               THeapObjectSlot slot,
+                                               Tagged<ThinString> object,
                                                int object_size);
 
   template <typename THeapObjectSlot>
-  inline SlotCallbackResult EvacuateShortcutCandidate(Map map,
+  inline SlotCallbackResult EvacuateShortcutCandidate(Tagged<Map> map,
                                                       THeapObjectSlot slot,
-                                                      ConsString object,
+                                                      Tagged<ConsString> object,
                                                       int object_size);
 
   template <typename THeapObjectSlot>
   inline SlotCallbackResult EvacuateInPlaceInternalizableString(
-      Map map, THeapObjectSlot slot, String string, int object_size,
-      ObjectFields object_fields);
+      Tagged<Map> map, THeapObjectSlot slot, Tagged<String> string,
+      int object_size, ObjectFields object_fields);
 
-  void IterateAndScavengePromotedObject(HeapObject target, Map map, int size);
-  void RememberPromotedEphemeron(EphemeronHashTable table, int index);
+  void IterateAndScavengePromotedObject(Tagged<HeapObject> target,
+                                        Tagged<Map> map, int size);
+  void RememberPromotedEphemeron(Tagged<EphemeronHashTable> table, int index);
 
   ScavengerCollector* const collector_;
   Heap* const heap_;
@@ -205,7 +211,7 @@ class Scavenger {
   size_t copied_size_;
   size_t promoted_size_;
   EvacuationAllocator allocator_;
-  std::unique_ptr<ConcurrentAllocator> shared_old_allocator_;
+  std::unique_ptr<MainAllocator> shared_old_allocator_;
   SurvivingNewLargeObjectsMap surviving_new_large_objects_;
 
   EphemeronRememberedSet::TableMap ephemeron_remembered_set_;

@@ -6,25 +6,23 @@
 #define V8_SANDBOX_CODE_POINTER_H_
 
 #include "src/common/globals.h"
+#include "src/sandbox/code-entrypoint-tag.h"
 
 namespace v8 {
 namespace internal {
 
-// Creates and initializes an entry in the external pointer table and writes the
-// handle for that entry to the field.
-V8_INLINE void InitCodePointerField(Address field_address, Isolate* isolate,
-                                    Address value);
+// Read the pointer to a Code's entrypoint via a code pointer.
+// Only available when the sandbox is enabled as it requires the code pointer
+// table.
+V8_INLINE Address ReadCodeEntrypointViaCodePointerField(Address field_address,
+                                                        CodeEntrypointTag tag);
 
-// If the sandbox is enabled: reads the CodePointerHandle from the field and
-// loads the corresponding external pointer from the external pointer table. If
-// the sandbox is disabled: load the external pointer from the field.
-V8_INLINE Address ReadCodePointerField(Address field_address);
-
-// If the sandbox is enabled: reads the CodePointerHandle from the field and
-// stores the external pointer to the corresponding entry in the external
-// pointer table. If the sandbox is disabled: stores the external pointer to the
-// field.
-V8_INLINE void WriteCodePointerField(Address field_address, Address value);
+// Writes the pointer to a Code's entrypoint via a code pointer.
+// Only available when the sandbox is enabled as it requires the code pointer
+// table.
+V8_INLINE void WriteCodeEntrypointViaCodePointerField(Address field_address,
+                                                      Address value,
+                                                      CodeEntrypointTag tag);
 
 }  // namespace internal
 }  // namespace v8

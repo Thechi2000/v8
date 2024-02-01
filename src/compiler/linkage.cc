@@ -200,8 +200,9 @@ int CallDescriptor::CalculateFixedFrameSize(CodeKind code_kind) const {
       return TypedFrameConstants::kFixedSlotCount;
 #if V8_ENABLE_WEBASSEMBLY
     case kCallWasmFunction:
-    case kCallWasmImportWrapper:
       return WasmFrameConstants::kFixedSlotCount;
+    case kCallWasmImportWrapper:
+      return WasmImportWrapperFrameConstants::kFixedSlotCount;
     case kCallWasmCapiFunction:
       return WasmExitFrameConstants::kFixedSlotCount;
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -250,7 +251,7 @@ CallDescriptor* Linkage::ComputeIncoming(Zone* zone,
   if (!info->closure().is_null()) {
     // If we are compiling a JS function, use a JS call descriptor,
     // plus the receiver.
-    SharedFunctionInfo shared = info->closure()->shared();
+    Tagged<SharedFunctionInfo> shared = info->closure()->shared();
     return GetJSCallDescriptor(
         zone, info->is_osr(),
         shared->internal_formal_parameter_count_with_receiver(),
@@ -271,7 +272,6 @@ bool Linkage::NeedsFrameStateInput(Runtime::FunctionId function) {
     case Runtime::kCreateIterResultObject:
     case Runtime::kGrowableSharedArrayBufferByteLength:
     case Runtime::kIncBlockCounter:
-    case Runtime::kIsFunction:
     case Runtime::kNewClosure:
     case Runtime::kNewClosure_Tenured:
     case Runtime::kNewFunctionContext:

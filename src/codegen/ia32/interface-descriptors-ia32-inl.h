@@ -192,6 +192,14 @@ constexpr auto CallFunctionTemplateDescriptor::registers() {
 }
 
 // static
+constexpr auto CallFunctionTemplateGenericDescriptor::registers() {
+  // edx: the function template info
+  // ecx: number of arguments (on the stack)
+  // edi: topmost script-having context
+  return RegisterArray(edx, ecx, edi);
+}
+
+// static
 constexpr auto CallWithSpreadDescriptor::registers() {
   // eax : number of arguments (on the stack)
   // edi : the target to call
@@ -303,6 +311,11 @@ CallApiCallbackGenericDescriptor::ActualArgumentsCountRegister() {
   return ecx;
 }
 // static
+constexpr Register
+CallApiCallbackGenericDescriptor::TopmostScriptHavingContextRegister() {
+  return eax;
+}
+// static
 constexpr Register CallApiCallbackGenericDescriptor::CallHandlerInfoRegister() {
   return edx;
 }
@@ -332,6 +345,12 @@ constexpr auto InterpreterPushArgsThenConstructDescriptor::registers() {
 }
 
 // static
+constexpr auto ConstructForwardAllArgsDescriptor::registers() {
+  return RegisterArray(edi,   // the constructor
+                       edx);  // the new target
+}
+
+// static
 constexpr auto ResumeGeneratorDescriptor::registers() {
   return RegisterArray(eax,   // the value to pass to the generator
                        edx);  // the JSGeneratorObject to resume
@@ -342,7 +361,7 @@ constexpr auto RunMicrotasksEntryDescriptor::registers() {
   return RegisterArray();
 }
 
-constexpr auto WasmNewJSToWasmWrapperDescriptor::registers() {
+constexpr auto WasmJSToWasmWrapperDescriptor::registers() {
   // Arbitrarily picked register.
   return RegisterArray(edi);
 }

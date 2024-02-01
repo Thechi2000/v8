@@ -6,9 +6,11 @@
 #define V8_COMPILER_TURBOSHAFT_UTILS_H_
 
 #include <iostream>
+#include <limits>
 #include <tuple>
 
 #include "src/base/logging.h"
+#include "src/base/macros.h"
 
 namespace v8::internal::compiler::turboshaft {
 
@@ -77,9 +79,9 @@ std::ostream& operator<<(std::ostream& os, all_of<Ts...> all) {
 }
 
 #ifdef DEBUG
-bool ShouldSkipOptimizationStep();
+V8_EXPORT_PRIVATE bool ShouldSkipOptimizationStep();
 #else
-inline bool ShouldSkipOptimizationStep() { return false; }
+V8_EXPORT_PRIVATE inline bool ShouldSkipOptimizationStep() { return false; }
 #endif
 
 // Set `*ptr` to `new_value` while the scope is active, reset to the previous
@@ -138,7 +140,7 @@ class ScopedModification {
 //
 //   DEFINE_MULTI_SWITCH_INTEGRAL(MyType, MaxValue)
 //
-template <typename T>
+template <typename T, typename Enable = void>
 struct MultiSwitch;
 
 template <typename T, uint64_t MaxValue>

@@ -20,7 +20,7 @@ namespace v8 {
 namespace internal {
 
 struct EphemeronMarking {
-  std::vector<HeapObject> newly_discovered;
+  std::vector<Tagged<HeapObject>> newly_discovered;
   bool newly_discovered_overflowed;
   size_t newly_discovered_limit;
 };
@@ -71,69 +71,85 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
         shared_external_pointer_table_(
             &heap->isolate()->shared_external_pointer_table()),
         shared_external_pointer_space_(
-            heap->isolate()->shared_external_pointer_space())
+            heap->isolate()->shared_external_pointer_space()),
+        trusted_pointer_table_(&heap->isolate()->trusted_pointer_table())
 #endif  // V8_ENABLE_SANDBOX
   {
   }
 
-  V8_INLINE int VisitBytecodeArray(Map map, BytecodeArray object);
-  V8_INLINE int VisitDescriptorArrayStrongly(Map map, DescriptorArray object);
-  V8_INLINE int VisitDescriptorArray(Map map, DescriptorArray object);
-  V8_INLINE int VisitEphemeronHashTable(Map map, EphemeronHashTable object);
-  V8_INLINE int VisitFixedArray(Map map, FixedArray object);
-  V8_INLINE int VisitJSApiObject(Map map, JSObject object);
-  V8_INLINE int VisitJSArrayBuffer(Map map, JSArrayBuffer object);
+  V8_INLINE int VisitBytecodeArray(Tagged<Map> map,
+                                   Tagged<BytecodeArray> object);
+  V8_INLINE int VisitDescriptorArrayStrongly(Tagged<Map> map,
+                                             Tagged<DescriptorArray> object);
+  V8_INLINE int VisitDescriptorArray(Tagged<Map> map,
+                                     Tagged<DescriptorArray> object);
+  V8_INLINE int VisitEphemeronHashTable(Tagged<Map> map,
+                                        Tagged<EphemeronHashTable> object);
+  V8_INLINE int VisitFixedArray(Tagged<Map> map, Tagged<FixedArray> object);
+  V8_INLINE int VisitJSApiObject(Tagged<Map> map, Tagged<JSObject> object);
+  V8_INLINE int VisitJSArrayBuffer(Tagged<Map> map,
+                                   Tagged<JSArrayBuffer> object);
   V8_INLINE int VisitJSDataViewOrRabGsabDataView(
-      Map map, JSDataViewOrRabGsabDataView object);
-  V8_INLINE int VisitJSFunction(Map map, JSFunction object);
-  V8_INLINE int VisitJSTypedArray(Map map, JSTypedArray object);
-  V8_INLINE int VisitJSWeakRef(Map map, JSWeakRef object);
-  V8_INLINE int VisitMap(Map map, Map object);
-  V8_INLINE int VisitSharedFunctionInfo(Map map, SharedFunctionInfo object);
-  V8_INLINE int VisitTransitionArray(Map map, TransitionArray object);
-  V8_INLINE int VisitWeakCell(Map map, WeakCell object);
+      Tagged<Map> map, Tagged<JSDataViewOrRabGsabDataView> object);
+  V8_INLINE int VisitJSFunction(Tagged<Map> map, Tagged<JSFunction> object);
+  V8_INLINE int VisitJSTypedArray(Tagged<Map> map, Tagged<JSTypedArray> object);
+  V8_INLINE int VisitJSWeakRef(Tagged<Map> map, Tagged<JSWeakRef> object);
+  V8_INLINE int VisitMap(Tagged<Map> map, Tagged<Map> object);
+  V8_INLINE int VisitSharedFunctionInfo(Tagged<Map> map,
+                                        Tagged<SharedFunctionInfo> object);
+  V8_INLINE int VisitTransitionArray(Tagged<Map> map,
+                                     Tagged<TransitionArray> object);
+  V8_INLINE int VisitWeakCell(Tagged<Map> map, Tagged<WeakCell> object);
 
   // ObjectVisitor overrides.
-  void VisitMapPointer(HeapObject host) final {
-    Map map = host.map(ObjectVisitorWithCageBases::cage_base());
+  void VisitMapPointer(Tagged<HeapObject> host) final {
+    Tagged<Map> map = host->map(ObjectVisitorWithCageBases::cage_base());
     ProcessStrongHeapObject(host, host->map_slot(), map);
   }
-  V8_INLINE void VisitPointer(HeapObject host, ObjectSlot p) final {
+  V8_INLINE void VisitPointer(Tagged<HeapObject> host, ObjectSlot p) final {
     VisitPointersImpl(host, p, p + 1);
   }
-  V8_INLINE void VisitPointer(HeapObject host, MaybeObjectSlot p) final {
+  V8_INLINE void VisitPointer(Tagged<HeapObject> host,
+                              MaybeObjectSlot p) final {
     VisitPointersImpl(host, p, p + 1);
   }
-  V8_INLINE void VisitPointers(HeapObject host, ObjectSlot start,
+  V8_INLINE void VisitPointers(Tagged<HeapObject> host, ObjectSlot start,
                                ObjectSlot end) final {
     VisitPointersImpl(host, start, end);
   }
-  V8_INLINE void VisitPointers(HeapObject host, MaybeObjectSlot start,
+  V8_INLINE void VisitPointers(Tagged<HeapObject> host, MaybeObjectSlot start,
                                MaybeObjectSlot end) final {
     VisitPointersImpl(host, start, end);
   }
   V8_INLINE void VisitInstructionStreamPointer(
-      Code host, InstructionStreamSlot slot) final {
-    VisitInstructionStreamPointerImpl(host, slot);
+      Tagged<Code> host, InstructionStreamSlot slot) final {
+    VisitStrongPointerImpl(host, slot);
   }
-  V8_INLINE void VisitEmbeddedPointer(InstructionStream host,
+  V8_INLINE void VisitEmbeddedPointer(Tagged<InstructionStream> host,
                                       RelocInfo* rinfo) final;
-  V8_INLINE void VisitCodeTarget(InstructionStream host,
+  V8_INLINE void VisitCodeTarget(Tagged<InstructionStream> host,
                                  RelocInfo* rinfo) final;
-  void VisitCustomWeakPointers(HeapObject host, ObjectSlot start,
+  void VisitCustomWeakPointers(Tagged<HeapObject> host, ObjectSlot start,
                                ObjectSlot end) final {
     // Weak list pointers should be ignored during marking. The lists are
     // reconstructed after GC.
   }
 
-  V8_INLINE void VisitExternalPointer(HeapObject host, ExternalPointerSlot slot,
-                                      ExternalPointerTag tag) final;
-#ifdef V8_CODE_POINTER_SANDBOXING
-  V8_INLINE void VisitCodePointerHandle(HeapObject host,
-                                        CodePointerHandle handle) final;
-#endif
+  V8_INLINE void VisitExternalPointer(Tagged<HeapObject> host,
+                                      ExternalPointerSlot slot) final;
+  V8_INLINE void VisitIndirectPointer(Tagged<HeapObject> host,
+                                      IndirectPointerSlot slot,
+                                      IndirectPointerMode mode) final;
 
-  void SynchronizePageAccess(HeapObject heap_object) {
+  void VisitTrustedPointerTableEntry(Tagged<HeapObject> host,
+                                     IndirectPointerSlot slot) final;
+
+  V8_INLINE void VisitProtectedPointer(Tagged<TrustedObject> host,
+                                       ProtectedPointerSlot slot) final {
+    VisitStrongPointerImpl(host, slot);
+  }
+
+  void SynchronizePageAccess(Tagged<HeapObject> heap_object) {
 #ifdef THREAD_SANITIZER
     // This is needed because TSAN does not process the memory fence
     // emitted after page initialization.
@@ -141,21 +157,21 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
 #endif
   }
 
-  bool ShouldMarkObject(HeapObject object) const {
-    if (object.InReadOnlySpace()) return false;
+  bool ShouldMarkObject(Tagged<HeapObject> object) const {
+    if (InReadOnlySpace(object)) return false;
     if (should_mark_shared_heap_) return true;
-    return !object.InAnySharedSpace();
+    return !InAnySharedSpace(object);
   }
 
   // Marks the object grey and pushes it on the marking work list.
-  V8_INLINE void MarkObject(HeapObject host, HeapObject obj);
+  V8_INLINE void MarkObject(Tagged<HeapObject> host, Tagged<HeapObject> obj);
 
   V8_INLINE static constexpr bool ShouldVisitReadOnlyMapPointer() {
     return false;
   }
 
   // Convenience method.
-  bool IsUnmarked(HeapObject obj) const {
+  bool IsUnmarked(Tagged<HeapObject> obj) const {
     return !concrete_visitor()->IsMarked(obj);
   }
 
@@ -163,43 +179,43 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
   using ConcurrentHeapVisitor<int, ConcreteVisitor>::concrete_visitor;
 
   template <typename THeapObjectSlot>
-  void ProcessStrongHeapObject(HeapObject host, THeapObjectSlot slot,
-                               HeapObject heap_object);
+  void ProcessStrongHeapObject(Tagged<HeapObject> host, THeapObjectSlot slot,
+                               Tagged<HeapObject> heap_object);
   template <typename THeapObjectSlot>
-  void ProcessWeakHeapObject(HeapObject host, THeapObjectSlot slot,
-                             HeapObject heap_object);
+  void ProcessWeakHeapObject(Tagged<HeapObject> host, THeapObjectSlot slot,
+                             Tagged<HeapObject> heap_object);
 
   template <typename TSlot>
-  V8_INLINE void VisitPointerImpl(HeapObject host, TSlot p);
+  V8_INLINE void VisitPointersImpl(Tagged<HeapObject> host, TSlot start,
+                                   TSlot end);
 
   template <typename TSlot>
-  V8_INLINE void VisitPointersImpl(HeapObject host, TSlot start, TSlot end);
+  V8_INLINE void VisitStrongPointerImpl(Tagged<HeapObject> host, TSlot slot);
 
-  // Similar to VisitPointersImpl() but using code cage base for loading from
-  // the slot.
-  V8_INLINE void VisitInstructionStreamPointerImpl(Code host,
-                                                   InstructionStreamSlot slot);
-
-  V8_INLINE void VisitDescriptorsForMap(Map map);
+  V8_INLINE void VisitDescriptorsForMap(Tagged<Map> map);
 
   template <typename T>
-  int VisitEmbedderTracingSubclass(Map map, T object);
+  int VisitEmbedderTracingSubclass(Tagged<Map> map, Tagged<T> object);
   template <typename T>
-  int VisitEmbedderTracingSubClassWithEmbedderTracing(Map map, T object);
+  int VisitEmbedderTracingSubClassWithEmbedderTracing(Tagged<Map> map,
+                                                      Tagged<T> object);
   template <typename T>
-  int VisitEmbedderTracingSubClassNoEmbedderTracing(Map map, T object);
+  int VisitEmbedderTracingSubClassNoEmbedderTracing(Tagged<Map> map,
+                                                    Tagged<T> object);
 
-  V8_INLINE int VisitFixedArrayWithProgressBar(Map map, FixedArray object,
+  V8_INLINE int VisitFixedArrayWithProgressBar(Tagged<Map> map,
+                                               Tagged<FixedArray> object,
                                                ProgressBar& progress_bar);
-  V8_INLINE int VisitFixedArrayRegularly(Map map, FixedArray object);
+  V8_INLINE int VisitFixedArrayRegularly(Tagged<Map> map,
+                                         Tagged<FixedArray> object);
 
   // Methods needed for supporting code flushing.
-  bool ShouldFlushCode(SharedFunctionInfo sfi) const;
-  bool ShouldFlushBaselineCode(JSFunction js_function) const;
+  bool ShouldFlushCode(Tagged<SharedFunctionInfo> sfi) const;
+  bool ShouldFlushBaselineCode(Tagged<JSFunction> js_function) const;
 
-  bool HasBytecodeArrayForFlushing(SharedFunctionInfo sfi) const;
-  bool IsOld(SharedFunctionInfo sfi) const;
-  void MakeOlder(SharedFunctionInfo sfi) const;
+  bool HasBytecodeArrayForFlushing(Tagged<SharedFunctionInfo> sfi) const;
+  bool IsOld(Tagged<SharedFunctionInfo> sfi) const;
+  void MakeOlder(Tagged<SharedFunctionInfo> sfi) const;
 
   MarkingWorklists::Local* const local_marking_worklists_;
   WeakObjects::Local* const local_weak_objects_;
@@ -215,6 +231,7 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
   ExternalPointerTable* const external_pointer_table_;
   ExternalPointerTable* const shared_external_pointer_table_;
   ExternalPointerTable::Space* const shared_external_pointer_space_;
+  TrustedPointerTable* const trusted_pointer_table_;
 #endif  // V8_ENABLE_SANDBOX
 };
 
@@ -236,83 +253,20 @@ class FullMarkingVisitorBase : public MarkingVisitorBase<ConcreteVisitor> {
             mark_compact_epoch, code_flush_mode, trace_embedder_fields,
             should_keep_ages_unchanged, code_flushing_increase) {}
 
-  V8_INLINE void AddStrongReferenceForReferenceSummarizer(HeapObject host,
-                                                          HeapObject obj) {}
+  V8_INLINE void AddStrongReferenceForReferenceSummarizer(
+      Tagged<HeapObject> host, Tagged<HeapObject> obj) {}
 
-  V8_INLINE void AddWeakReferenceForReferenceSummarizer(HeapObject host,
-                                                        HeapObject obj) {}
+  V8_INLINE void AddWeakReferenceForReferenceSummarizer(
+      Tagged<HeapObject> host, Tagged<HeapObject> obj) {}
 
   constexpr bool CanUpdateValuesInHeap() { return true; }
 
-  bool TryMark(HeapObject obj) {
+  bool TryMark(Tagged<HeapObject> obj) {
     return MarkBit::From(obj).Set<AccessMode::ATOMIC>();
   }
-  bool IsMarked(HeapObject obj) const {
+  bool IsMarked(Tagged<HeapObject> obj) const {
     return MarkBit::From(obj).Get<AccessMode::ATOMIC>();
   }
-};
-
-template <typename ConcreteVisitor>
-class YoungGenerationMarkingVisitorBase
-    : public NewSpaceVisitor<ConcreteVisitor> {
- public:
-  YoungGenerationMarkingVisitorBase(
-      Isolate* isolate, MarkingWorklists::Local* worklists_local,
-      EphemeronRememberedSet::TableList::Local* ephemeron_tables_local,
-      PretenuringHandler::PretenuringFeedbackMap* local_pretenuring_feedback);
-
-  ~YoungGenerationMarkingVisitorBase() override;
-
-  YoungGenerationMarkingVisitorBase(const YoungGenerationMarkingVisitorBase&) =
-      delete;
-  YoungGenerationMarkingVisitorBase& operator=(
-      const YoungGenerationMarkingVisitorBase&) = delete;
-
-  V8_INLINE void VisitPointers(HeapObject host, ObjectSlot start,
-                               ObjectSlot end) final {
-    concrete_visitor()->VisitPointersImpl(host, start, end);
-  }
-  V8_INLINE void VisitPointers(HeapObject host, MaybeObjectSlot start,
-                               MaybeObjectSlot end) final {
-    concrete_visitor()->VisitPointersImpl(host, start, end);
-  }
-  V8_INLINE void VisitPointer(HeapObject host, ObjectSlot p) final {
-    concrete_visitor()->VisitPointersImpl(host, p, p + 1);
-  }
-  V8_INLINE void VisitPointer(HeapObject host, MaybeObjectSlot p) final {
-    concrete_visitor()->VisitPointersImpl(host, p, p + 1);
-  }
-
-  V8_INLINE int VisitJSApiObject(Map map, JSObject object);
-  V8_INLINE int VisitJSArrayBuffer(Map map, JSArrayBuffer object);
-  V8_INLINE int VisitJSDataViewOrRabGsabDataView(
-      Map map, JSDataViewOrRabGsabDataView object);
-  V8_INLINE int VisitEphemeronHashTable(Map map, EphemeronHashTable table);
-  V8_INLINE int VisitJSObject(Map map, JSObject object);
-  V8_INLINE int VisitJSObjectFast(Map map, JSObject object);
-  template <typename T, typename TBodyDescriptor = typename T::BodyDescriptor>
-  V8_INLINE int VisitJSObjectSubclass(Map map, T object);
-  V8_INLINE int VisitJSTypedArray(Map map, JSTypedArray object);
-
-  MarkingWorklists::Local* worklists_local() const { return worklists_local_; }
-
-  bool TryMark(HeapObject obj) {
-    return MarkBit::From(obj).Set<AccessMode::ATOMIC>();
-  }
-
- protected:
-  using NewSpaceVisitor<ConcreteVisitor>::concrete_visitor;
-
-  PretenuringHandler* pretenuring_handler() { return pretenuring_handler_; }
-
-  template <typename T>
-  int VisitEmbedderTracingSubClassWithEmbedderTracing(Map map, T object);
-
- private:
-  MarkingWorklists::Local* worklists_local_;
-  EphemeronRememberedSet::TableList::Local* ephemeron_tables_local_;
-  PretenuringHandler* const pretenuring_handler_;
-  PretenuringHandler::PretenuringFeedbackMap* const local_pretenuring_feedback_;
 };
 
 }  // namespace internal

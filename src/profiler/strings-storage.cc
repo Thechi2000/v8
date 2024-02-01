@@ -77,11 +77,11 @@ const char* StringsStorage::GetVFormatted(const char* format, va_list args) {
   return AddOrDisposeString(str.begin(), len);
 }
 
-const char* StringsStorage::GetSymbol(Symbol sym) {
-  if (!sym->description().IsString()) {
+const char* StringsStorage::GetSymbol(Tagged<Symbol> sym) {
+  if (!IsString(sym->description())) {
     return "<symbol>";
   }
-  String description = String::cast(sym->description());
+  Tagged<String> description = String::cast(sym->description());
   int length = std::min(v8_flags.heap_snapshot_string_limit.value(),
                         description->length());
   auto data = description->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL, 0,
@@ -95,16 +95,16 @@ const char* StringsStorage::GetSymbol(Symbol sym) {
   return AddOrDisposeString(str_result, str_length - 1);
 }
 
-const char* StringsStorage::GetName(Name name) {
-  if (name.IsString()) {
-    String str = String::cast(name);
+const char* StringsStorage::GetName(Tagged<Name> name) {
+  if (IsString(name)) {
+    Tagged<String> str = String::cast(name);
     int length =
         std::min(v8_flags.heap_snapshot_string_limit.value(), str->length());
     int actual_length = 0;
     std::unique_ptr<char[]> data = str->ToCString(
         DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL, 0, length, &actual_length);
     return AddOrDisposeString(data.release(), actual_length);
-  } else if (name.IsSymbol()) {
+  } else if (IsSymbol(name)) {
     return GetSymbol(Symbol::cast(name));
   }
   return "";
@@ -114,9 +114,9 @@ const char* StringsStorage::GetName(int index) {
   return GetFormatted("%d", index);
 }
 
-const char* StringsStorage::GetConsName(const char* prefix, Name name) {
-  if (name.IsString()) {
-    String str = String::cast(name);
+const char* StringsStorage::GetConsName(const char* prefix, Tagged<Name> name) {
+  if (IsString(name)) {
+    Tagged<String> str = String::cast(name);
     int length =
         std::min(v8_flags.heap_snapshot_string_limit.value(), str->length());
     int actual_length = 0;
@@ -128,7 +128,7 @@ const char* StringsStorage::GetConsName(const char* prefix, Name name) {
     snprintf(cons_result, cons_length, "%s%s", prefix, data.get());
 
     return AddOrDisposeString(cons_result, cons_length - 1);
-  } else if (name.IsSymbol()) {
+  } else if (IsSymbol(name)) {
     return GetSymbol(Symbol::cast(name));
   }
   return "";

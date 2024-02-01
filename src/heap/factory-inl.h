@@ -33,12 +33,12 @@ MUTABLE_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
 
 Handle<String> Factory::InternalizeString(Handle<String> string) {
-  if (string->IsInternalizedString()) return string;
+  if (IsInternalizedString(*string)) return string;
   return isolate()->string_table()->LookupString(isolate(), string);
 }
 
 Handle<Name> Factory::InternalizeName(Handle<Name> name) {
-  if (name->IsUniqueName()) return name;
+  if (IsUniqueName(*name)) return name;
   return isolate()->string_table()->LookupString(isolate(),
                                                  Handle<String>::cast(name));
 }
@@ -62,23 +62,23 @@ Handle<String> Factory::NewSubString(Handle<String> str, int begin, int end) {
   return NewProperSubString(str, begin, end);
 }
 
-Handle<JSArray> Factory::NewJSArrayWithElements(Handle<FixedArrayBase> elements,
-                                                ElementsKind elements_kind,
-                                                AllocationType allocation) {
+Handle<JSArray> Factory::NewJSArrayWithElements(
+    DirectHandle<FixedArrayBase> elements, ElementsKind elements_kind,
+    AllocationType allocation) {
   return NewJSArrayWithElements(elements, elements_kind, elements->length(),
                                 allocation);
 }
 
 Handle<JSObject> Factory::NewFastOrSlowJSObjectFromMap(
-    Handle<Map> map, int number_of_slow_properties, AllocationType allocation,
-    Handle<AllocationSite> allocation_site) {
+    DirectHandle<Map> map, int number_of_slow_properties,
+    AllocationType allocation, DirectHandle<AllocationSite> allocation_site) {
   return map->is_dictionary_map()
              ? NewSlowJSObjectFromMap(map, number_of_slow_properties,
                                       allocation, allocation_site)
              : NewJSObjectFromMap(map, allocation, allocation_site);
 }
 
-Handle<JSObject> Factory::NewFastOrSlowJSObjectFromMap(Handle<Map> map) {
+Handle<JSObject> Factory::NewFastOrSlowJSObjectFromMap(DirectHandle<Map> map) {
   return NewFastOrSlowJSObjectFromMap(
       map, V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL
                ? SwissNameDictionary::kInitialCapacity
@@ -101,15 +101,15 @@ HeapAllocator* Factory::allocator() const {
 Factory::CodeBuilder& Factory::CodeBuilder::set_interpreter_data(
     Handle<HeapObject> interpreter_data) {
   // This DCHECK requires this function to be in -inl.h.
-  DCHECK(interpreter_data->IsInterpreterData() ||
-         interpreter_data->IsBytecodeArray());
+  DCHECK(IsInterpreterData(*interpreter_data) ||
+         IsBytecodeArray(*interpreter_data));
   interpreter_data_ = interpreter_data;
   return *this;
 }
 
-void Factory::NumberToStringCacheSet(Handle<Object> number, int hash,
-                                     Handle<String> js_string) {
-  if (!number_string_cache()->get(hash * 2).IsUndefined(isolate()) &&
+void Factory::NumberToStringCacheSet(DirectHandle<Object> number, int hash,
+                                     DirectHandle<String> js_string) {
+  if (!IsUndefined(number_string_cache()->get(hash * 2), isolate()) &&
       !v8_flags.optimize_for_size) {
     int full_size = isolate()->heap()->MaxNumberToStringCacheSize();
     if (number_string_cache()->length() != full_size) {
@@ -120,7 +120,7 @@ void Factory::NumberToStringCacheSet(Handle<Object> number, int hash,
     }
   }
   DisallowGarbageCollection no_gc;
-  FixedArray cache = *number_string_cache();
+  Tagged<FixedArray> cache = *number_string_cache();
   cache->set(hash * 2, *number);
   cache->set(hash * 2 + 1, *js_string);
 }
@@ -130,8 +130,8 @@ Handle<Object> Factory::NumberToStringCacheGet(Tagged<Object> number,
   DisallowGarbageCollection no_gc;
   Tagged<FixedArray> cache = *number_string_cache();
   Tagged<Object> key = cache->get(hash * 2);
-  if (key == number || (key.IsHeapNumber() && number.IsHeapNumber() &&
-                        key->Number() == number->Number())) {
+  if (key == number || (IsHeapNumber(key) && IsHeapNumber(number) &&
+                        Object::Number(key) == Object::Number(number))) {
     return Handle<String>(String::cast(cache->get(hash * 2 + 1)), isolate());
   }
   return undefined_value();

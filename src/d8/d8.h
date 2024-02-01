@@ -210,6 +210,12 @@ class Worker : public std::enable_shared_from_this<Worker> {
                                 std::shared_ptr<Worker> worker,
                                 base::Thread::Priority priority);
 
+  // Enters State::kTerminated for the Worker and resets the task runner.
+  void EnterTerminatedState();
+
+  // Returns the Worker instance for this thread.
+  static Worker* GetCurrentWorker();
+
  private:
   friend class ProcessMessageTask;
   friend class TerminateTask;
@@ -241,6 +247,8 @@ class Worker : public std::enable_shared_from_this<Worker> {
 
   void ExecuteInThread();
   static void PostMessageOut(const v8::FunctionCallbackInfo<v8::Value>& info);
+
+  static void SetCurrentWorker(Worker* worker);
 
   i::ParkingSemaphore out_semaphore_{0};
   SerializationDataQueue out_queue_;
@@ -419,16 +427,16 @@ class ShellOptions {
   DisallowReassignment<bool> no_fail = {"no-fail", false};
   DisallowReassignment<bool> dump_counters = {"dump-counters", false};
   DisallowReassignment<bool> dump_counters_nvp = {"dump-counters-nvp", false};
+  DisallowReassignment<bool> dump_system_memory_stats = {
+      "dump-system-memory-stats", false};
   DisallowReassignment<bool> ignore_unhandled_promises = {
       "ignore-unhandled-promises", false};
   DisallowReassignment<bool> mock_arraybuffer_allocator = {
       "mock-arraybuffer-allocator", false};
   DisallowReassignment<size_t> mock_arraybuffer_allocator_limit = {
       "mock-arraybuffer-allocator-limit", 0};
-#if MULTI_MAPPED_ALLOCATOR_AVAILABLE
   DisallowReassignment<bool> multi_mapped_mock_allocator = {
       "multi-mapped-mock-allocator", false};
-#endif
   DisallowReassignment<bool> enable_inspector = {"enable-inspector", false};
   int num_isolates = 1;
   DisallowReassignment<v8::ScriptCompiler::CompileOptions, true>
@@ -475,10 +483,6 @@ class ShellOptions {
   DisallowReassignment<bool> enable_sandbox_crash_filter = {
       "enable-sandbox-crash-filter", false};
 #endif  // V8_ENABLE_SANDBOX
-  DisallowReassignment<bool> throw_on_failed_access_check = {
-      "throw-on-failed-access-check", false};
-  DisallowReassignment<bool> noop_on_failed_access_check = {
-      "noop-on-failed-access-check", false};
   DisallowReassignment<size_t> max_serializer_memory = {"max-serializer-memory",
                                                         1 * i::MB};
 };
@@ -504,7 +508,7 @@ class Shell : public i::AllStatic {
   static bool LoadJSON(Isolate* isolate, const char* file_name);
   static void ReportException(Isolate* isolate, Local<Message> message,
                               Local<Value> exception);
-  static void ReportException(Isolate* isolate, TryCatch* try_catch);
+  static void ReportException(Isolate* isolate, const TryCatch& try_catch);
   static MaybeLocal<String> ReadFile(Isolate* isolate, const char* name,
                                      bool should_throw = true);
   static Local<String> WasmLoadSourceMapCallback(Isolate* isolate,
@@ -670,7 +674,7 @@ class Shell : public i::AllStatic {
   static MaybeLocal<Promise> HostImportModuleDynamically(
       Local<Context> context, Local<Data> host_defined_options,
       Local<Value> resource_name, Local<String> specifier,
-      Local<FixedArray> import_assertions);
+      Local<FixedArray> import_attributes);
 
   static void ModuleResolutionSuccessCallback(
       const v8::FunctionCallbackInfo<v8::Value>& info);

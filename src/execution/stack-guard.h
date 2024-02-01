@@ -122,11 +122,22 @@ class V8_EXPORT_PRIVATE V8_NODISCARD StackGuard final {
         &thread_local_.interrupt_requested_[static_cast<int>(level)]);
   }
 
+  static constexpr int jslimit_offset() {
+    return offsetof(StackGuard, thread_local_) +
+           offsetof(ThreadLocal, jslimit_);
+  }
+
+  static constexpr int real_jslimit_offset() {
+    return offsetof(StackGuard, thread_local_) +
+           offsetof(ThreadLocal, real_jslimit_);
+  }
+
   // If the stack guard is triggered, but it is not an actual
   // stack overflow, then handle the interruption accordingly.
   // Only interrupts that match the given `InterruptLevel` will be handled,
   // leaving other interrupts pending as if this method had not been called.
-  Object HandleInterrupts(InterruptLevel level = InterruptLevel::kAnyEffect);
+  Tagged<Object> HandleInterrupts(
+      InterruptLevel level = InterruptLevel::kAnyEffect);
 
   // Special case of {HandleInterrupts}: checks for termination requests only.
   // This is guaranteed to never cause GC, so can be used to interrupt
@@ -235,6 +246,8 @@ class V8_EXPORT_PRIVATE V8_NODISCARD StackGuard final {
   friend class Isolate;
   friend class StackLimitCheck;
   friend class InterruptsScope;
+
+  static_assert(std::is_standard_layout<ThreadLocal>::value);
 };
 
 static_assert(StackGuard::kSizeInBytes == sizeof(StackGuard));

@@ -57,7 +57,7 @@ template <int N>
 void CheckExceptionInfos(v8::internal::Isolate* i_isolate, Handle<Object> exc,
                          const ExceptionInfo (&excInfos)[N]) {
   // Check that it's indeed an Error object.
-  CHECK(exc->IsJSError());
+  CHECK(IsJSError(*exc));
 
   v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(i_isolate);
 
@@ -107,8 +107,8 @@ void CheckComputeLocation(v8::internal::Isolate* i_isolate, Handle<Object> exc,
   //               whether Script::PositionInfo.column should be the offset
   //               relative to the module or relative to the function.
   // CHECK_EQ(topLocation.column - 1, message->GetColumnNumber());
-  String scriptSource = message->GetSource();
-  CHECK(scriptSource.IsString());
+  Tagged<String> scriptSource = message->GetSource();
+  CHECK(IsString(scriptSource));
   if (stackFrame->IsWasm()) {
     CHECK_EQ(scriptSource->length(), 0);
   } else {
@@ -172,8 +172,7 @@ WASM_COMPILED_EXEC_TEST(CollectDetailedWasmStack_ExplicitThrowFromJs) {
 // Trigger a trap in wasm, stack should contain a source url.
 WASM_COMPILED_EXEC_TEST(CollectDetailedWasmStack_WasmUrl) {
   // Create a WasmRunner with stack checks and traps enabled.
-  WasmRunner<int> r(execution_tier, kWasmOrigin, nullptr, "main",
-                    kRuntimeExceptionSupport);
+  WasmRunner<int> r(execution_tier, kWasmOrigin, nullptr, "main");
 
   std::vector<uint8_t> trap_code(1, kExprUnreachable);
   r.Build(trap_code.data(), trap_code.data() + trap_code.size());
@@ -234,8 +233,7 @@ WASM_COMPILED_EXEC_TEST(CollectDetailedWasmStack_WasmError) {
     int unreachable_pos = 1 << (8 * pos_shift);
     TestSignatures sigs;
     // Create a WasmRunner with stack checks and traps enabled.
-    WasmRunner<int> r(execution_tier, kWasmOrigin, nullptr, "main",
-                      kRuntimeExceptionSupport);
+    WasmRunner<int> r(execution_tier, kWasmOrigin, nullptr, "main");
 
     std::vector<uint8_t> trap_code(unreachable_pos + 1, kExprNop);
     trap_code[unreachable_pos] = kExprUnreachable;

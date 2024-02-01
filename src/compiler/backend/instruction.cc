@@ -13,6 +13,7 @@
 #include "src/codegen/machine-type.h"
 #include "src/codegen/register-configuration.h"
 #include "src/codegen/source-position.h"
+#include "src/compiler/backend/instruction-codes.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/frame-states.h"
 #include "src/compiler/graph.h"
@@ -79,6 +80,8 @@ FlagsCondition CommuteFlagsCondition(FlagsCondition condition) {
     case kNotOverflow:
     case kUnorderedEqual:
     case kUnorderedNotEqual:
+    case kIsNaN:
+    case kIsNotNaN:
       return condition;
   }
   UNREACHABLE();
@@ -283,6 +286,9 @@ std::ostream& operator<<(std::ostream& os, const InstructionOperand& op) {
           break;
         case MachineRepresentation::kCompressed:
           os << "|c";
+          break;
+        case MachineRepresentation::kIndirectPointer:
+          os << "|ip";
           break;
         case MachineRepresentation::kSandboxedPointer:
           os << "|sb";
@@ -528,6 +534,10 @@ std::ostream& operator<<(std::ostream& os, const FlagsCondition& fc) {
       return os << "positive or zero";
     case kNegative:
       return os << "negative";
+    case kIsNaN:
+      return os << "is nan";
+    case kIsNotNaN:
+      return os << "is not nan";
   }
   UNREACHABLE();
 }
@@ -593,7 +603,7 @@ Handle<HeapObject> Constant::ToHeapObject() const {
 Handle<Code> Constant::ToCode() const {
   DCHECK_EQ(kHeapObject, type());
   Handle<Code> value(reinterpret_cast<Address*>(static_cast<intptr_t>(value_)));
-  DCHECK(value->IsCode());
+  DCHECK(IsCode(*value));
   return value;
 }
 
@@ -716,15 +726,22 @@ static InstructionBlock* InstructionBlockFor(Zone* zone,
 static InstructionBlock* InstructionBlockFor(Zone* zone,
                                              const turboshaft::Graph& graph,
                                              const turboshaft::Block* block) {
-  bool is_handler =
-      block->FirstOperation(graph).Is<turboshaft::LoadExceptionOp>();
   // TODO(nicohartmann@): Properly get the loop_header.
   turboshaft::Block* loop_header = nullptr;  // block->loop_header()
-  // TODO(nicohartmann@): Properly get the deferred.
-  bool deferred = false;
+  bool is_handler =
+      block->FirstOperation(graph).Is<turboshaft::CatchBlockBeginOp>();
+  bool deferred = block->get_custom_data(
+      turboshaft::Block::CustomDataKind::kDeferredInSchedule);
   InstructionBlock* instr_block = zone->New<InstructionBlock>(
       zone, GetRpo(block), GetRpo(loop_header), GetLoopEndRpo(block),
       GetRpo(block->GetDominator()), deferred, is_handler);
+  if (block->PredecessorCount() == 1) {
+    const turboshaft::Block* predecessor = block->LastPredecessor();
+    if (V8_UNLIKELY(
+            predecessor->LastOperation(graph).Is<turboshaft::SwitchOp>())) {
+      instr_block->set_switch_target(true);
+    }
+  }
   // Map successors and predecessors.
   base::SmallVector<turboshaft::Block*, 4> succs =
       turboshaft::SuccessorBlocks(block->LastOperation(graph));
@@ -739,12 +756,6 @@ static InstructionBlock* InstructionBlockFor(Zone* zone,
   }
   std::reverse(instr_block->predecessors().begin(),
                instr_block->predecessors().end());
-  if (block->HasExactlyNPredecessors(1)) {
-    const turboshaft::Block* predecessor = block->LastPredecessor();
-    if (predecessor->LastOperation(graph).Is<turboshaft::SwitchOp>()) {
-      instr_block->set_switch_target(true);
-    }
-  }
   return instr_block;
 }
 
@@ -948,9 +959,12 @@ InstructionSequence::InstructionSequence(Isolate* isolate,
       zone_(instruction_zone),
       instruction_blocks_(instruction_blocks),
       ao_blocks_(nullptr),
-      source_positions_(zone()),
-      constants_(ConstantMap::key_compare(),
-                 ConstantMap::allocator_type(zone())),
+      // Pre-allocate the hash map of source positions based on the block count.
+      // (The actual number of instructions is only known after instruction
+      // selection, but should at least correlate with the block count.)
+      source_positions_(zone(), instruction_blocks->size() * 2),
+      // Avoid collisions for functions with 256 or less constant vregs.
+      constants_(zone(), 256),
       immediates_(zone()),
       rpo_immediates_(instruction_blocks->size(), zone()),
       instructions_(zone()),
@@ -1005,11 +1019,6 @@ int InstructionSequence::AddInstruction(Instruction* instr) {
   return index;
 }
 
-InstructionBlock* InstructionSequence::GetInstructionBlock(
-    int instruction_index) const {
-  return instructions()[instruction_index]->block();
-}
-
 static MachineRepresentation FilterRepresentation(MachineRepresentation rep) {
   switch (rep) {
     case MachineRepresentation::kBit:
@@ -1031,6 +1040,7 @@ static MachineRepresentation FilterRepresentation(MachineRepresentation rep) {
       return rep;
     case MachineRepresentation::kNone:
     case MachineRepresentation::kMapWord:
+    case MachineRepresentation::kIndirectPointer:
       break;
   }
 
@@ -1147,12 +1157,13 @@ size_t GetConservativeFrameSizeInBytes(FrameStateType type,
 #if V8_ENABLE_WEBASSEMBLY
     case FrameStateType::kWasmInlinedIntoJS:
 #endif
-    case FrameStateType::kConstructCreateStub:
-    case FrameStateType::kConstructInvokeStub: {
+    case FrameStateType::kConstructCreateStub: {
       auto info = ConstructStubFrameInfo::Conservative(
           static_cast<int>(parameters_count));
       return info.frame_size_in_bytes();
     }
+    case FrameStateType::kConstructInvokeStub:
+      return FastConstructStubFrameInfo::Conservative().frame_size_in_bytes();
     case FrameStateType::kBuiltinContinuation:
 #if V8_ENABLE_WEBASSEMBLY
     case FrameStateType::kJSToWasmBuiltinContinuation:
@@ -1234,8 +1245,8 @@ size_t FrameStateDescriptor::GetHeight() const {
 }
 
 size_t FrameStateDescriptor::GetSize() const {
-  return 1 + parameters_count() + locals_count() + stack_count() +
-         (HasContext() ? 1 : 0);
+  return (HasClosure() ? 1 : 0) + parameters_count() + locals_count() +
+         stack_count() + (HasContext() ? 1 : 0);
 }
 
 size_t FrameStateDescriptor::GetTotalSize() const {

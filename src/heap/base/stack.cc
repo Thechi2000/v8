@@ -8,6 +8,7 @@
 
 #include "src/base/sanitizer/asan.h"
 #include "src/base/sanitizer/msan.h"
+#include "src/heap/base/memory-tagging.h"
 #include "src/base/sanitizer/tsan.h"
 
 namespace heap::base {
@@ -158,30 +159,27 @@ void Stack::IteratePointersImpl(const Stack* stack, void* argument,
   constexpr size_t kMinStackAlignment = sizeof(void*);
   CHECK_EQ(0u,
            reinterpret_cast<uintptr_t>(stack_end) & (kMinStackAlignment - 1));
-  IteratePointersInStack(visitor,
-                         reinterpret_cast<const void* const*>(stack_end),
-                         stack->stack_start_, asan_fake_stack);
+  {
+    // Temporarily stop checking MTE tags whilst scanning the stack (whilst V8
+    // may not be tagging its portion of the stack, higher frames from the OS or
+    // libc could be using stack tagging.)
+    SuspendTagCheckingScope s;
+    IteratePointersInStack(visitor,
+                           reinterpret_cast<const void* const*>(stack_end),
+                           stack->stack_start_, asan_fake_stack);
 
-  for (const auto& segment : stack->inactive_stacks_) {
-    IteratePointersInStack(visitor, segment.top, segment.start,
-                           asan_fake_stack);
+    for (const auto& segment : stack->inactive_stacks_) {
+      IteratePointersInStack(visitor, segment.top, segment.start,
+                             asan_fake_stack);
+    }
+
+    IterateUnsafeStackIfNecessary(visitor);
   }
-
-  IterateUnsafeStackIfNecessary(visitor);
 }
 
-void Stack::IteratePointers(StackVisitor* visitor) const {
-  DCHECK(IsOnCurrentStack(stack_start_));
-  // The trampoline expects a Stack* as a first parameter and a callback taking
-  // a Stack*, not a const Stack*. It is safe to cast both below, as pointer
-  // iteration does not modify the stack object.
-  PushAllRegistersAndIterateStack(
-      const_cast<Stack*>(this), static_cast<void*>(visitor),
-      reinterpret_cast<Stack::IterateStackCallback>(&IteratePointersImpl));
-  // No need to deal with callee-saved registers as they will be kept alive by
-  // the regular conservative stack iteration.
-  // TODO(chromium:1056170): Add support for SIMD and/or filtering.
-  IterateUnsafeStackIfNecessary(visitor);
+void Stack::IteratePointersForTesting(StackVisitor* visitor) {
+  SetMarkerAndCallback(
+      [this, visitor]() { IteratePointersUntilMarker(visitor); });
 }
 
 void Stack::IteratePointersUntilMarker(StackVisitor* visitor) const {
@@ -211,6 +209,7 @@ void Stack::ClearStackSegments() { inactive_stacks_.clear(); }
 void Stack::SetMarkerAndCallbackHelper(void* argument,
                                        IterateStackCallback callback) {
   PushAllRegistersAndIterateStack(this, argument, callback);
+  // TODO(chromium:1056170): Add support for SIMD and/or filtering.
 }
 
 }  // namespace heap::base

@@ -7,6 +7,8 @@
 d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
 const debug = false;
+// Use consecutive values as parameters for easier debugging.
+const easyValues = false;
 
 // This test tests the wasm-to-js wrapper with random signatures and random
 // values. The test creates a WebAssembly function with the random signature.
@@ -21,6 +23,13 @@ const debug = false;
 // for debugging a specific signature. `GenerateAndRunTest` additionally
 // generates the inputs for `RunTest`, which is good for fuzzing the js-to-wasm
 // wrappers.
+
+// Some documentation if the test fails in the CQ.
+console.log("This test is a fuzzer, it tests the generic wasm-to-js wrapper");
+console.log("with random signatures. If this test fails, then it may not fail");
+console.log("for the CL that actually introduced the issue, but for a");
+console.log("later CL in the CQ. You may want to use flako to identify that");
+console.log("actual culprit.");
 
 const kPossibleTypes = [kWasmI32, kWasmI64, kWasmF32, kWasmF64, kWasmExternRef];
 
@@ -154,9 +163,26 @@ interestingParams[kWasmExternRef] = [
 
 function GenerateValueArray(params) {
   let result = [];
+  let nextValue = 1;
   for (let param of params) {
-    result.push(interestingParams[param][getRandomInt(
+    if (easyValues) {
+      switch (param) {
+        case kWasmI32:
+        case kWasmF32:
+        case kWasmF64:
+          result.push(nextValue++);
+          break;
+        case kWasmI64:
+          result.push(BigInt(nextValue++));
+          break;
+        case kWasmExternRef:
+          const val = nextValue++;
+          result.push({ val: val });
+      }
+    } else {
+      result.push(interestingParams[param][getRandomInt(
         interestingParams[param].length)]);
+    }
   }
   return result;
 }
@@ -167,13 +193,13 @@ function assertValueArray(original, transformed) {
     const arg = transformed[i];
     if (typeof arg === 'bigint') {
       // For values of type I64.
-      assertEquals(arg, BigInt(original[i]));
+      assertEquals(BigInt(original[i]), arg);
     } else if (typeof arg === 'number') {
       // For values of type I32, F32, and F64.
-      assertEquals(arg, Number(original[i]));
+      assertEquals(Number(original[i]), arg);
     } else {
       // For values of type externref.
-      assertEquals(arg, original[i]);
+      assertEquals(original[i], arg);
     }
   }
 }
@@ -192,7 +218,7 @@ function RunTest(params, returns) {
       }
     }
     testcase += ']);';
-    print(testcase);
+    console.log(testcase);
   }
 
   const builder = new WasmModuleBuilder();
@@ -215,7 +241,7 @@ function RunTest(params, returns) {
 
   const sig = makeSig(params, returns);
   builder.addFunction('main', sig).addBody(body).exportFunc();
-  const instance = builder.instantiate({m: {f: impFunction}});
+  const instance = builder.instantiate({ m: { f: impFunction } });
   let result = instance.exports.main(...paramValues);
   if (returns.length === 0) return;
   if (returns.length === 1) result = [result];
@@ -240,8 +266,14 @@ function GenerateAndRunTest() {
   }
   RunTest(params, returns);
 }
+// Regression tests:
+RunTest(
+    [
+      kWasmF32, kWasmF64, kWasmF64, kWasmF32, kWasmI32, kWasmI64, kWasmF32,
+      kWasmF64, kWasmF64, kWasmF64, kWasmF32, kWasmF32
+    ],
+    [kWasmI64, kWasmI64, kWasmI32, kWasmF32]);
 
-RunTest([], []);
-for (let i = 0; i < 2; ++i) {
+for (let i = 0; i < (debug ? 200 : 2); ++i) {
   GenerateAndRunTest();
 }

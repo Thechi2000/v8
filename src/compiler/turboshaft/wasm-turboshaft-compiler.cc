@@ -33,9 +33,6 @@ wasm::WasmCompilationResult ExecuteTurboshaftWasmCompilation(
       GetDebugName(&zone, env->module, data.wire_bytes_storage,
                    data.func_index),
       &zone, CodeKind::WASM_FUNCTION);
-  if (env->runtime_exception_support) {
-    info.set_wasm_runtime_exception_support();
-  }
 
   if (info.trace_turbo_json()) {
     TurboCfgFile tcf;
@@ -51,9 +48,8 @@ wasm::WasmCompilationResult ExecuteTurboshaftWasmCompilation(
   data.assumptions = new wasm::AssumptionsJournal();
   auto call_descriptor = GetWasmCallDescriptor(&zone, data.func_body.sig);
 
-  if (!Pipeline::GenerateWasmCodeFromTurboshaftGraph(&info, env, data, mcgraph,
-                                                     data.func_body, detected,
-                                                     call_descriptor)) {
+  if (!Pipeline::GenerateWasmCodeFromTurboshaftGraph(
+          &info, env, data, mcgraph, detected, call_descriptor)) {
     delete data.assumptions;
     return {};
   }

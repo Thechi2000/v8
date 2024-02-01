@@ -72,8 +72,8 @@ v8::Local<v8::Script> BytecodeExpectationsPrinter::CompileScript(
 
 v8::Local<v8::Module> BytecodeExpectationsPrinter::CompileModule(
     const char* program) const {
-  ScriptOrigin origin(isolate_, Local<v8::Value>(), 0, 0, false, -1,
-                      Local<v8::Value>(), false, false, true);
+  ScriptOrigin origin(Local<v8::Value>(), 0, 0, false, -1, Local<v8::Value>(),
+                      false, false, true);
   v8::ScriptCompiler::Source source(V8StringFromUTF8(program), origin);
   return v8::ScriptCompiler::CompileModule(isolate_, &source).ToLocalChecked();
 }
@@ -284,8 +284,8 @@ void BytecodeExpectationsPrinter::PrintSourcePosition(
   }
 }
 
-void BytecodeExpectationsPrinter::PrintV8String(std::ostream* stream,
-                                                i::String string) const {
+void BytecodeExpectationsPrinter::PrintV8String(
+    std::ostream* stream, i::Tagged<i::String> string) const {
   *stream << '"';
   for (int i = 0, length = string->length(); i < length; ++i) {
     *stream << i::AsEscapedUC16ForJSON(string->Get(i));
@@ -295,17 +295,17 @@ void BytecodeExpectationsPrinter::PrintV8String(std::ostream* stream,
 
 void BytecodeExpectationsPrinter::PrintConstant(
     std::ostream* stream, i::Handle<i::Object> constant) const {
-  if (constant->IsSmi()) {
+  if (IsSmi(*constant)) {
     *stream << "Smi [";
-    i::Smi::cast(*constant).SmiPrint(*stream);
+    i::Smi::SmiPrint(i::Smi::cast(*constant), *stream);
     *stream << "]";
   } else {
     *stream << i::HeapObject::cast(*constant)->map()->instance_type();
-    if (constant->IsHeapNumber()) {
+    if (IsHeapNumber(*constant)) {
       *stream << " [";
       i::HeapNumber::cast(*constant)->HeapNumberShortPrint(*stream);
       *stream << "]";
-    } else if (constant->IsString()) {
+    } else if (IsString(*constant)) {
       *stream << " [";
       PrintV8String(stream, i::String::cast(*constant));
       *stream << "]";
@@ -341,13 +341,13 @@ void BytecodeExpectationsPrinter::PrintBytecodeSequence(
 }
 
 void BytecodeExpectationsPrinter::PrintConstantPool(
-    std::ostream* stream, i::FixedArray constant_pool) const {
+    std::ostream* stream, i::Tagged<i::FixedArray> constant_pool) const {
   *stream << "constant pool: [\n";
   int num_constants = constant_pool->length();
   if (num_constants > 0) {
     for (int i = 0; i < num_constants; ++i) {
       *stream << kIndent;
-      PrintConstant(stream, i::FixedArray::get(constant_pool, i, i_isolate()));
+      PrintConstant(stream, handle(constant_pool->get(i), i_isolate()));
       *stream << ",\n";
     }
   }

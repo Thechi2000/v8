@@ -76,6 +76,8 @@ class MultiClientIsolateTest {
     return reinterpret_cast<Isolate*>(main_isolate_);
   }
 
+  int& main_isolate_wakeup_counter() { return main_isolate_wakeup_counter_; }
+
   v8::Isolate* NewClientIsolate() {
     CHECK_NOT_NULL(main_isolate_);
     std::unique_ptr<v8::ArrayBuffer::Allocator> allocator(
@@ -87,6 +89,7 @@ class MultiClientIsolateTest {
 
  private:
   v8::Isolate* main_isolate_;
+  int main_isolate_wakeup_counter_ = 0;
 };
 
 UNINITIALIZED_TEST(InPlaceInternalizableStringsAreShared) {
@@ -108,32 +111,32 @@ UNINITIALIZED_TEST(InPlaceInternalizableStringsAreShared) {
   // Old generation 1- and 2-byte seq strings are in-place internalizable.
   Handle<String> old_one_byte_seq =
       factory1->NewStringFromAsciiChecked(raw_one_byte, AllocationType::kOld);
-  CHECK(old_one_byte_seq->InSharedHeap());
+  CHECK(InAnySharedSpace(*old_one_byte_seq));
   Handle<String> old_two_byte_seq =
       factory1->NewStringFromTwoByte(two_byte, AllocationType::kOld)
           .ToHandleChecked();
-  CHECK(old_two_byte_seq->InSharedHeap());
+  CHECK(InAnySharedSpace(*old_two_byte_seq));
 
   // Young generation are not internalizable and not shared when sharing the
   // string table.
   Handle<String> young_one_byte_seq =
       factory1->NewStringFromAsciiChecked(raw_one_byte, AllocationType::kYoung);
-  CHECK(!young_one_byte_seq->InSharedHeap());
+  CHECK(!InAnySharedSpace(*young_one_byte_seq));
   Handle<String> young_two_byte_seq =
       factory1->NewStringFromTwoByte(two_byte, AllocationType::kYoung)
           .ToHandleChecked();
-  CHECK(!young_two_byte_seq->InSharedHeap());
+  CHECK(!InAnySharedSpace(*young_two_byte_seq));
 
   // Internalized strings are shared.
   uint64_t seed = HashSeed(i_isolate1);
   Handle<String> one_byte_intern = factory1->NewOneByteInternalizedString(
       base::OneByteVector(raw_one_byte),
       StringHasher::HashSequentialString<char>(raw_one_byte, 3, seed));
-  CHECK(one_byte_intern->InSharedHeap());
+  CHECK(InAnySharedSpace(*one_byte_intern));
   Handle<String> two_byte_intern = factory1->NewTwoByteInternalizedString(
       two_byte,
       StringHasher::HashSequentialString<uint16_t>(raw_two_byte, 3, seed));
-  CHECK(two_byte_intern->InSharedHeap());
+  CHECK(InAnySharedSpace(*two_byte_intern));
 }
 
 UNINITIALIZED_TEST(InPlaceInternalization) {
@@ -142,6 +145,8 @@ UNINITIALIZED_TEST(InPlaceInternalization) {
   v8_flags.shared_string_table = true;
 
   MultiClientIsolateTest test;
+  ManualGCScope manual_gc_scope(test.i_main_isolate());
+
   IsolateParkOnDisposeWrapper isolate_wrapper(test.NewClientIsolate(),
                                               test.main_isolate());
   Isolate* i_isolate1 = test.i_main_isolate();
@@ -167,10 +172,10 @@ UNINITIALIZED_TEST(InPlaceInternalization) {
       factory1->InternalizeString(old_one_byte_seq1);
   Handle<String> two_byte_intern1 =
       factory1->InternalizeString(old_two_byte_seq1);
-  CHECK(old_one_byte_seq1->InSharedHeap());
-  CHECK(old_two_byte_seq1->InSharedHeap());
-  CHECK(one_byte_intern1->InSharedHeap());
-  CHECK(two_byte_intern1->InSharedHeap());
+  CHECK(InAnySharedSpace(*old_one_byte_seq1));
+  CHECK(InAnySharedSpace(*old_two_byte_seq1));
+  CHECK(InAnySharedSpace(*one_byte_intern1));
+  CHECK(InAnySharedSpace(*two_byte_intern1));
   CHECK(old_one_byte_seq1.equals(one_byte_intern1));
   CHECK(old_two_byte_seq1.equals(two_byte_intern1));
   CHECK_EQ(*old_one_byte_seq1, *one_byte_intern1);
@@ -188,10 +193,10 @@ UNINITIALIZED_TEST(InPlaceInternalization) {
       factory2->InternalizeString(old_one_byte_seq2);
   Handle<String> two_byte_intern2 =
       factory2->InternalizeString(old_two_byte_seq2);
-  CHECK(old_one_byte_seq2->InSharedHeap());
-  CHECK(old_two_byte_seq2->InSharedHeap());
-  CHECK(one_byte_intern2->InSharedHeap());
-  CHECK(two_byte_intern2->InSharedHeap());
+  CHECK(InAnySharedSpace(*old_one_byte_seq2));
+  CHECK(InAnySharedSpace(*old_two_byte_seq2));
+  CHECK(InAnySharedSpace(*one_byte_intern2));
+  CHECK(InAnySharedSpace(*two_byte_intern2));
   CHECK(!old_one_byte_seq2.equals(one_byte_intern2));
   CHECK(!old_two_byte_seq2.equals(two_byte_intern2));
   CHECK_NE(*old_one_byte_seq2, *one_byte_intern2);
@@ -235,10 +240,10 @@ UNINITIALIZED_TEST(YoungInternalization) {
             .ToHandleChecked();
     one_byte_intern1 = factory1->InternalizeString(young_one_byte_seq1);
     two_byte_intern1 = factory1->InternalizeString(young_two_byte_seq1);
-    CHECK(!young_one_byte_seq1->InSharedHeap());
-    CHECK(!young_two_byte_seq1->InSharedHeap());
-    CHECK(one_byte_intern1->InSharedHeap());
-    CHECK(two_byte_intern1->InSharedHeap());
+    CHECK(!InAnySharedSpace(*young_one_byte_seq1));
+    CHECK(!InAnySharedSpace(*young_two_byte_seq1));
+    CHECK(InAnySharedSpace(*one_byte_intern1));
+    CHECK(InAnySharedSpace(*two_byte_intern1));
     CHECK(!young_one_byte_seq1.equals(one_byte_intern1));
     CHECK(!young_two_byte_seq1.equals(two_byte_intern1));
     CHECK_NE(*young_one_byte_seq1, *one_byte_intern1);
@@ -342,7 +347,7 @@ class ConcurrentInternalizationThread final
     CHECK(input_string->IsShared());
     Handle<String> interned = factory->InternalizeString(input_string);
     CHECK(interned->IsShared());
-    CHECK(interned->IsInternalizedString());
+    CHECK(IsInternalizedString(*interned));
     if (hit_or_miss_ == kTestMiss) {
       CHECK_EQ(*input_string, *interned);
     } else {
@@ -358,25 +363,28 @@ class ConcurrentInternalizationThread final
 
 namespace {
 
-Handle<String> CreateSharedOneByteString(Isolate* isolate, Factory* factory,
-                                         int length, bool internalize) {
+std::pair<Handle<String>, MaybeHandle<String>> CreateSharedOneByteString(
+    Isolate* isolate, Factory* factory, int length, bool internalize) {
   char* ascii = new char[length + 1];
   // Don't make single character strings, which will end up deduplicating to
   // an RO string and mess up the string table hit test.
   CHECK_GT(length, 1);
   for (int j = 0; j < length; j++) ascii[j] = 'a';
   ascii[length] = '\0';
+  MaybeHandle<String> internalized;
   if (internalize) {
     // When testing concurrent string table hits, pre-internalize a string
     // of the same contents so all subsequent internalizations are hits.
-    factory->InternalizeString(factory->NewStringFromAsciiChecked(ascii));
+    internalized =
+        factory->InternalizeString(factory->NewStringFromAsciiChecked(ascii));
+    CHECK(IsInternalizedString(*internalized.ToHandleChecked()));
   }
   Handle<String> string = String::Share(
       isolate, factory->NewStringFromAsciiChecked(ascii, AllocationType::kOld));
   delete[] ascii;
   CHECK(string->IsShared());
   string->EnsureHash();
-  return string;
+  return std::make_pair(string, internalized);
 }
 
 Handle<FixedArray> CreateSharedOneByteStrings(Isolate* isolate,
@@ -385,22 +393,34 @@ Handle<FixedArray> CreateSharedOneByteStrings(Isolate* isolate,
                                               bool internalize = false) {
   Handle<FixedArray> shared_strings =
       factory->NewFixedArray(count + lo_count, AllocationType::kSharedOld);
+  // Buffer to keep internalized strings alive in the current scope.
+  Handle<FixedArray> internalized_handles;
+  if (internalize) {
+    internalized_handles =
+        factory->NewFixedArray(count + lo_count, AllocationType::kOld);
+  }
   {
     // Create strings in their own scope to be able to delete and GC them.
     HandleScope scope(isolate);
     for (int i = 0; i < count; i++) {
       int length = i + min_length + 1;
-      Handle<String> string =
+      auto strings =
           CreateSharedOneByteString(isolate, factory, length, internalize);
-      shared_strings->set(i, *string);
+      shared_strings->set(i, *strings.first);
+      if (internalize) {
+        internalized_handles->set(i, *strings.second.ToHandleChecked());
+      }
     }
     int min_lo_length =
         isolate->heap()->MaxRegularHeapObjectSize(AllocationType::kOld) + 1;
     for (int i = 0; i < lo_count; i++) {
       int length = i + min_lo_length + 1;
-      Handle<String> string =
+      auto strings =
           CreateSharedOneByteString(isolate, factory, length, internalize);
-      shared_strings->set(count + i, *string);
+      shared_strings->set(count + i, *strings.first);
+      if (internalize) {
+        internalized_handles->set(count + i, *strings.second.ToHandleChecked());
+      }
     }
   }
   return shared_strings;
@@ -474,12 +494,13 @@ class ConcurrentStringTableLookupThread final
 
   void RunForString(Handle<String> input_string, int counter) override {
     CHECK(input_string->IsShared());
-    Object result = Object(StringTable::TryStringToIndexOrLookupExisting(
-        i_isolate, input_string->ptr()));
-    if (result.IsString()) {
-      String internalized = String::cast(result);
-      CHECK(internalized.IsInternalizedString());
-      CHECK_IMPLIES(input_string->IsInternalizedString(),
+    Tagged<Object> result =
+        Tagged<Object>(StringTable::TryStringToIndexOrLookupExisting(
+            i_isolate, input_string->ptr()));
+    if (IsString(result)) {
+      Tagged<String> internalized = String::cast(result);
+      CHECK(IsInternalizedString(internalized));
+      CHECK_IMPLIES(IsInternalizedString(*input_string),
                     *input_string == internalized);
     } else {
       CHECK_EQ(Smi::cast(result).value(), ResultSentinel::kNotFound);
@@ -552,8 +573,8 @@ Handle<String> ShareAndVerify(Isolate* isolate, Handle<String> string) {
   Handle<String> shared = String::Share(isolate, string);
   CHECK(shared->IsShared());
 #ifdef VERIFY_HEAP
-  shared->ObjectVerify(isolate);
-  string->ObjectVerify(isolate);
+  Object::ObjectVerify(*shared, isolate);
+  Object::ObjectVerify(*string, isolate);
 #endif  // VERIFY_HEAP
   return shared;
 }
@@ -708,8 +729,8 @@ UNINITIALIZED_TEST(StringShare) {
           i_isolate->main_thread_local_heap(),
           GarbageCollectionReason::kTesting);
     }
-    CHECK(one_byte_ext->IsExternalString());
-    CHECK(two_byte_ext->IsExternalString());
+    CHECK(IsExternalString(*one_byte_ext));
+    CHECK(IsExternalString(*two_byte_ext));
     CHECK(!one_byte_ext->IsShared());
     CHECK(!two_byte_ext->IsShared());
     Handle<String> shared_one_byte = ShareAndVerify(i_isolate, one_byte_ext);
@@ -766,7 +787,7 @@ UNINITIALIZED_TEST(StringShare) {
     Handle<String> cons =
         factory->NewConsString(one_byte_seq1, one_byte_seq2).ToHandleChecked();
     CHECK(!cons->IsShared());
-    CHECK(cons->IsConsString());
+    CHECK(IsConsString(*cons));
     Handle<String> shared = ShareAndVerify(i_isolate, cons);
     CheckSharedStringIsEqualCopy(shared, cons);
   }
@@ -779,7 +800,7 @@ UNINITIALIZED_TEST(StringShare) {
     Handle<String> sliced =
         factory->NewSubString(one_byte_seq, 1, one_byte_seq->length());
     CHECK(!sliced->IsShared());
-    CHECK(sliced->IsSlicedString());
+    CHECK(IsSlicedString(*sliced));
     Handle<String> shared = ShareAndVerify(i_isolate, sliced);
     CheckSharedStringIsEqualCopy(shared, sliced);
   }
@@ -901,7 +922,7 @@ UNINITIALIZED_TEST(PromotionScavengeOldToShared) {
     CHECK(MemoryChunk::FromHeapObject(*one_byte_seq)->InYoungGeneration());
 
     old_object->set(0, *one_byte_seq);
-    ObjectSlot slot = old_object->GetFirstElementAddress();
+    ObjectSlot slot = old_object->RawFieldOfFirstElement();
     CHECK(
         RememberedSet<OLD_TO_NEW>::Contains(old_object_chunk, slot.address()));
 
@@ -952,7 +973,7 @@ UNINITIALIZED_TEST(PromotionMarkCompactNewToShared) {
     CHECK(MemoryChunk::FromHeapObject(*one_byte_seq)->InYoungGeneration());
 
     old_object->set(0, *one_byte_seq);
-    ObjectSlot slot = old_object->GetFirstElementAddress();
+    ObjectSlot slot = old_object->RawFieldOfFirstElement();
     CHECK(
         RememberedSet<OLD_TO_NEW>::Contains(old_object_chunk, slot.address()));
 
@@ -1015,7 +1036,7 @@ UNINITIALIZED_TEST(PromotionMarkCompactOldToShared) {
     CHECK(heap->Contains(*one_byte_seq));
 
     old_object->set(0, *one_byte_seq);
-    ObjectSlot slot = old_object->GetFirstElementAddress();
+    ObjectSlot slot = old_object->RawFieldOfFirstElement();
     CHECK(
         !RememberedSet<OLD_TO_NEW>::Contains(old_object_chunk, slot.address()));
 
@@ -1068,7 +1089,7 @@ UNINITIALIZED_TEST(PagePromotionRecordingOldToShared) {
 
     Handle<String> shared_string = factory->NewStringFromAsciiChecked(
         raw_one_byte, AllocationType::kSharedOld);
-    CHECK(shared_string->InWritableSharedSpace());
+    CHECK(InWritableSharedSpace(*shared_string));
 
     young_object->set(0, *shared_string);
 
@@ -1081,17 +1102,26 @@ UNINITIALIZED_TEST(PagePromotionRecordingOldToShared) {
 
     // Since the GC promoted that string into shared heap, it also needs to
     // create an OLD_TO_SHARED slot.
-    ObjectSlot slot = young_object->GetFirstElementAddress();
+    ObjectSlot slot = young_object->RawFieldOfFirstElement();
     CHECK(RememberedSet<OLD_TO_SHARED>::Contains(
         MemoryChunk::FromHeapObject(*young_object), slot.address()));
   }
 }
 
+namespace {
+
+void TriggerGCWithTransitions(Heap* heap) {
+  v8_flags.transition_strings_during_gc_with_stack = true;
+  heap::CollectSharedGarbage(heap);
+  v8_flags.transition_strings_during_gc_with_stack = false;
+}
+
+}  // namespace
+
 UNINITIALIZED_TEST(InternalizedSharedStringsTransitionDuringGC) {
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
-  v8_flags.transition_strings_during_gc_with_stack = true;
 
   constexpr int kStrings = 4096;
   constexpr int kLOStrings = 16;
@@ -1113,13 +1143,13 @@ UNINITIALIZED_TEST(InternalizedSharedStringsTransitionDuringGC) {
                                   i_isolate);
       Handle<String> interned = factory->InternalizeString(input_string);
       CHECK(input_string->IsShared());
-      CHECK(!input_string->IsThinString());
+      CHECK(!IsThinString(*input_string));
       CHECK(input_string->HasForwardingIndex(kAcquireLoad));
       CHECK(String::Equals(i_isolate, input_string, interned));
     }
 
     // Trigger garbage collection on the shared isolate.
-    heap::CollectSharedGarbage(i_isolate->heap());
+    TriggerGCWithTransitions(i_isolate->heap());
 
     // Check that GC cleared the forwarding table.
     CHECK_EQ(i_isolate->string_forwarding_table()->size(), 0);
@@ -1128,7 +1158,7 @@ UNINITIALIZED_TEST(InternalizedSharedStringsTransitionDuringGC) {
     for (int i = 0; i < shared_strings->length(); i++) {
       Handle<String> input_string(String::cast(shared_strings->get(i)),
                                   i_isolate);
-      CHECK(input_string->IsThinString());
+      CHECK(IsThinString(*input_string));
     }
   }
 }
@@ -1160,7 +1190,7 @@ UNINITIALIZED_TEST(ShareExternalString) {
         i_isolate1->main_thread_local_heap(),
         GarbageCollectionReason::kTesting);
   }
-  CHECK(one_byte->IsExternalString());
+  CHECK(IsExternalString(*one_byte));
   Handle<ExternalOneByteString> one_byte_external =
       Handle<ExternalOneByteString>::cast(one_byte);
   Handle<String> shared_one_byte =
@@ -1222,8 +1252,8 @@ UNINITIALIZED_TEST(ExternalizeSharedString) {
   TwoByteResource* two_byte_res = resource_factory.CreateTwoByte(two_byte_vec);
   shared_one_byte->MakeExternal(one_byte_res);
   shared_two_byte->MakeExternal(two_byte_res);
-  CHECK(!shared_one_byte->IsExternalString());
-  CHECK(!shared_two_byte->IsExternalString());
+  CHECK(!IsExternalString(*shared_one_byte));
+  CHECK(!IsExternalString(*shared_two_byte));
   CHECK(shared_one_byte->HasExternalForwardingIndex(kAcquireLoad));
   CHECK(shared_two_byte->HasExternalForwardingIndex(kAcquireLoad));
 
@@ -1236,7 +1266,6 @@ UNINITIALIZED_TEST(ExternalizedSharedStringsTransitionDuringGC) {
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
-  v8_flags.transition_strings_during_gc_with_stack = true;
 
   ExternalResourceFactory resource_factory;
   MultiClientIsolateTest test;
@@ -1253,7 +1282,7 @@ UNINITIALIZED_TEST(ExternalizedSharedStringsTransitionDuringGC) {
   for (int run = 0; run < 2; run++) {
     Handle<FixedArray> shared_strings = CreateSharedOneByteStrings(
         i_isolate, factory, kStrings - kLOStrings, kLOStrings,
-        ExternalString::kUncachedSize, run == 0);
+        sizeof(UncachedExternalString), run == 0);
 
     // Check strings are in the forwarding table after internalization.
     for (int i = 0; i < shared_strings->length(); i++) {
@@ -1267,13 +1296,12 @@ UNINITIALIZED_TEST(ExternalizedSharedStringsTransitionDuringGC) {
           resource_factory.CreateOneByte(buffer, length, false);
       CHECK(input_string->MakeExternal(resource));
       CHECK(input_string->IsShared());
-      CHECK(!input_string->IsExternalString());
+      CHECK(!IsExternalString(*input_string));
       CHECK(input_string->HasExternalForwardingIndex(kAcquireLoad));
     }
 
     // Trigger garbage collection on the shared isolate.
-    i_isolate->heap()->CollectGarbageShared(i_isolate->main_thread_local_heap(),
-                                            GarbageCollectionReason::kTesting);
+    TriggerGCWithTransitions(i_isolate->heap());
 
     // Check that GC cleared the forwarding table.
     CHECK_EQ(i_isolate->string_forwarding_table()->size(), 0);
@@ -1282,7 +1310,7 @@ UNINITIALIZED_TEST(ExternalizedSharedStringsTransitionDuringGC) {
     for (int i = 0; i < shared_strings->length(); i++) {
       Handle<String> input_string(String::cast(shared_strings->get(i)),
                                   i_isolate);
-      CHECK(input_string->IsExternalString());
+      CHECK(IsExternalString(*input_string));
     }
   }
 }
@@ -1322,8 +1350,8 @@ UNINITIALIZED_TEST(ExternalizeInternalizedString) {
         i_isolate1->main_thread_local_heap(),
         GarbageCollectionReason::kTesting);
   }
-  CHECK(one_byte->IsThinString());
-  CHECK(two_byte->IsThinString());
+  CHECK(IsThinString(*one_byte));
+  CHECK(IsThinString(*two_byte));
   CHECK(one_byte_intern->IsOneByteRepresentation());
   CHECK(two_byte_intern->IsTwoByteRepresentation());
   CHECK(one_byte_intern->IsShared());
@@ -1336,8 +1364,8 @@ UNINITIALIZED_TEST(ExternalizeInternalizedString) {
   TwoByteResource* two_byte_res = resource_factory.CreateTwoByte(two_byte_vec);
   CHECK(one_byte_intern->MakeExternal(one_byte_res));
   CHECK(two_byte_intern->MakeExternal(two_byte_res));
-  CHECK(!one_byte_intern->IsExternalString());
-  CHECK(!two_byte_intern->IsExternalString());
+  CHECK(!IsExternalString(*one_byte_intern));
+  CHECK(!IsExternalString(*two_byte_intern));
   CHECK(one_byte_intern->HasExternalForwardingIndex(kAcquireLoad));
   CHECK(two_byte_intern->HasExternalForwardingIndex(kAcquireLoad));
   // The hash of internalized strings is stored in the forwarding table.
@@ -1354,7 +1382,6 @@ UNINITIALIZED_TEST(InternalizeSharedExternalString) {
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
-  v8_flags.transition_strings_during_gc_with_stack = true;
 
   ExternalResourceFactory resource_factory;
   MultiClientIsolateTest test;
@@ -1384,23 +1411,23 @@ UNINITIALIZED_TEST(InternalizeSharedExternalString) {
   CHECK(shared_two_byte->HasExternalForwardingIndex(kAcquireLoad));
 
   // Trigger GC to externalize the shared string.
-  i_isolate1->heap()->CollectGarbageShared(i_isolate1->main_thread_local_heap(),
-                                           GarbageCollectionReason::kTesting);
+  TriggerGCWithTransitions(i_isolate1->heap());
+
   CHECK(shared_one_byte->IsShared());
-  CHECK(shared_one_byte->IsExternalString());
+  CHECK(IsExternalString(*shared_one_byte));
   CHECK(shared_two_byte->IsShared());
-  CHECK(shared_two_byte->IsExternalString());
+  CHECK(IsExternalString(*shared_two_byte));
 
   // Shared cached external strings are in-place internalizable.
   Handle<String> one_byte_intern = factory1->InternalizeString(shared_one_byte);
   CHECK_EQ(*one_byte_intern, *shared_one_byte);
-  CHECK(shared_one_byte->IsExternalString());
-  CHECK(shared_one_byte->IsInternalizedString());
+  CHECK(IsExternalString(*shared_one_byte));
+  CHECK(IsInternalizedString(*shared_one_byte));
 
   // Depending on the architecture/build options the two byte string might be
   // cached or uncached.
   const bool is_uncached =
-      two_byte->Size() < ExternalString::kSizeOfAllExternalStrings;
+      two_byte->Size() < static_cast<int>(sizeof(ExternalString));
 
   if (is_uncached) {
     // Shared uncached external strings are not internalizable. A new internal
@@ -1408,28 +1435,28 @@ UNINITIALIZED_TEST(InternalizeSharedExternalString) {
     Handle<String> two_byte_intern = factory1->InternalizeString(two_byte);
     CHECK_NE(*two_byte_intern, *shared_two_byte);
     CHECK(shared_two_byte->HasInternalizedForwardingIndex(kAcquireLoad));
-    CHECK(two_byte_intern->IsInternalizedString());
-    CHECK(!two_byte_intern->IsExternalString());
+    CHECK(IsInternalizedString(*two_byte_intern));
+    CHECK(!IsExternalString(*two_byte_intern));
   } else {
     Handle<String> two_byte_intern = factory1->InternalizeString(two_byte);
     CHECK_EQ(*two_byte_intern, *shared_two_byte);
-    CHECK(shared_two_byte->IsExternalString());
-    CHECK(shared_two_byte->IsInternalizedString());
+    CHECK(IsExternalString(*shared_two_byte));
+    CHECK(IsInternalizedString(*shared_two_byte));
   }
 
   // Another GC should create an externalized internalized string of the cached
   // (one byte) string and turn the uncached (two byte) string into a
   // ThinString, disposing the external resource.
-  i_isolate1->heap()->CollectGarbageShared(i_isolate1->main_thread_local_heap(),
-                                           GarbageCollectionReason::kTesting);
+  TriggerGCWithTransitions(i_isolate1->heap());
+
   CHECK_EQ(shared_one_byte->map()->instance_type(),
-           InstanceType::EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE);
+           InstanceType::EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE);
   if (is_uncached) {
-    CHECK(shared_two_byte->IsThinString());
+    CHECK(IsThinString(*shared_two_byte));
     CHECK(two_byte_res->IsDisposed());
   } else {
     CHECK_EQ(shared_two_byte->map()->instance_type(),
-             InstanceType::EXTERNAL_INTERNALIZED_STRING_TYPE);
+             InstanceType::EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE);
   }
 }
 
@@ -1461,7 +1488,7 @@ UNINITIALIZED_TEST(ExternalizeAndInternalizeMissSharedString) {
 
   Handle<String> one_byte_intern = factory1->InternalizeString(shared_one_byte);
   CHECK_EQ(*one_byte_intern, *shared_one_byte);
-  CHECK(shared_one_byte->IsInternalizedString());
+  CHECK(IsInternalizedString(*shared_one_byte));
   // Check that we have both, a forwarding index and an accessible hash.
   CHECK(shared_one_byte->HasExternalForwardingIndex(kAcquireLoad));
   CHECK(shared_one_byte->HasHashCode());
@@ -1618,13 +1645,13 @@ void CreateExternalResources(Isolate* i_isolate, Handle<FixedArray> strings,
 }
 
 void CheckStringAndResource(
-    String string, int index, bool should_be_alive, String deleted_string,
-    bool check_transition, bool shared_resources,
+    Tagged<String> string, int index, bool should_be_alive,
+    Tagged<String> deleted_string, bool check_transition, bool shared_resources,
     const std::vector<std::unique_ptr<ConcurrentExternalizationThread>>&
         threads) {
   if (check_transition) {
     if (should_be_alive) {
-      CHECK(string.IsExternalString());
+      CHECK(IsExternalString(string));
     } else {
       CHECK_EQ(string, deleted_string);
     }
@@ -1665,7 +1692,6 @@ void TestConcurrentExternalization(bool share_resources) {
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
-  v8_flags.transition_strings_during_gc_with_stack = true;
 
   ExternalResourceFactory resource_factory;
   MultiClientIsolateTest test;
@@ -1681,7 +1707,7 @@ void TestConcurrentExternalization(bool share_resources) {
 
   Handle<FixedArray> shared_strings = CreateSharedOneByteStrings(
       i_isolate, factory, kStrings - kLOStrings, kLOStrings,
-      ExternalString::kUncachedSize, false);
+      sizeof(UncachedExternalString), false);
 
   ParkingSemaphore sema_ready(0);
   ParkingSemaphore sema_execute_start(0);
@@ -1720,15 +1746,13 @@ void TestConcurrentExternalization(bool share_resources) {
     sema_execute_complete.ParkedWait(local_isolate);
   }
 
-  i_isolate->heap()->CollectGarbageShared(i_isolate->main_thread_local_heap(),
-                                          GarbageCollectionReason::kTesting);
+  TriggerGCWithTransitions(i_isolate->heap());
 
   for (int i = 0; i < shared_strings->length(); i++) {
     Handle<String> input_string(String::cast(shared_strings->get(i)),
                                 i_isolate);
-    String string = *input_string;
-    CheckStringAndResource(string, i, true, String{}, true, share_resources,
-                           threads);
+    Tagged<String> string = *input_string;
+    CheckStringAndResource(string, i, true, {}, true, share_resources, threads);
   }
 
   ParkingThread::ParkedJoinAll(local_isolate, threads);
@@ -1747,7 +1771,6 @@ void TestConcurrentExternalizationWithDeadStrings(bool share_resources,
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
-  v8_flags.transition_strings_during_gc_with_stack = transition_with_stack;
 
   ExternalResourceFactory resource_factory;
   MultiClientIsolateTest test;
@@ -1759,11 +1782,14 @@ void TestConcurrentExternalizationWithDeadStrings(bool share_resources,
   Isolate* i_isolate = test.i_main_isolate();
   Factory* factory = i_isolate->factory();
 
+  ManualGCScope manual_gc_scope(i_isolate);
+  DisableConservativeStackScanningScopeForTesting no_css(i_isolate->heap());
+
   HandleScope scope(i_isolate);
 
   Handle<FixedArray> shared_strings = CreateSharedOneByteStrings(
       i_isolate, factory, kStrings - kLOStrings, kLOStrings,
-      ExternalString::kUncachedSize, false);
+      sizeof(UncachedExternalString), false);
 
   ParkingSemaphore sema_ready(0);
   ParkingSemaphore sema_execute_start(0);
@@ -1815,6 +1841,7 @@ void TestConcurrentExternalizationWithDeadStrings(bool share_resources,
     }
   }
 
+  v8_flags.transition_strings_during_gc_with_stack = transition_with_stack;
   i_isolate->heap()->CollectGarbageShared(i_isolate->main_thread_local_heap(),
                                           GarbageCollectionReason::kTesting);
 
@@ -1822,7 +1849,7 @@ void TestConcurrentExternalizationWithDeadStrings(bool share_resources,
     Handle<String> input_string(String::cast(shared_strings->get(i)),
                                 i_isolate);
     const bool should_be_alive = i % 3 != 0;
-    String string = *input_string;
+    Tagged<String> string = *input_string;
     CheckStringAndResource(string, i, should_be_alive, *empty_string,
                            transition_with_stack, share_resources, threads);
   }
@@ -1840,7 +1867,7 @@ void TestConcurrentExternalizationWithDeadStrings(bool share_resources,
       Handle<String> input_string(String::cast(shared_strings->get(i)),
                                   i_isolate);
       const bool should_be_alive = i % 3 != 0;
-      String string = *input_string;
+      Tagged<String> string = *input_string;
       CheckStringAndResource(string, i, should_be_alive, *empty_string, true,
                              share_resources, threads);
     }
@@ -1872,7 +1899,6 @@ void TestConcurrentExternalizationAndInternalization(
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
 
   v8_flags.shared_string_table = true;
-  v8_flags.transition_strings_during_gc_with_stack = true;
 
   ExternalResourceFactory resource_factory;
   MultiClientIsolateTest test;
@@ -1891,7 +1917,7 @@ void TestConcurrentExternalizationAndInternalization(
 
   Handle<FixedArray> shared_strings = CreateSharedOneByteStrings(
       i_isolate, factory, kStrings - kLOStrings, kLOStrings,
-      ExternalString::kUncachedSize, hit_or_miss == kTestHit);
+      sizeof(UncachedExternalString), hit_or_miss == kTestHit);
 
   ParkingSemaphore sema_ready(0);
   ParkingSemaphore sema_execute_start(0);
@@ -1926,15 +1952,14 @@ void TestConcurrentExternalizationAndInternalization(
     sema_execute_complete.ParkedWait(local_isolate);
   }
 
-  i_isolate->heap()->CollectGarbageShared(i_isolate->main_thread_local_heap(),
-                                          GarbageCollectionReason::kTesting);
+  TriggerGCWithTransitions(i_isolate->heap());
 
   for (int i = 0; i < shared_strings->length(); i++) {
     Handle<String> input_string(String::cast(shared_strings->get(i)),
                                 i_isolate);
-    String string = *input_string;
+    Tagged<String> string = *input_string;
     if (hit_or_miss == kTestHit) {
-      CHECK(string.IsThinString());
+      CHECK(IsThinString(string));
       string = ThinString::cast(string)->actual();
     }
     int alive_resources = 0;
@@ -1980,9 +2005,8 @@ UNINITIALIZED_TEST(SharedStringInGlobalHandle) {
   HandleScope handle_scope(i_isolate);
   Handle<String> shared_string =
       factory->NewStringFromAsciiChecked("foobar", AllocationType::kSharedOld);
-  CHECK(shared_string->InWritableSharedSpace());
-  v8::Local<v8::String> lh_shared_string =
-      Utils::Convert<String, v8::String>(shared_string);
+  CHECK(InWritableSharedSpace(*shared_string));
+  v8::Local<v8::String> lh_shared_string = Utils::ToLocal(shared_string);
   v8::Global<v8::String> gh_shared_string(test.main_isolate(),
                                           lh_shared_string);
   gh_shared_string.SetWeak();
@@ -1994,20 +2018,20 @@ UNINITIALIZED_TEST(SharedStringInGlobalHandle) {
 
 class WakeupTask : public CancelableTask {
  public:
-  explicit WakeupTask(Isolate* isolate) : CancelableTask(isolate) {}
+  explicit WakeupTask(Isolate* isolate, int& wakeup_counter)
+      : CancelableTask(isolate), wakeup_counter_(wakeup_counter) {}
 
  private:
   // v8::internal::CancelableTask overrides.
-  void RunInternal() override {}
+  void RunInternal() override { (wakeup_counter_)++; }
+
+  int& wakeup_counter_;
 };
 
 class WorkerIsolateThread : public v8::base::Thread {
  public:
-  WorkerIsolateThread(const char* name, MultiClientIsolateTest* test,
-                      std::atomic<bool>* done)
-      : v8::base::Thread(base::Thread::Options(name)),
-        test_(test),
-        done_(done) {}
+  WorkerIsolateThread(const char* name, MultiClientIsolateTest* test)
+      : v8::base::Thread(base::Thread::Options(name)), test_(test) {}
 
   void Run() override {
     v8::Isolate* client = test_->NewClientIsolate();
@@ -2020,9 +2044,8 @@ class WorkerIsolateThread : public v8::base::Thread {
       HandleScope handle_scope(i_client);
       Handle<String> shared_string = factory->NewStringFromAsciiChecked(
           "foobar", AllocationType::kSharedOld);
-      CHECK(shared_string->InWritableSharedSpace());
-      v8::Local<v8::String> lh_shared_string =
-          Utils::Convert<String, v8::String>(shared_string);
+      CHECK(InWritableSharedSpace(*shared_string));
+      v8::Local<v8::String> lh_shared_string = Utils::ToLocal(shared_string);
       gh_shared_string.Reset(test_->main_isolate(), lh_shared_string);
       gh_shared_string.SetWeak();
     }
@@ -2038,16 +2061,14 @@ class WorkerIsolateThread : public v8::base::Thread {
     CHECK(gh_shared_string.IsEmpty());
     client->Dispose();
 
-    *done_ = true;
-
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
  private:
   MultiClientIsolateTest* test_;
-  std::atomic<bool>* done_;
 };
 
 UNINITIALIZED_TEST(SharedStringInClientGlobalHandle) {
@@ -2056,11 +2077,11 @@ UNINITIALIZED_TEST(SharedStringInClientGlobalHandle) {
   v8_flags.shared_string_table = true;
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
-  WorkerIsolateThread thread("worker", &test, &done);
+  ManualGCScope manual_gc_scope(test.i_main_isolate());
+  WorkerIsolateThread thread("worker", &test);
   CHECK(thread.Start());
 
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2073,11 +2094,9 @@ class ClientIsolateThreadForPagePromotions : public v8::base::Thread {
  public:
   ClientIsolateThreadForPagePromotions(const char* name,
                                        MultiClientIsolateTest* test,
-                                       std::atomic<bool>* done,
                                        Handle<String>* shared_string)
       : v8::base::Thread(base::Thread::Options(name)),
         test_(test),
-        done_(done),
         shared_string_(shared_string) {}
 
   void Run() override {
@@ -2117,23 +2136,21 @@ class ClientIsolateThreadForPagePromotions : public v8::base::Thread {
 
       // Since the GC promoted that string into shared heap, it also needs to
       // create an OLD_TO_SHARED slot.
-      ObjectSlot slot = young_object->GetFirstElementAddress();
+      ObjectSlot slot = young_object->RawFieldOfFirstElement();
       CHECK(RememberedSet<OLD_TO_SHARED>::Contains(
           MemoryChunk::FromHeapObject(*young_object), slot.address()));
     }
 
     client->Dispose();
 
-    *done_ = true;
-
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
  private:
   MultiClientIsolateTest* test_;
-  std::atomic<bool>* done_;
   Handle<String>* shared_string_;
 };
 
@@ -2149,7 +2166,6 @@ UNINITIALIZED_TEST(RegisterOldToSharedForPromotedPageFromClient) {
       manual_evacuation_candidate_selection_scope(manual_gc_scope);
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
 
   Isolate* i_isolate = test.i_main_isolate();
   Isolate* shared_isolate = i_isolate->shared_space_isolate();
@@ -2163,11 +2179,10 @@ UNINITIALIZED_TEST(RegisterOldToSharedForPromotedPageFromClient) {
           raw_one_byte, AllocationType::kSharedOld);
   CHECK(shared_heap->Contains(*shared_string));
 
-  ClientIsolateThreadForPagePromotions thread("worker", &test, &done,
-                                              &shared_string);
+  ClientIsolateThreadForPagePromotions thread("worker", &test, &shared_string);
   CHECK(thread.Start());
 
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2192,7 +2207,6 @@ UNINITIALIZED_TEST(
               // task.
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
 
   Isolate* i_isolate = test.i_main_isolate();
   Isolate* shared_isolate = i_isolate->shared_space_isolate();
@@ -2220,11 +2234,10 @@ UNINITIALIZED_TEST(
                    i::GarbageCollectionReason::kTesting);
   }
 
-  ClientIsolateThreadForPagePromotions thread("worker", &test, &done,
-                                              &shared_string);
+  ClientIsolateThreadForPagePromotions thread("worker", &test, &shared_string);
   CHECK(thread.Start());
 
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2236,11 +2249,10 @@ UNINITIALIZED_TEST(
 class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
  public:
   ClientIsolateThreadForRetainingByRememberedSet(
-      const char* name, MultiClientIsolateTest* test, std::atomic<bool>* done,
+      const char* name, MultiClientIsolateTest* test,
       Persistent<v8::String>* weak_ref)
       : v8::base::Thread(base::Thread::Options(name)),
         test_(test),
-        done_(done),
         weak_ref_(weak_ref) {}
 
   void Run() override {
@@ -2250,11 +2262,8 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
     Factory* factory = i_client->factory();
     Heap* heap = i_client->heap();
 
-    // Cache the thread's task runner.
-    task_runner_ =
-        V8::GetCurrentPlatform()->GetForegroundTaskRunner(client_isolate_);
-
     {
+      v8::Isolate::Scope isolate_scope(client_isolate_);
       HandleScope scope(i_client);
 
       Handle<FixedArray> young_object =
@@ -2288,13 +2297,13 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
       CHECK_IMPLIES(!v8_flags.verify_heap, heap->sweeping_in_progress());
 
       // Inform main thread that the client is set up and is doing a GC.
-      *done_ = true;
       V8::GetCurrentPlatform()
           ->GetForegroundTaskRunner(test_->main_isolate())
-          ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+          ->PostTask(std::make_unique<WakeupTask>(
+              test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
 
       // Wait for main thread to do a shared GC.
-      while (*done_) {
+      while (wakeup_counter_ < 1) {
         v8::platform::PumpMessageLoop(
             i::V8::GetCurrentPlatform(), isolate(),
             v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2302,7 +2311,7 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
 
       // Since the GC promoted that string into shared heap, it also needs to
       // create an OLD_TO_SHARED slot.
-      ObjectSlot slot = young_object->GetFirstElementAddress();
+      ObjectSlot slot = young_object->RawFieldOfFirstElement();
       CHECK(RememberedSet<OLD_TO_SHARED>::Contains(
           MemoryChunk::FromHeapObject(*young_object), slot.address()));
     }
@@ -2310,10 +2319,10 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
     client_isolate_->Dispose();
 
     // Inform main thread that client is finished.
-    *done_ = true;
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
   v8::Isolate* isolate() const {
@@ -2321,17 +2330,13 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
     return client_isolate_;
   }
 
-  std::shared_ptr<v8::TaskRunner> task_runner() const {
-    DCHECK_NOT_NULL(task_runner_);
-    return task_runner_;
-  }
+  int& wakeup_counter() { return wakeup_counter_; }
 
  private:
   MultiClientIsolateTest* test_;
-  std::atomic<bool>* done_;
   Persistent<v8::String>* weak_ref_;
   v8::Isolate* client_isolate_;
-  std::shared_ptr<v8::TaskRunner> task_runner_;
+  int wakeup_counter_ = 0;
 };
 
 UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
@@ -2346,7 +2351,6 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
       manual_evacuation_candidate_selection_scope(manual_gc_scope);
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
 
   v8::Isolate* isolate = test.main_isolate();
   Isolate* i_isolate = test.i_main_isolate();
@@ -2380,12 +2384,12 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
     dead_weak_ref.SetWeak();
   }
 
-  ClientIsolateThreadForRetainingByRememberedSet thread("worker", &test, &done,
+  ClientIsolateThreadForRetainingByRememberedSet thread("worker", &test,
                                                         &live_weak_ref);
   CHECK(thread.Start());
 
   // Wait for client isolate to allocate objects and start a GC.
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2399,16 +2403,14 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
   CHECK(!live_weak_ref.IsEmpty());
   CHECK(dead_weak_ref.IsEmpty());
 
-  // Inform client that shared GC is finished. It is possible that the thread
-  // has already finished, after setting done to false and before we post the
-  // task; we use the thread's cached task runner and we construct the wake up
-  // task beforehand, to prevent a crash in that case.
+  // Inform client that shared GC is finished.
   auto thread_wakeup_task = std::make_unique<WakeupTask>(
-      reinterpret_cast<Isolate*>(thread.isolate()));
-  done = false;
-  thread.task_runner()->PostTask(std::move(thread_wakeup_task));
+      reinterpret_cast<Isolate*>(thread.isolate()), thread.wakeup_counter());
+  V8::GetCurrentPlatform()
+      ->GetForegroundTaskRunner(thread.isolate())
+      ->PostTask(std::move(thread_wakeup_task));
 
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 2) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2420,11 +2422,8 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
 class Regress1424955ClientIsolateThread : public v8::base::Thread {
  public:
   Regress1424955ClientIsolateThread(const char* name,
-                                    MultiClientIsolateTest* test,
-                                    std::atomic<bool>* done)
-      : v8::base::Thread(base::Thread::Options(name)),
-        test_(test),
-        done_(done) {}
+                                    MultiClientIsolateTest* test)
+      : v8::base::Thread(base::Thread::Options(name)), test_(test) {}
 
   void Run() override {
     client_isolate_ = test_->NewClientIsolate();
@@ -2446,10 +2445,10 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
       CHECK(i_client_heap->sweeping_in_progress());
 
       // Inform the initiator thread it's time to request a global safepoint.
-      *done_ = true;
       V8::GetCurrentPlatform()
           ->GetForegroundTaskRunner(test_->main_isolate())
-          ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+          ->PostTask(std::make_unique<WakeupTask>(
+              test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
 
       // Wait for the initiator thread to request a global safepoint.
       while (!i_client->shared_space_isolate()
@@ -2465,7 +2464,7 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
     }
 
     // Wait for the initiator isolate to finish the shared GC.
-    while (*done_) {
+    while (wakeup_counter_ < 1) {
       v8::platform::PumpMessageLoop(
           i::V8::GetCurrentPlatform(), client_isolate_,
           v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2473,10 +2472,10 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
 
     client_isolate_->Dispose();
 
-    *done_ = true;
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
   v8::Isolate* isolate() const {
@@ -2484,10 +2483,12 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
     return client_isolate_;
   }
 
+  int& wakeup_counter() { return wakeup_counter_; }
+
  private:
   MultiClientIsolateTest* test_;
-  std::atomic<bool>* done_;
   v8::Isolate* client_isolate_;
+  int wakeup_counter_ = 0;
 };
 
 UNINITIALIZED_TEST(Regress1424955) {
@@ -2502,12 +2503,11 @@ UNINITIALIZED_TEST(Regress1424955) {
   ManualGCScope manual_gc_scope;
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
-  Regress1424955ClientIsolateThread thread("worker", &test, &done);
+  Regress1424955ClientIsolateThread thread("worker", &test);
   CHECK(thread.Start());
 
   // Wait for client thread to start sweeping.
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2516,14 +2516,14 @@ UNINITIALIZED_TEST(Regress1424955) {
   // Client isolate waits for this isolate to request a global safepoint and
   // then triggers a minor GC.
   heap::CollectSharedGarbage(test.i_main_isolate()->heap());
-  done = false;
   V8::GetCurrentPlatform()
       ->GetForegroundTaskRunner(thread.isolate())
       ->PostTask(std::make_unique<WakeupTask>(
-          reinterpret_cast<Isolate*>(thread.isolate())));
+          reinterpret_cast<Isolate*>(thread.isolate()),
+          thread.wakeup_counter()));
 
   // Wait for client isolate to finish the minor GC and dispose of its isolate.
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 2) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2536,13 +2536,11 @@ class ProtectExternalStringTableAddStringClientIsolateThread
     : public v8::base::Thread {
  public:
   ProtectExternalStringTableAddStringClientIsolateThread(
-      const char* name, MultiClientIsolateTest* test, v8::Isolate* isolate,
-      std::atomic<bool>* done)
+      const char* name, MultiClientIsolateTest* test, v8::Isolate* isolate)
       : v8::base::Thread(base::Thread::Options(name)),
         test_(test),
         isolate_(isolate),
-        i_isolate_(reinterpret_cast<Isolate*>(isolate)),
-        done_(done) {}
+        i_isolate_(reinterpret_cast<Isolate*>(isolate)) {}
 
   void Run() override {
     const char* text = "worker_external_string";
@@ -2555,26 +2553,25 @@ class ProtectExternalStringTableAddStringClientIsolateThread
         Handle<String> string =
             i_isolate_->factory()->NewStringFromAsciiChecked(
                 text, AllocationType::kOld);
-        CHECK(string->InWritableSharedSpace());
+        CHECK(InWritableSharedSpace(*string));
         CHECK(!string->IsShared());
         CHECK(string->MakeExternal(new StaticOneByteResource(text)));
-        CHECK(string->IsExternalOneByteString());
+        CHECK(IsExternalOneByteString(*string));
       }
     }
 
     isolate_->Dispose();
 
-    *done_ = true;
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
  private:
   MultiClientIsolateTest* test_;
   v8::Isolate* isolate_;
   Isolate* i_isolate_;
-  std::atomic<bool>* done_;
 };
 
 UNINITIALIZED_TEST(ProtectExternalStringTableAddString) {
@@ -2584,10 +2581,9 @@ UNINITIALIZED_TEST(ProtectExternalStringTableAddString) {
   ManualGCScope manual_gc_scope;
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
   v8::Isolate* client = test.NewClientIsolate();
   ProtectExternalStringTableAddStringClientIsolateThread thread("worker", &test,
-                                                                client, &done);
+                                                                client);
   CHECK(thread.Start());
   Isolate* isolate = test.i_main_isolate();
   HandleScope scope(isolate);
@@ -2600,7 +2596,7 @@ UNINITIALIZED_TEST(ProtectExternalStringTableAddString) {
   }
 
   // Wait for client isolate to finish the minor GC and dispose of its isolate.
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);

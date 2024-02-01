@@ -80,8 +80,8 @@ let kWasmFunctionTypeForm = 0x60;
 let kWasmStructTypeForm = 0x5f;
 let kWasmArrayTypeForm = 0x5e;
 let kWasmSubtypeForm = 0x50;
-let kWasmSubtypeFinalForm = 0x4e;
-let kWasmRecursiveTypeGroupForm = 0x4f;
+let kWasmSubtypeFinalForm = 0x4f;
+let kWasmRecursiveTypeGroupForm = 0x4e;
 
 let kNoSuperType = 0xFFFFFFFF;
 
@@ -115,24 +115,25 @@ let kWasmI64 = 0x7e;
 let kWasmF32 = 0x7d;
 let kWasmF64 = 0x7c;
 let kWasmS128 = 0x7b;
-let kWasmI8 = 0x7a;
-let kWasmI16 = 0x79;
+let kWasmI8 = 0x78;
+let kWasmI16 = 0x77;
 
 // These are defined as negative integers to distinguish them from positive type
 // indices.
+let kWasmNullFuncRef = -0x0d;
+let kWasmNullExternRef = -0x0e;
+let kWasmNullRef = -0x0f;
 let kWasmFuncRef = -0x10;
 let kWasmAnyFunc = kWasmFuncRef;  // Alias named as in the JS API spec
 let kWasmExternRef = -0x11;
 let kWasmAnyRef = -0x12;
 let kWasmEqRef = -0x13;
-let kWasmI31Ref = -0x16;
-let kWasmNullExternRef = -0x17;
-let kWasmNullFuncRef = -0x18;
-let kWasmStructRef = -0x19;
-let kWasmArrayRef = -0x1a;
-let kWasmNullRef = -0x1b;
-let kWasmStringRef = -0x1c;
-let kWasmStringViewWtf8 = -0x1d;
+let kWasmI31Ref = -0x14;
+let kWasmStructRef = -0x15;
+let kWasmArrayRef = -0x16;
+let kWasmExnRef = -0x17;
+let kWasmStringRef = -0x19;
+let kWasmStringViewWtf8 = -0x1a;
 let kWasmStringViewWtf16 = -0x1e;
 let kWasmStringViewIter = -0x1f;
 
@@ -148,14 +149,15 @@ let kNullExternRefCode = kWasmNullExternRef & kLeb128Mask;
 let kNullFuncRefCode = kWasmNullFuncRef & kLeb128Mask;
 let kStructRefCode = kWasmStructRef & kLeb128Mask;
 let kArrayRefCode = kWasmArrayRef & kLeb128Mask;
+let kExnRefCode = kWasmExnRef & kLeb128Mask;
 let kNullRefCode = kWasmNullRef & kLeb128Mask;
 let kStringRefCode = kWasmStringRef & kLeb128Mask;
 let kStringViewWtf8Code = kWasmStringViewWtf8 & kLeb128Mask;
 let kStringViewWtf16Code = kWasmStringViewWtf16 & kLeb128Mask;
 let kStringViewIterCode = kWasmStringViewIter & kLeb128Mask;
 
-let kWasmRefNull = 0x6c;
-let kWasmRef = 0x6b;
+let kWasmRefNull = 0x63;
+let kWasmRef = 0x64;
 function wasmRefNullType(heap_type) {
   return {opcode: kWasmRefNull, heap_type: heap_type};
 }
@@ -262,6 +264,8 @@ const kWasmOpcodes = {
   'If': 0x04,
   'Else': 0x05,
   'Try': 0x06,
+  'TryTable': 0x1f,
+  'ThrowRef': 0x0a,
   'Catch': 0x07,
   'Throw': 0x08,
   'Rethrow': 0x09,
@@ -449,9 +453,9 @@ const kWasmOpcodes = {
   'RefNull': 0xd0,
   'RefIsNull': 0xd1,
   'RefFunc': 0xd2,
-  'RefAsNonNull': 0xd3,
-  'BrOnNull': 0xd4,
-  'RefEq': 0xd5,
+  'RefEq': 0xd3,
+  'RefAsNonNull': 0xd4,
+  'BrOnNull': 0xd5,
   'BrOnNonNull': 0xd6
 };
 
@@ -492,57 +496,41 @@ function GCInstr(opcode) {
 }
 
 // GC opcodes
-let kExprStructGet = 0x03;
-let kExprStructGetS = 0x04;
-let kExprStructGetU = 0x05;
-let kExprStructSet = 0x06;
-let kExprStructNew = 0x07;
-let kExprStructNewDefault = 0x08;
-let kExprArrayGet = 0x13;
-let kExprArrayGetS = 0x14;
-let kExprArrayGetU = 0x15;
-let kExprArraySet = 0x16;
-let kExprArrayCopy = 0x18;
-let kExprArrayLen = 0x19;
-let kExprArrayNewFixed = 0x1a;
-let kExprArrayNew = 0x1b;
-let kExprArrayNewDefault = 0x1c;
-let kExprArrayNewData = 0x1d;
-let kExprArrayNewElem = 0x1f;
-let kExprArrayInitData = 0x54;
-let kExprArrayInitElem = 0x55;
-let kExprArrayFill = 0x0f;
-let kExprI31New = 0x20;
-let kExprI31GetS = 0x21;
-let kExprI31GetU = 0x22;
-let kExprRefTest = 0x40;
-let kExprRefTestNull = 0x48;
-let kExprRefTestDeprecated = 0x44;
-let kExprRefCast = 0x41;
-let kExprRefCastNull = 0x49;
-let kExprRefCastDeprecated = 0x45;
-let kExprBrOnCast = 0x42;
-let kExprBrOnCastNull = 0x4a;
-let kExprBrOnCastDeprecated = 0x46;
-let kExprBrOnCastFail = 0x43;
-let kExprBrOnCastFailNull = 0x4b;
-let kExprBrOnCastGeneric = 0x4e;
-let kExprBrOnCastFailGeneric = 0x4f;
+let kExprStructNew = 0x00;
+let kExprStructNewDefault = 0x01;
+let kExprStructGet = 0x02;
+let kExprStructGetS = 0x03;
+let kExprStructGetU = 0x04;
+let kExprStructSet = 0x05;
+let kExprArrayNew = 0x06;
+let kExprArrayNewDefault = 0x07;
+let kExprArrayNewFixed = 0x08;
+let kExprArrayNewData = 0x09;
+let kExprArrayNewElem = 0x0a;
+let kExprArrayGet = 0x0b;
+let kExprArrayGetS = 0x0c;
+let kExprArrayGetU = 0x0d;
+let kExprArraySet = 0x0e;
+let kExprArrayLen = 0x0f;
+let kExprArrayFill = 0x10;
+let kExprArrayCopy = 0x11;
+let kExprArrayInitData = 0x12;
+let kExprArrayInitElem = 0x13;
+let kExprRefTest = 0x14;
+let kExprRefTestNull = 0x15;
+let kExprRefCast = 0x16;
+let kExprRefCastNull = 0x17;
+let kExprBrOnCastGeneric = 0x18;      // TODO(14034): Drop "Generic" name.
+let kExprBrOnCastFailGeneric = 0x19;  // TODO(14034): Drop "Generic" name.
+let kExprAnyConvertExtern = 0x1a;
+let kExprExternConvertAny = 0x1b;
+let kExprRefI31 = 0x1c;
+let kExprI31GetS = 0x1d;
+let kExprI31GetU = 0x1e;
+
 let kExprRefCastNop = 0x4c;
-let kExprRefIsData = 0x51;
-let kExprRefIsI31 = 0x52;
-let kExprRefIsArray = 0x53;
-let kExprRefAsStruct = 0x59;
-let kExprRefAsI31 = 0x5a;
-let kExprRefAsArray = 0x5b;
-let kExprBrOnStruct = 0x61;
-let kExprBrOnI31 = 0x62;
-let kExprBrOnArray = 0x66;
-let kExprBrOnNonStruct = 0x64;
-let kExprBrOnNonI31 = 0x65;
-let kExprBrOnNonArray = 0x67;
-let kExprExternInternalize = 0x70;
-let kExprExternExternalize = 0x71;
+
+// Stringref proposal.
 let kExprStringNewUtf8 = 0x80;
 let kExprStringNewWtf16 = 0x81;
 let kExprStringConst = 0x82;
@@ -963,6 +951,16 @@ let kTrapArrayTooLarge = 12;
 let kTrapArrayOutOfBounds = 13;
 let kTrapNullDereference = 14;
 let kTrapIllegalCast = 15;
+
+let kAtomicWaitOk = 0;
+let kAtomicWaitNotEqual = 1;
+let kAtomicWaitTimedOut = 2;
+
+// Exception handling with exnref.
+let kCatchNoRef = 0x0;
+let kCatchRef = 0x1;
+let kCatchAllNoRef = 0x2;
+let kCatchAllRef = 0x3;
 
 let kTrapMsgs = [
   'unreachable',                                    // --
@@ -1502,6 +1500,7 @@ class WasmModuleBuilder {
           'Add imported memories before declared memories to avoid messing ' +
           'up the indexes');
     }
+    let mem_index = this.imports.filter(i => i.kind == kExternalMemory).length;
     let o = {
       module: module,
       name: name,
@@ -1512,7 +1511,7 @@ class WasmModuleBuilder {
       is_memory64: !!is_memory64
     };
     this.imports.push(o);
-    return this;
+    return mem_index;
   }
 
   addImportedTable(module, name, initial, maximum, type) {
@@ -2138,8 +2137,8 @@ class WasmModuleBuilder {
     return Array.from(this.toBuffer(debug));
   }
 
-  instantiate(ffi) {
-    let module = this.toModule();
+  instantiate(ffi, options) {
+    let module = this.toModule(options);
     let instance = new WebAssembly.Instance(module, ffi);
     return instance;
   }
@@ -2149,13 +2148,13 @@ class WasmModuleBuilder {
         .then(({module, instance}) => instance);
   }
 
-  toModule(debug = false) {
-    return new WebAssembly.Module(this.toBuffer(debug));
+  toModule(options, debug = false) {
+    return new WebAssembly.Module(this.toBuffer(debug), options);
   }
 }
 
 function wasmSignedLeb(val, max_len = 5) {
-  if (val == null) throw new Error("Leb value many not be null/undefined");
+  if (val == null) throw new Error("Leb value may not be null/undefined");
   let res = [];
   for (let i = 0; i < max_len; ++i) {
     let v = val & 0x7f;
@@ -2172,7 +2171,7 @@ function wasmSignedLeb(val, max_len = 5) {
 }
 
 function wasmSignedLeb64(val, max_len = 10) {
-  if (val == null) throw new Error("Leb value many not be null/undefined");
+  if (val == null) throw new Error("Leb value may not be null/undefined");
   if (typeof val != "bigint") {
     if (val < Math.pow(2, 31)) {
       return wasmSignedLeb(val, max_len);
@@ -2183,7 +2182,7 @@ function wasmSignedLeb64(val, max_len = 10) {
   for (let i = 0; i < max_len; ++i) {
     let v = val & 0x7fn;
     // If {v} sign-extended from 7 to 32 bits is equal to val, we are done.
-    if (((v << 25n) >> 25n) == val) {
+    if (BigInt.asIntN(7, v) == val) {
       res.push(Number(v));
       return res;
     }
@@ -2283,4 +2282,18 @@ let [wasmBrOnCast, wasmBrOnCastFail] = (function() {
 
 function getOpcodeName(opcode) {
   return globalThis.kWasmOpcodeNames?.[opcode] ?? 'unknown';
+}
+
+// Make a wasm export "promising" using JS Promise Integration.
+function ToPromising(wasm_export) {
+  let sig = wasm_export.type();
+  assertTrue(sig.parameters.length > 0);
+  assertEquals('externref', sig.parameters[0]);
+  let wrapper_sig = {
+    parameters: sig.parameters.slice(1),
+    results: ['externref']
+  };
+  return new WebAssembly.Function(
+      wrapper_sig, wasm_export, {promising: 'first'});
+
 }

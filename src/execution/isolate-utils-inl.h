@@ -13,20 +13,19 @@
 namespace v8 {
 namespace internal {
 
-V8_INLINE Heap* GetHeapFromWritableObject(HeapObject object) {
+V8_INLINE Heap* GetHeapFromWritableObject(Tagged<HeapObject> object) {
   // Avoid using the below GetIsolateFromWritableObject because we want to be
   // able to get the heap, but not the isolate, for off-thread objects.
 
 #if defined V8_ENABLE_THIRD_PARTY_HEAP
   return Heap::GetIsolateFromWritableObject(object)->heap();
 #else
-  heap_internals::MemoryChunk* chunk =
-      heap_internals::MemoryChunk::FromHeapObject(object);
+  MemoryChunkHeader* chunk = MemoryChunkHeader::FromHeapObject(object);
   return chunk->GetHeap();
 #endif  // V8_ENABLE_THIRD_PARTY_HEAP
 }
 
-V8_INLINE Isolate* GetIsolateFromWritableObject(HeapObject object) {
+V8_INLINE Isolate* GetIsolateFromWritableObject(Tagged<HeapObject> object) {
 #ifdef V8_ENABLE_THIRD_PARTY_HEAP
   return Heap::GetIsolateFromWritableObject(object);
 #else
@@ -34,13 +33,22 @@ V8_INLINE Isolate* GetIsolateFromWritableObject(HeapObject object) {
 #endif  // V8_ENABLE_THIRD_PARTY_HEAP
 }
 
-V8_INLINE bool GetIsolateFromHeapObject(HeapObject object, Isolate** isolate) {
+V8_INLINE Heap* GetHeapFromWritableObject(const HeapObjectLayout& object) {
+  return GetHeapFromWritableObject(Tagged(&object));
+}
+
+V8_INLINE Isolate* GetIsolateFromWritableObject(
+    const HeapObjectLayout& object) {
+  return GetIsolateFromWritableObject(Tagged(&object));
+}
+
+V8_INLINE bool GetIsolateFromHeapObject(Tagged<HeapObject> object,
+                                        Isolate** isolate) {
 #ifdef V8_ENABLE_THIRD_PARTY_HEAP
   *isolate = Heap::GetIsolateFromWritableObject(object);
   return true;
 #else
-  heap_internals::MemoryChunk* chunk =
-      heap_internals::MemoryChunk::FromHeapObject(object);
+  MemoryChunkHeader* chunk = MemoryChunkHeader::FromHeapObject(object);
   if (chunk->InReadOnlySpace()) {
     *isolate = nullptr;
     return false;
@@ -52,7 +60,7 @@ V8_INLINE bool GetIsolateFromHeapObject(HeapObject object, Isolate** isolate) {
 
 // Use this function instead of Internals::GetIsolateForSandbox for internal
 // code, as this function is fully inlinable.
-V8_INLINE static Isolate* GetIsolateForSandbox(HeapObject object) {
+V8_INLINE static Isolate* GetIsolateForSandbox(Tagged<HeapObject> object) {
 #ifdef V8_ENABLE_SANDBOX
   return GetIsolateFromWritableObject(object);
 #else

@@ -18,6 +18,7 @@
 #include "src/heap/remembered-set.h"
 #include "src/heap/safepoint.h"
 #include "src/heap/spaces-inl.h"
+#include "src/heap/trusted-range.h"
 #include "src/objects/objects-inl.h"
 #include "test/unittests/heap/heap-utils.h"
 #include "test/unittests/test-utils.h"
@@ -192,22 +193,29 @@ TEST_F(HeapTest, HeapLayout) {
     EXPECT_TRUE(IsAligned(code_cage_base, size_t{4} * GB));
   }
 
+#if V8_ENABLE_SANDBOX
+  Address trusted_space_base =
+      TrustedRange::GetProcessWideTrustedRange()->base();
+  EXPECT_TRUE(IsAligned(trusted_space_base, size_t{4} * GB));
+  base::AddressRegion trusted_reservation(trusted_space_base, size_t{4} * GB);
+#endif
+
   // Check that all memory chunks belong this region.
   base::AddressRegion heap_reservation(cage_base, size_t{4} * GB);
   base::AddressRegion code_reservation(code_cage_base, size_t{4} * GB);
 
   IsolateSafepointScope scope(i_isolate()->heap());
   OldGenerationMemoryChunkIterator iter(i_isolate()->heap());
-  for (;;) {
-    MemoryChunk* chunk = iter.next();
-    if (chunk == nullptr) break;
-
+  while (MemoryChunk* chunk = iter.next()) {
     Address address = chunk->address();
     size_t size = chunk->area_end() - address;
     AllocationSpace owner_id = chunk->owner_identity();
-    if (V8_EXTERNAL_CODE_SPACE_BOOL &&
-        (owner_id == CODE_SPACE || owner_id == CODE_LO_SPACE)) {
+    if (V8_EXTERNAL_CODE_SPACE_BOOL && IsAnyCodeSpace(owner_id)) {
       EXPECT_TRUE(code_reservation.contains(address, size));
+#if V8_ENABLE_SANDBOX
+    } else if (IsAnyTrustedSpace(owner_id)) {
+      EXPECT_TRUE(trusted_reservation.contains(address, size));
+#endif
     } else {
       EXPECT_TRUE(heap_reservation.contains(address, size));
     }
@@ -227,7 +235,7 @@ void ShrinkNewSpace(NewSpace* new_space) {
   Heap* heap = paged_new_space->heap();
   heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
   GCTracer* tracer = heap->tracer();
-  tracer->StartObservablePause();
+  tracer->StartObservablePause(base::TimeTicks::Now());
   tracer->StartCycle(GarbageCollector::MARK_COMPACTOR,
                      GarbageCollectionReason::kTesting, "heap unittest",
                      GCTracer::MarkingType::kAtomic);
@@ -255,7 +263,8 @@ void ShrinkNewSpace(NewSpace* new_space) {
     page->SetLiveBytes(0);
   }
   tracer->StopAtomicPause();
-  tracer->StopObservablePause();
+  tracer->StopObservablePause(GarbageCollector::MARK_COMPACTOR,
+                              base::TimeTicks::Now());
   tracer->NotifyFullSweepingCompleted();
 }
 }  // namespace
@@ -391,7 +400,7 @@ TEST_F(HeapTest, OptimizedAllocationAlwaysInNewSpace) {
 
 namespace {
 template <RememberedSetType direction>
-static size_t GetRememberedSetSize(HeapObject obj) {
+static size_t GetRememberedSetSize(Tagged<HeapObject> obj) {
   size_t count = 0;
   auto chunk = MemoryChunk::FromHeapObject(obj);
   RememberedSet<direction>::Iterate(
@@ -466,12 +475,12 @@ TEST_F(HeapTest, Regress978156) {
   // 3. Trim the last array by one word thus creating a one-word filler.
   Handle<FixedArray> last = arrays.back();
   CHECK_GT(last->length(), 0);
-  heap->RightTrimFixedArray(*last, 1);
+  heap->RightTrimArray(*last, last->length() - 1, last->length());
   // 4. Get the last filler on the page.
-  HeapObject filler = HeapObject::FromAddress(
+  Tagged<HeapObject> filler = HeapObject::FromAddress(
       MemoryChunk::FromHeapObject(*last)->area_end() - kTaggedSize);
   HeapObject::FromAddress(last->address() + last->Size());
-  CHECK(filler.IsFiller());
+  CHECK(IsFiller(filler));
   // 5. Start incremental marking.
   i::IncrementalMarking* marking = heap->incremental_marking();
   if (marking->IsStopped()) {

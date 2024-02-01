@@ -7,10 +7,7 @@
 #include "src/handles/maybe-handles.h"
 #include "src/objects/shared-function-info-inl.h"
 
-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
-// architectures.
-#include "src/flags/flags.h"
-#if ENABLE_SPARKPLUG
+#ifdef V8_ENABLE_SPARKPLUG
 
 #include "src/baseline/baseline-assembler-inl.h"
 #include "src/baseline/baseline-compiler.h"
@@ -22,7 +19,8 @@
 namespace v8 {
 namespace internal {
 
-bool CanCompileWithBaseline(Isolate* isolate, SharedFunctionInfo shared) {
+bool CanCompileWithBaseline(Isolate* isolate,
+                            Tagged<SharedFunctionInfo> shared) {
   DisallowGarbageCollection no_gc;
 
   // Check that baseline compiler is enabled.
@@ -42,11 +40,11 @@ bool CanCompileWithBaseline(Isolate* isolate, SharedFunctionInfo shared) {
 
   if (auto debug_info = shared->TryGetDebugInfo(isolate)) {
     // Functions with breakpoints have to stay interpreted.
-    if (debug_info->HasBreakInfo()) return false;
+    if (debug_info.value()->HasBreakInfo()) return false;
 
     // Functions with instrumented bytecode can't be baseline compiled since the
     // baseline code's bytecode array pointer is immutable.
-    if (debug_info->HasInstrumentedBytecodeArray()) return false;
+    if (debug_info.value()->HasInstrumentedBytecodeArray()) return false;
   }
 
   // Do not baseline compile if function doesn't pass sparkplug_filter.
@@ -64,7 +62,7 @@ MaybeHandle<Code> GenerateBaselineCode(Isolate* isolate,
   compiler.GenerateCode();
   MaybeHandle<Code> code = compiler.Build(local_isolate);
   if (v8_flags.print_code && !code.is_null()) {
-    code.ToHandleChecked()->Print();
+    Print(*code.ToHandleChecked());
   }
   return code;
 }
@@ -81,7 +79,8 @@ void EmitReturnBaseline(MacroAssembler* masm) {
 namespace v8 {
 namespace internal {
 
-bool CanCompileWithBaseline(Isolate* isolate, SharedFunctionInfo shared) {
+bool CanCompileWithBaseline(Isolate* isolate,
+                            Tagged<SharedFunctionInfo> shared) {
   return false;
 }
 

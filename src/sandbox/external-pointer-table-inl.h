@@ -44,6 +44,12 @@ void ExternalPointerTableEntry::SetExternalPointer(Address value,
   MaybeUpdateRawPointerForLSan(value);
 }
 
+bool ExternalPointerTableEntry::HasExternalPointer(
+    ExternalPointerTag tag) const {
+  auto payload = payload_.load(std::memory_order_relaxed);
+  return tag == kAnyExternalPointerTag || payload.IsTaggedWith(tag);
+}
+
 Address ExternalPointerTableEntry::ExchangeExternalPointer(
     Address value, ExternalPointerTag tag) {
   DCHECK_EQ(0, value & kExternalPointerTagMask);
@@ -91,6 +97,11 @@ void ExternalPointerTableEntry::MakeEvacuationEntry(Address handle_location) {
   payload_.store(new_payload, std::memory_order_relaxed);
 }
 
+bool ExternalPointerTableEntry::HasEvacuationEntry() const {
+  auto payload = payload_.load(std::memory_order_relaxed);
+  return payload.ContainsEvacuationEntry();
+}
+
 void ExternalPointerTableEntry::UnmarkAndMigrateInto(
     ExternalPointerTableEntry& other) {
   auto payload = payload_.load(std::memory_order_relaxed);
@@ -122,6 +133,23 @@ void ExternalPointerTableEntry::UnmarkAndMigrateInto(
 Address ExternalPointerTable::Get(ExternalPointerHandle handle,
                                   ExternalPointerTag tag) const {
   uint32_t index = HandleToIndex(handle);
+#if defined(V8_USE_ADDRESS_SANITIZER)
+  // We rely on the tagging scheme to produce non-canonical addresses when an
+  // entry isn't tagged with the expected tag. Such "safe" crashes can then be
+  // filtered out by our sandbox crash filter. However, when ASan is active, it
+  // may perform its shadow memory access prior to the actual memory access.
+  // For a non-canonical address, this can lead to a segfault at a _canonical_
+  // address, which our crash filter can then not distinguish from a "real"
+  // crash. Therefore, in ASan builds, we perform an additional CHECK here that
+  // the entry is tagged with the expected tag. The resulting CHECK failure
+  // will then be ignored by the crash filter.
+  // This check is, however, not needed when accessing the null entry, as that
+  // is always valid (it just contains nullptr).
+  CHECK(index == 0 || at(index).HasExternalPointer(tag));
+#else
+  // Otherwise, this is just a DCHECK.
+  DCHECK(index == 0 || at(index).HasExternalPointer(tag));
+#endif
   return at(index).GetExternalPointer(tag);
 }
 
@@ -168,16 +196,27 @@ ExternalPointerHandle ExternalPointerTable::AllocateAndInitializeEntry(
 void ExternalPointerTable::Mark(Space* space, ExternalPointerHandle handle,
                                 Address handle_location) {
   DCHECK(space->BelongsTo(this));
+
+  // The handle_location must always contain the given handle. Except:
+  // - If the slot is lazily-initialized, the handle may transition from the
+  //   null handle to a valid handle. In that case, we'll return from this
+  //   function early (see below), which is fine since the newly-allocated
+  //   entry will already have been marked as alive during allocation.
+  // - If the slot is de-initialized, i.e. reset to the null handle. In that
+  //   case, we'll still mark the old entry as alive and potentially mark it for
+  //   evacuation. Both of these things are fine though: the entry is just kept
+  //   alive a little longer and compaction will detect that the slot has been
+  //   de-initialized and not perform the evacuation.
+#ifdef DEBUG
+  ExternalPointerHandle current_handle = base::AsAtomic32::Acquire_Load(
+      reinterpret_cast<ExternalPointerHandle*>(handle_location));
+  DCHECK(handle == kNullExternalPointerHandle ||
+         current_handle == kNullExternalPointerHandle ||
+         handle == current_handle);
+#endif
+
   // The null entry is immortal and immutable, so no need to mark it as alive.
   if (handle == kNullExternalPointerHandle) return;
-
-  // The handle_location must contain the given handle. The only exception to
-  // this is when the handle is zero, which may mean that it hasn't yet been
-  // initialized. However, in that case we'll have already returned from this
-  // function above.
-  DCHECK(handle ==
-         base::AsAtomic32::Acquire_Load(
-             reinterpret_cast<ExternalPointerHandle*>(handle_location)));
 
   uint32_t index = HandleToIndex(handle);
   DCHECK(space->Contains(index));
@@ -234,7 +273,8 @@ void ExternalPointerTable::MaybeCreateEvacuationEntry(Space* space,
   }
 }
 
-bool ExternalPointerTable::IsValidHandle(ExternalPointerHandle handle) const {
+// static
+bool ExternalPointerTable::IsValidHandle(ExternalPointerHandle handle) {
 #ifdef DEBUG
   handle &= ~kVisitedHandleMarker;
 #endif  // DEBUG
@@ -242,8 +282,8 @@ bool ExternalPointerTable::IsValidHandle(ExternalPointerHandle handle) const {
   return handle == index << kExternalPointerIndexShift;
 }
 
-uint32_t ExternalPointerTable::HandleToIndex(
-    ExternalPointerHandle handle) const {
+// static
+uint32_t ExternalPointerTable::HandleToIndex(ExternalPointerHandle handle) {
   DCHECK(IsValidHandle(handle));
   uint32_t index = handle >> kExternalPointerIndexShift;
 #if defined(LEAK_SANITIZER)
@@ -262,18 +302,20 @@ uint32_t ExternalPointerTable::HandleToIndex(
   return index;
 }
 
-ExternalPointerHandle ExternalPointerTable::IndexToHandle(
-    uint32_t index) const {
+// static
+ExternalPointerHandle ExternalPointerTable::IndexToHandle(uint32_t index) {
   DCHECK_LE(index, kMaxExternalPointers);
   ExternalPointerHandle handle = index << kExternalPointerIndexShift;
 #if defined(LEAK_SANITIZER)
   handle *= 2;
 #endif  // LEAK_SANITIZER
+  DCHECK_NE(handle, kNullExternalPointerHandle);
   return handle;
 }
 
 void ExternalPointerTable::Space::StartCompacting(
     uint32_t start_of_evacuation_area) {
+  DCHECK_EQ(invalidated_fields_.size(), 0);
   start_of_evacuation_area_.store(start_of_evacuation_area,
                                   std::memory_order_relaxed);
 }
@@ -300,6 +342,31 @@ bool ExternalPointerTable::Space::IsCompacting() {
 bool ExternalPointerTable::Space::CompactingWasAborted() {
   auto value = start_of_evacuation_area_.load(std::memory_order_relaxed);
   return (value & kCompactionAbortedMarker) == kCompactionAbortedMarker;
+}
+
+void ExternalPointerTable::Space::NotifyExternalPointerFieldInvalidated(
+    Address field_address) {
+#ifdef DEBUG
+  ExternalPointerHandle handle = base::AsAtomic32::Acquire_Load(
+      reinterpret_cast<ExternalPointerHandle*>(field_address));
+  DCHECK(Contains(HandleToIndex(handle)));
+#endif
+  if (IsCompacting()) {
+    base::MutexGuard guard(&invalidated_fields_mutex_);
+    invalidated_fields_.push_back(field_address);
+  }
+}
+
+bool ExternalPointerTable::Space::FieldWasInvalidated(
+    Address field_address) const {
+  invalidated_fields_mutex_.AssertHeld();
+  return std::find(invalidated_fields_.begin(), invalidated_fields_.end(),
+                   field_address) != invalidated_fields_.end();
+}
+
+void ExternalPointerTable::Space::ClearInvalidatedFields() {
+  invalidated_fields_mutex_.AssertHeld();
+  invalidated_fields_.clear();
 }
 
 }  // namespace internal

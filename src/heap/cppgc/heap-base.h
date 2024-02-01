@@ -246,15 +246,23 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle {
     --no_gc_scope_;
   }
 
+  void EnterDisallowGCScope() { ++disallow_gc_scope_; }
+  void LeaveDisallowGCScope() {
+    DCHECK_GT(disallow_gc_scope_, 0);
+    --disallow_gc_scope_;
+  }
+
   using HeapHandle::is_incremental_marking_in_progress;
 
  protected:
   static std::unique_ptr<PageBackend> InitializePageBackend(
-      PageAllocator& allocator, FatalOutOfMemoryHandler& oom_handler);
+      PageAllocator& allocator);
 
   // Used by the incremental scheduler to finalize a GC if supported.
   virtual void FinalizeIncrementalGarbageCollectionIfNeeded(
       cppgc::Heap::StackState) = 0;
+
+  virtual bool IsGCAllowed() const;
 
   bool in_no_gc_scope() const { return no_gc_scope_ > 0; }
 

@@ -43,7 +43,7 @@ class Map;
 namespace InstanceTypeChecker {
 #define IS_TYPE_FUNCTION_DECL(Type, ...)                         \
   V8_INLINE constexpr bool Is##Type(InstanceType instance_type); \
-  V8_INLINE bool Is##Type(Map map);
+  V8_INLINE bool Is##Type(Tagged<Map> map);
 
 INSTANCE_TYPE_CHECKERS(IS_TYPE_FUNCTION_DECL)
 
@@ -61,6 +61,17 @@ constexpr Tagged_t kNonJsReceiverMapLimit =
     StaticReadOnlyRootsPointerTable[static_cast<size_t>(
         RootIndex::kFirstJSReceiverMapRoot)] &
     ~0xFFF;
+
+// Maps for strings allocated as the first maps in r/o space. If we have a
+// receiver and need to distinguish whether it is a string or not, it suffices
+// to check whether it is less-than-equal to the following value.
+constexpr Tagged_t kLastStringMap =
+    StaticReadOnlyRoot::kSharedSeqOneByteStringMap;
+
+#define ASSERT_IS_LAST_STRING_MAP(instance_type, size, name, Name) \
+  static_assert(StaticReadOnlyRoot::k##Name##Map <= kLastStringMap);
+STRING_TYPE_LIST(ASSERT_IS_LAST_STRING_MAP)
+#undef ASSERT_IS_LAST_STRING_MAP
 
 // For performance, the limit is chosen to be encodable as an Arm64
 // constant. See Assembler::IsImmAddSub in assembler-arm64.cc.

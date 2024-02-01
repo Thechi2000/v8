@@ -7,6 +7,7 @@
 
 #include "src/base/export-template.h"
 #include "src/base/logging.h"
+#include "src/base/macros.h"
 #include "src/base/optional.h"
 #include "src/base/strings.h"
 #include "src/base/vector.h"
@@ -16,8 +17,7 @@ namespace v8 {
 namespace internal {
 
 class BigInt;
-template <typename T>
-class Handle;
+class SharedStringAccessGuardIfNeeded;
 
 // The limit for the the fractionDigits/precision for toFixed, toPrecision
 // and toExponential.
@@ -61,14 +61,14 @@ inline double FastUI2D(unsigned x) {
 
 // This function should match the exact semantics of ECMA-262 20.2.2.17.
 inline float DoubleToFloat32(double x);
-float DoubleToFloat32_NoInline(double x);
+V8_EXPORT_PRIVATE float DoubleToFloat32_NoInline(double x);
 
 // This function should match the exact semantics of ECMA-262 9.4.
 inline double DoubleToInteger(double x);
 
 // This function should match the exact semantics of ECMA-262 9.5.
 inline int32_t DoubleToInt32(double x);
-int32_t DoubleToInt32_NoInline(double x);
+V8_EXPORT_PRIVATE int32_t DoubleToInt32_NoInline(double x);
 
 // This function should match the exact semantics of ECMA-262 9.6.
 inline uint32_t DoubleToUint32(double x);
@@ -162,15 +162,16 @@ inline bool IsUint32Double(double value);
 inline bool DoubleToUint32IfEqualToSelf(double value, uint32_t* uint32_value);
 
 // Convert from Number object to C integer.
-inline uint32_t PositiveNumberToUint32(Object number);
-inline int32_t NumberToInt32(Object number);
-inline uint32_t NumberToUint32(Object number);
-inline int64_t NumberToInt64(Object number);
-inline uint64_t PositiveNumberToUint64(Object number);
+inline uint32_t PositiveNumberToUint32(Tagged<Object> number);
+inline int32_t NumberToInt32(Tagged<Object> number);
+inline uint32_t NumberToUint32(Tagged<Object> number);
+inline int64_t NumberToInt64(Tagged<Object> number);
+inline uint64_t PositiveNumberToUint64(Tagged<Object> number);
 
 double StringToDouble(Isolate* isolate, Handle<String> string, int flags,
                       double empty_string_val = 0.0);
-double FlatStringToDouble(String string, int flags, double empty_string_val);
+double FlatStringToDouble(Tagged<String> string, int flags,
+                          double empty_string_val);
 
 // String to double helper without heap allocation.
 // Returns base::nullopt if the string is longer than
@@ -185,13 +186,15 @@ V8_EXPORT_PRIVATE base::Optional<double> TryStringToInt(LocalIsolate* isolate,
                                                         Handle<String> object,
                                                         int radix);
 
-inline bool TryNumberToSize(Object number, size_t* result);
+inline bool TryNumberToSize(Tagged<Object> number, size_t* result);
 
 // Converts a number into size_t.
-inline size_t NumberToSize(Object number);
+inline size_t NumberToSize(Tagged<Object> number);
 
 // returns DoubleToString(StringToDouble(string)) == string
-V8_EXPORT_PRIVATE bool IsSpecialIndex(String string);
+V8_EXPORT_PRIVATE bool IsSpecialIndex(
+    Tagged<String> string, SharedStringAccessGuardIfNeeded& access_guard);
+V8_EXPORT_PRIVATE bool IsSpecialIndex(Tagged<String> string);
 
 }  // namespace internal
 }  // namespace v8

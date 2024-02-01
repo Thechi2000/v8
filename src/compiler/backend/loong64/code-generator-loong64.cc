@@ -15,10 +15,6 @@
 #include "src/compiler/osr.h"
 #include "src/heap/memory-chunk.h"
 
-#if V8_ENABLE_WEBASSEMBLY
-#include "src/wasm/wasm-code-manager.h"
-#endif  // V8_ENABLE_WEBASSEMBLY
-
 namespace v8 {
 namespace internal {
 namespace compiler {
@@ -154,22 +150,34 @@ namespace {
 
 class OutOfLineRecordWrite final : public OutOfLineCode {
  public:
-  OutOfLineRecordWrite(CodeGenerator* gen, Register object, Operand offset,
-                       RecordWriteMode mode, StubCallMode stub_mode)
+  OutOfLineRecordWrite(
+      CodeGenerator* gen, Register object, Operand offset, Register value,
+      RecordWriteMode mode, StubCallMode stub_mode,
+      IndirectPointerTag indirect_pointer_tag = kIndirectPointerNullTag)
       : OutOfLineCode(gen),
         object_(object),
         offset_(offset),
+        value_(value),
         mode_(mode),
 #if V8_ENABLE_WEBASSEMBLY
         stub_mode_(stub_mode),
 #endif  // V8_ENABLE_WEBASSEMBLY
         must_save_lr_(!gen->frame_access_state()->has_frame()),
-        zone_(gen->zone()) {
+        zone_(gen->zone()),
+        indirect_pointer_tag_(indirect_pointer_tag) {
   }
 
   void Generate() final {
-    __ CheckPageFlag(object_, MemoryChunk::kPointersFromHereAreInterestingMask,
-                     eq, exit());
+    // When storing an indirect pointer, the value will always be a
+    // full/decompressed pointer.
+    if (COMPRESS_POINTERS_BOOL &&
+        mode_ != RecordWriteMode::kValueIsIndirectPointer) {
+      __ DecompressTagged(value_, value_);
+    }
+
+    __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                     exit());
+
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
@@ -179,6 +187,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     }
     if (mode_ == RecordWriteMode::kValueIsEphemeronKey) {
       __ CallEphemeronKeyBarrier(object_, offset_, save_fp_mode);
+    } else if (mode_ == RecordWriteMode::kValueIsIndirectPointer) {
+      DCHECK(IsValidIndirectPointerTag(indirect_pointer_tag_));
+      __ CallIndirectPointerBarrier(object_, offset_, save_fp_mode,
+                                    indirect_pointer_tag_);
 #if V8_ENABLE_WEBASSEMBLY
     } else if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
       // A direct call to a wasm runtime stub defined in this module.
@@ -198,12 +210,14 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
  private:
   Register const object_;
   Operand const offset_;
+  Register const value_;
   RecordWriteMode const mode_;
 #if V8_ENABLE_WEBASSEMBLY
   StubCallMode const stub_mode_;
 #endif  // V8_ENABLE_WEBASSEMBLY
   bool must_save_lr_;
   Zone* zone_;
+  IndirectPointerTag indirect_pointer_tag_;
 };
 
 #define CREATE_OOL_CLASS(ool_name, masm_ool_name, T)                 \
@@ -226,6 +240,62 @@ CREATE_OOL_CLASS(OutOfLineFloat64Max, Float64MaxOutOfLine, FPURegister);
 CREATE_OOL_CLASS(OutOfLineFloat64Min, Float64MinOutOfLine, FPURegister);
 
 #undef CREATE_OOL_CLASS
+
+#if V8_ENABLE_WEBASSEMBLY
+class WasmOutOfLineTrap : public OutOfLineCode {
+ public:
+  WasmOutOfLineTrap(CodeGenerator* gen, Instruction* instr)
+      : OutOfLineCode(gen), gen_(gen), instr_(instr) {}
+  void Generate() override {
+    Loong64OperandConverter i(gen_, instr_);
+    TrapId trap_id =
+        static_cast<TrapId>(i.InputInt32(instr_->InputCount() - 1));
+    GenerateCallToTrap(trap_id);
+  }
+
+ protected:
+  CodeGenerator* gen_;
+
+  void GenerateWithTrapId(TrapId trap_id) { GenerateCallToTrap(trap_id); }
+
+ private:
+  void GenerateCallToTrap(TrapId trap_id) {
+    gen_->AssembleSourcePosition(instr_);
+    // A direct call to a wasm runtime stub defined in this module.
+    // Just encode the stub index. This will be patched when the code
+    // is added to the native module and copied into wasm code space.
+    __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+    ReferenceMap* reference_map = gen_->zone()->New<ReferenceMap>(gen_->zone());
+    gen_->RecordSafepoint(reference_map);
+    __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+  }
+
+  Instruction* instr_;
+};
+
+void RecordTrapInfoIfNeeded(Zone* zone, CodeGenerator* codegen,
+                            InstructionCode opcode, Instruction* instr,
+                            int pc) {
+  const MemoryAccessMode access_mode = AccessModeField::decode(opcode);
+  if (access_mode == kMemoryAccessProtectedMemOutOfBounds ||
+      access_mode == kMemoryAccessProtectedNullDereference) {
+    ReferenceMap* reference_map =
+        codegen->zone()->New<ReferenceMap>(codegen->zone());
+    // The safepoint has to be recorded at the return address of a call. Address
+    // we use as the fake return address in the case of the trap handler is the
+    // fault address (here `pc`) + 1. Therefore the safepoint here has to be
+    // recorded at pc + 1;
+    codegen->RecordSafepoint(reference_map, pc + 1);
+    codegen->RecordProtectedInstruction(pc);
+  }
+}
+#else
+void RecordTrapInfoIfNeeded(Zone* zone, CodeGenerator* codegen,
+                            InstructionCode opcode, Instruction* instr,
+                            int pc) {
+  DCHECK_EQ(kMemoryAccessDirect, AccessModeField::decode(opcode));
+}
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 Condition FlagsConditionToConditionCmp(FlagsCondition condition) {
   switch (condition) {
@@ -292,15 +362,19 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool* predicate,
       *predicate = false;
       return CEQ;
     case kUnsignedLessThan:
+    case kFloatLessThan:
       *predicate = true;
       return CLT;
     case kUnsignedGreaterThanOrEqual:
+    case kFloatGreaterThanOrEqual:
       *predicate = false;
       return CLT;
     case kUnsignedLessThanOrEqual:
+    case kFloatLessThanOrEqual:
       *predicate = true;
       return CLE;
     case kUnsignedGreaterThan:
+    case kFloatGreaterThan:
       *predicate = false;
       return CLE;
     case kUnorderedEqual:
@@ -316,18 +390,20 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool* predicate,
 
 }  // namespace
 
-#define ASSEMBLE_ATOMIC_LOAD_INTEGER(asm_instr)          \
-  do {                                                   \
-    __ asm_instr(i.OutputRegister(), i.MemoryOperand()); \
-    __ dbar(0);                                          \
+#define ASSEMBLE_ATOMIC_LOAD_INTEGER(asm_instr)                          \
+  do {                                                                   \
+    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+    __ asm_instr(i.OutputRegister(), i.MemoryOperand());                 \
+    __ dbar(0);                                                          \
   } while (0)
 
 // TODO(LOONG_dev): remove second dbar?
-#define ASSEMBLE_ATOMIC_STORE_INTEGER(asm_instr)               \
-  do {                                                         \
-    __ dbar(0);                                                \
-    __ asm_instr(i.InputOrZeroRegister(2), i.MemoryOperand()); \
-    __ dbar(0);                                                \
+#define ASSEMBLE_ATOMIC_STORE_INTEGER(asm_instr)                         \
+  do {                                                                   \
+    __ dbar(0);                                                          \
+    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+    __ asm_instr(i.InputOrZeroRegister(2), i.MemoryOperand());           \
+    __ dbar(0);                                                          \
   } while (0)
 
 // only use for sub_w and sub_d
@@ -337,6 +413,7 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool* predicate,
     __ Add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));       \
     __ dbar(0);                                                                \
     __ bind(&binop);                                                           \
+    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());       \
     __ load_linked(i.OutputRegister(0), MemOperand(i.TempRegister(0), 0));     \
     __ bin_instr(i.TempRegister(1), i.OutputRegister(0),                       \
                  Operand(i.InputRegister(2)));                                 \
@@ -362,6 +439,7 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool* predicate,
     __ slli_w(i.TempRegister(3), i.TempRegister(3), 3);                        \
     __ dbar(0);                                                                \
     __ bind(&binop);                                                           \
+    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());       \
     __ load_linked(i.TempRegister(1), MemOperand(i.TempRegister(0), 0));       \
     __ ExtractBits(i.OutputRegister(0), i.TempRegister(1), i.TempRegister(3),  \
                    size, sign_extend);                                         \
@@ -391,6 +469,7 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool* predicate,
     __ slli_w(i.TempRegister(1), i.TempRegister(1), 3);                        \
     __ dbar(0);                                                                \
     __ bind(&exchange);                                                        \
+    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());       \
     __ load_linked(i.TempRegister(2), MemOperand(i.TempRegister(0), 0));       \
     __ ExtractBits(i.OutputRegister(0), i.TempRegister(2), i.TempRegister(1),  \
                    size, sign_extend);                                         \
@@ -410,6 +489,7 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool* predicate,
     __ add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));       \
     __ dbar(0);                                                                \
     __ bind(&compareExchange);                                                 \
+    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());       \
     __ load_linked(i.OutputRegister(0), MemOperand(i.TempRegister(0), 0));     \
     __ BranchShort(&exit, ne, i.InputRegister(2),                              \
                    Operand(i.OutputRegister(0)));                              \
@@ -439,6 +519,7 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool* predicate,
     __ slli_w(i.TempRegister(1), i.TempRegister(1), 3);                        \
     __ dbar(0);                                                                \
     __ bind(&compareExchange);                                                 \
+    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());       \
     __ load_linked(i.TempRegister(2), MemOperand(i.TempRegister(0), 0));       \
     __ ExtractBits(i.OutputRegister(0), i.TempRegister(2), i.TempRegister(1),  \
                    size, sign_extend);                                         \
@@ -548,8 +629,8 @@ void CodeGenerator::BailoutIfDeoptimized() {
                      MemOperand(kJavaScriptCallCodeStartRegister, offset));
   __ Ld_wu(scratch, FieldMemOperand(scratch, Code::kFlagsOffset));
   __ And(scratch, scratch, Operand(1 << Code::kMarkedForDeoptimizationBit));
-  __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
-          RelocInfo::CODE_TARGET, ne, scratch, Operand(zero_reg));
+  __ TailCallBuiltin(Builtin::kCompileLazyDeoptimizedCode, ne, scratch,
+                     Operand(zero_reg));
 }
 
 // Assembles an instruction after register allocation, producing machine code.
@@ -646,9 +727,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                            FieldMemOperand(func, JSFunction::kContextOffset));
         __ Assert(eq, AbortReason::kWrongFunctionContext, cp, Operand(scratch));
       }
-      static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
-      __ LoadTaggedField(a2, FieldMemOperand(func, JSFunction::kCodeOffset));
-      __ CallCodeObject(a2);
+      __ CallJSFunction(func);
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;
@@ -762,8 +841,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         // We don't actually want to generate a pile of code for this, so just
         // claim there is a stack frame, without generating one.
         FrameScope scope(masm(), StackFrame::NO_FRAME_TYPE);
-        __ Call(isolate()->builtins()->code_handle(Builtin::kAbortCSADcheck),
-                RelocInfo::CODE_TARGET);
+        __ CallBuiltin(Builtin::kAbortCSADcheck);
       }
       __ stop();
       break;
@@ -771,7 +849,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ DebugBreak();
       break;
     case kArchComment:
-      __ RecordComment(reinterpret_cast<const char*>(i.InputInt64(0)));
+      __ RecordComment(reinterpret_cast<const char*>(i.InputInt64(0)),
+                       SourceLocation());
       break;
     case kArchNop:
     case kArchThrowTerminator:
@@ -786,6 +865,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchRet:
       AssembleReturn(instr->InputAt(0));
       break;
+#if V8_ENABLE_WEBASSEMBLY
+    case kArchStackPointer:
+      // The register allocator expects an allocatable register for the output,
+      // we cannot use sp directly.
+      __ mov(i.OutputRegister(), sp);
+      break;
+    case kArchSetStackPointer: {
+      DCHECK(instr->InputAt(0)->IsRegister());
+      __ mov(sp, i.InputRegister(0));
+      break;
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
     case kArchStackPointerGreaterThan: {
       Register lhs_register = sp;
       uint32_t offset;
@@ -813,64 +904,102 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ TruncateDoubleToI(isolate(), zone(), i.OutputRegister(),
                            i.InputDoubleRegister(0), DetermineStubCallMode());
       break;
-    case kArchStoreWithWriteBarrier: {  // Fall through.
+    case kArchStoreWithWriteBarrier: {
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+      // Indirect pointer writes must use a different opcode.
+      DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
       AddressingMode addressing_mode =
           AddressingModeField::decode(instr->opcode());
       Register object = i.InputRegister(0);
       Register value = i.InputRegister(2);
 
-      auto ool = zone()->New<OutOfLineRecordWrite>(
-          this, object, Operand(i.InputOperand(1)), mode,
-          DetermineStubCallMode());
       if (addressing_mode == kMode_MRI) {
+        auto ool = zone()->New<OutOfLineRecordWrite>(
+            this, object, Operand(i.InputInt64(1)), value, mode,
+            DetermineStubCallMode());
+        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
         __ StoreTaggedField(value, MemOperand(object, i.InputInt64(1)));
+        if (mode > RecordWriteMode::kValueIsPointer) {
+          __ JumpIfSmi(value, ool->exit());
+        }
+        __ CheckPageFlag(object,
+                         MemoryChunk::kPointersFromHereAreInterestingMask, ne,
+                         ool->entry());
+        __ bind(ool->exit());
       } else {
         DCHECK_EQ(addressing_mode, kMode_MRR);
+        auto ool = zone()->New<OutOfLineRecordWrite>(
+            this, object, Operand(i.InputRegister(1)), value, mode,
+            DetermineStubCallMode());
+        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
         __ StoreTaggedField(value, MemOperand(object, i.InputRegister(1)));
-      }
-      if (mode > RecordWriteMode::kValueIsPointer) {
-        __ JumpIfSmi(value, ool->exit());
-      }
-      // Checking the {value}'s page flags first favors old-to-old pointers,
-      // which can skip the OOL code. Checking the {object}'s flags first
-      // would favor new-to-new pointers.
-      if (COMPRESS_POINTERS_BOOL) {
-        MachineRepresentation rep =
-            LocationOperand::cast(instr->InputAt(2))->representation();
-        if (rep == MachineRepresentation::kCompressed ||
-            rep == MachineRepresentation::kCompressedPointer) {
-          __ DecompressTagged(value, value);
+        if (mode > RecordWriteMode::kValueIsIndirectPointer) {
+          __ JumpIfSmi(value, ool->exit());
         }
+        __ CheckPageFlag(object,
+                         MemoryChunk::kPointersFromHereAreInterestingMask, ne,
+                         ool->entry());
+        __ bind(ool->exit());
       }
-      __ CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask,
-                       ne, ool->entry());
-      __ bind(ool->exit());
       break;
     }
     case kArchAtomicStoreWithWriteBarrier: {
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+      // Indirect pointer writes must use a different opcode.
+      DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
       Register object = i.InputRegister(0);
       int64_t offset = i.InputInt64(1);
       Register value = i.InputRegister(2);
 
       auto ool = zone()->New<OutOfLineRecordWrite>(
-          this, object, Operand(offset), mode, DetermineStubCallMode());
+          this, object, Operand(offset), value, mode, DetermineStubCallMode());
       __ AtomicStoreTaggedField(value, MemOperand(object, offset));
-      if (mode > RecordWriteMode::kValueIsPointer) {
+      // Skip the write barrier if the value is a Smi. However, this is only
+      // valid if the value isn't an indirect pointer. Otherwise the value will
+      // be a pointer table index, which will always look like a Smi (but
+      // actually reference a pointer in the pointer table).
+      if (mode > RecordWriteMode::kValueIsIndirectPointer) {
         __ JumpIfSmi(value, ool->exit());
       }
-      if (COMPRESS_POINTERS_BOOL) {
-        MachineRepresentation rep =
-            LocationOperand::cast(instr->InputAt(2))->representation();
-        if (rep == MachineRepresentation::kCompressed ||
-            rep == MachineRepresentation::kCompressedPointer) {
-          __ DecompressTagged(value, value);
-        }
-      }
-      __ CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask,
+      __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
                        ne, ool->entry());
       __ bind(ool->exit());
+      break;
+    }
+    case kArchStoreIndirectWithWriteBarrier: {
+      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+      DCHECK_EQ(mode, RecordWriteMode::kValueIsIndirectPointer);
+      AddressingMode addressing_mode =
+          AddressingModeField::decode(instr->opcode());
+      IndirectPointerTag tag = static_cast<IndirectPointerTag>(i.InputInt64(3));
+      DCHECK(IsValidIndirectPointerTag(tag));
+      Register object = i.InputRegister(0);
+      Register value = i.InputRegister(2);
+
+      if (addressing_mode == kMode_MRI) {
+        auto ool = zone()->New<OutOfLineRecordWrite>(
+            this, object, Operand(i.InputInt32(1)), value, mode,
+            DetermineStubCallMode(), tag);
+        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+        __ StoreIndirectPointerField(value,
+                                     MemOperand(object, i.InputInt32(1)));
+        __ CheckPageFlag(object,
+                         MemoryChunk::kPointersFromHereAreInterestingMask, ne,
+                         ool->entry());
+        __ bind(ool->exit());
+      } else {
+        DCHECK_EQ(addressing_mode, kMode_MRR);
+        auto ool = zone()->New<OutOfLineRecordWrite>(
+            this, object, Operand(i.InputRegister(1)), value, mode,
+            DetermineStubCallMode(), tag);
+        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+        __ StoreIndirectPointerField(value,
+                                     MemOperand(object, i.InputRegister(1)));
+        __ CheckPageFlag(object,
+                         MemoryChunk::kPointersFromHereAreInterestingMask, ne,
+                         ool->entry());
+        __ bind(ool->exit());
+      }
       break;
     }
     case kArchStackSlot: {
@@ -1380,11 +1509,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (instr->OutputCount() > 1) {
         // Check for inputs below INT32_MIN and NaN.
         __ li(i.OutputRegister(1), 1);
-        __ Move(i.TempDoubleRegister(0), static_cast<double>(INT32_MIN));
-        __ CompareF64(i.TempDoubleRegister(0), i.InputDoubleRegister(0), CLE);
+        __ Move(scratch, static_cast<double>(INT32_MIN));
+        __ CompareF64(scratch, i.InputDoubleRegister(0), CLE);
         __ LoadZeroIfNotFPUCondition(i.OutputRegister(1));
-        __ Move(i.TempDoubleRegister(0), static_cast<double>(INT32_MAX) + 1);
-        __ CompareF64(i.TempDoubleRegister(0), i.InputDoubleRegister(0), CLE);
+        __ Move(scratch, static_cast<double>(INT32_MAX) + 1);
+        __ CompareF64(scratch, i.InputDoubleRegister(0), CLE);
         __ LoadZeroIfFPUCondition(i.OutputRegister(1));
       }
       break;
@@ -1456,11 +1585,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Ftintrz_uw_d(i.OutputRegister(), i.InputDoubleRegister(0), scratch);
       if (instr->OutputCount() > 1) {
         __ li(i.OutputRegister(1), 1);
-        __ Move(i.TempDoubleRegister(0), static_cast<double>(-1.0));
-        __ CompareF64(i.TempDoubleRegister(0), i.InputDoubleRegister(0), CLT);
+        __ Move(scratch, static_cast<double>(-1.0));
+        __ CompareF64(scratch, i.InputDoubleRegister(0), CLT);
         __ LoadZeroIfNotFPUCondition(i.OutputRegister(1));
-        __ Move(i.TempDoubleRegister(0), static_cast<double>(UINT32_MAX) + 1);
-        __ CompareF64(i.TempDoubleRegister(0), i.InputDoubleRegister(0), CLE);
+        __ Move(scratch, static_cast<double>(UINT32_MAX) + 1);
+        __ CompareF64(scratch, i.InputDoubleRegister(0), CLE);
         __ LoadZeroIfFPUCondition(i.OutputRegister(1));
       }
       break;
@@ -1520,59 +1649,73 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ ext_w_h(i.OutputRegister(), i.InputRegister(0));
       break;
     case kLoong64Ld_bu:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Ld_bu(i.OutputRegister(), i.MemoryOperand());
       break;
     case kLoong64Ld_b:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Ld_b(i.OutputRegister(), i.MemoryOperand());
       break;
     case kLoong64St_b: {
       size_t index = 0;
       MemOperand mem = i.MemoryOperand(&index);
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ St_b(i.InputOrZeroRegister(index), mem);
       break;
     }
     case kLoong64Ld_hu:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Ld_hu(i.OutputRegister(), i.MemoryOperand());
       break;
     case kLoong64Ld_h:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Ld_h(i.OutputRegister(), i.MemoryOperand());
       break;
     case kLoong64St_h: {
       size_t index = 0;
       MemOperand mem = i.MemoryOperand(&index);
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ St_h(i.InputOrZeroRegister(index), mem);
       break;
     }
     case kLoong64Ld_w:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Ld_w(i.OutputRegister(), i.MemoryOperand());
       break;
     case kLoong64Ld_wu:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Ld_wu(i.OutputRegister(), i.MemoryOperand());
       break;
     case kLoong64Ld_d:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Ld_d(i.OutputRegister(), i.MemoryOperand());
       break;
     case kLoong64St_w: {
       size_t index = 0;
       MemOperand mem = i.MemoryOperand(&index);
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ St_w(i.InputOrZeroRegister(index), mem);
       break;
     }
     case kLoong64St_d: {
       size_t index = 0;
       MemOperand mem = i.MemoryOperand(&index);
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ St_d(i.InputOrZeroRegister(index), mem);
       break;
     }
     case kLoong64LoadDecompressTaggedSigned:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ DecompressTaggedSigned(i.OutputRegister(), i.MemoryOperand());
       break;
     case kLoong64LoadDecompressTagged:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ DecompressTagged(i.OutputRegister(), i.MemoryOperand());
       break;
     case kLoong64StoreCompressTagged: {
       size_t index = 0;
       MemOperand mem = i.MemoryOperand(&index);
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ StoreTaggedField(i.InputOrZeroRegister(index), mem);
       break;
     }
@@ -1583,6 +1726,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       size_t index = 0;
       MemOperand mem = i.MemoryOperand(&index);
       __ StoreSandboxedPointerField(i.InputOrZeroRegister(index), mem);
+      break;
+    }
+    case kLoong64StoreIndirectPointer: {
+      size_t index = 0;
+      MemOperand mem = i.MemoryOperand(&index);
+      __ StoreIndirectPointerField(i.InputOrZeroRegister(index), mem);
       break;
     }
     case kLoong64AtomicLoadDecompressTaggedSigned:
@@ -1598,6 +1747,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kLoong64Fld_s: {
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Fld_s(i.OutputSingleRegister(), i.MemoryOperand());
       break;
     }
@@ -1608,11 +1758,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (ft == kDoubleRegZero && !__ IsDoubleZeroRegSet()) {
         __ Move(kDoubleRegZero, 0.0);
       }
-
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Fst_s(ft, operand);
       break;
     }
     case kLoong64Fld_d:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Fld_d(i.OutputDoubleRegister(), i.MemoryOperand());
       break;
     case kLoong64Fst_d: {
@@ -1622,7 +1773,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (ft == kDoubleRegZero && !__ IsDoubleZeroRegSet()) {
         __ Move(kDoubleRegZero, 0.0);
       }
-
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ Fst_d(ft, operand);
       break;
     }
@@ -1748,6 +1899,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       switch (AtomicWidthField::decode(opcode)) {
         case AtomicWidth::kWord32:
           __ add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
           __ amswap_db_w(i.OutputRegister(0), i.InputRegister(2),
                          i.TempRegister(0));
           break;
@@ -1758,6 +1910,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kLoong64Word64AtomicExchangeUint64:
       __ add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ amswap_db_d(i.OutputRegister(0), i.InputRegister(2),
                      i.TempRegister(0));
       break;
@@ -1812,6 +1965,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       switch (AtomicWidthField::decode(opcode)) {
         case AtomicWidth::kWord32:
           __ Add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
           __ amadd_db_w(i.OutputRegister(0), i.InputRegister(2),
                         i.TempRegister(0));
           break;
@@ -1834,6 +1988,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       switch (AtomicWidthField::decode(opcode)) {
         case AtomicWidth::kWord32:
           __ Add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
           __ amand_db_w(i.OutputRegister(0), i.InputRegister(2),
                         i.TempRegister(0));
           break;
@@ -1846,6 +2001,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       switch (AtomicWidthField::decode(opcode)) {
         case AtomicWidth::kWord32:
           __ Add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
           __ amor_db_w(i.OutputRegister(0), i.InputRegister(2),
                        i.TempRegister(0));
           break;
@@ -1858,6 +2014,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       switch (AtomicWidthField::decode(opcode)) {
         case AtomicWidth::kWord32:
           __ Add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+          RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
           __ amxor_db_w(i.OutputRegister(0), i.InputRegister(2),
                         i.TempRegister(0));
           break;
@@ -1904,6 +2061,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 
     case kLoong64Word64AtomicAddUint64:
       __ Add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ amadd_db_d(i.OutputRegister(0), i.InputRegister(2), i.TempRegister(0));
       break;
     case kLoong64Word64AtomicSubUint64:
@@ -1911,14 +2069,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kLoong64Word64AtomicAndUint64:
       __ Add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ amand_db_d(i.OutputRegister(0), i.InputRegister(2), i.TempRegister(0));
       break;
     case kLoong64Word64AtomicOrUint64:
       __ Add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ amor_db_d(i.OutputRegister(0), i.InputRegister(2), i.TempRegister(0));
       break;
     case kLoong64Word64AtomicXorUint64:
       __ Add_d(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ amxor_db_d(i.OutputRegister(0), i.InputRegister(2), i.TempRegister(0));
       break;
 #undef ATOMIC_BINOP_CASE
@@ -2080,51 +2241,7 @@ void CodeGenerator::AssembleArchJumpRegardlessOfAssemblyOrder(
 #if V8_ENABLE_WEBASSEMBLY
 void CodeGenerator::AssembleArchTrap(Instruction* instr,
                                      FlagsCondition condition) {
-  class OutOfLineTrap final : public OutOfLineCode {
-   public:
-    OutOfLineTrap(CodeGenerator* gen, Instruction* instr)
-        : OutOfLineCode(gen), instr_(instr), gen_(gen) {}
-    void Generate() final {
-      Loong64OperandConverter i(gen_, instr_);
-      TrapId trap_id =
-          static_cast<TrapId>(i.InputInt32(instr_->InputCount() - 1));
-      GenerateCallToTrap(trap_id);
-    }
-
-   private:
-    void GenerateCallToTrap(TrapId trap_id) {
-      if (trap_id == TrapId::kInvalid) {
-        // We cannot test calls to the runtime in cctest/test-run-wasm.
-        // Therefore we emit a call to C here instead of a call to the runtime.
-        // We use the context register as the scratch register, because we do
-        // not have a context here.
-        __ PrepareCallCFunction(0, 0, cp);
-        __ CallCFunction(
-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
-        __ LeaveFrame(StackFrame::WASM);
-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
-        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
-        pop_count += (pop_count & 1);  // align
-        __ Drop(pop_count);
-        __ Ret();
-      } else {
-        gen_->AssembleSourcePosition(instr_);
-        // A direct call to a wasm runtime stub defined in this module.
-        // Just encode the stub index. This will be patched when the code
-        // is added to the native module and copied into wasm code space.
-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
-        ReferenceMap* reference_map =
-            gen_->zone()->New<ReferenceMap>(gen_->zone());
-        gen_->RecordSafepoint(reference_map);
-        if (v8_flags.debug_code) {
-          __ stop();
-        }
-      }
-    }
-    Instruction* instr_;
-    CodeGenerator* gen_;
-  };
-  auto ool = zone()->New<OutOfLineTrap>(this, instr);
+  auto ool = zone()->New<WasmOutOfLineTrap>(this, instr);
   Label* tlabel = ool->entry();
   AssembleBranchToLabels(this, masm(), instr, condition, tlabel, nullptr, true);
 }
@@ -2222,7 +2339,13 @@ void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
   for (size_t index = 2; index < instr->InputCount(); index += 2) {
     cases.push_back({i.InputInt32(index + 0), GetLabel(i.InputRpo(index + 1))});
   }
-  AssembleArchBinarySearchSwitchRange(input, i.InputRpo(1), cases.data(),
+
+  UseScratchRegisterScope temps(masm());
+  Register scratch = temps.Acquire();
+  // The input register may contains dirty data in upper 32 bits, explicitly
+  // sign-extend it here.
+  __ slli_w(scratch, input, 0);
+  AssembleArchBinarySearchSwitchRange(scratch, i.InputRpo(1), cases.data(),
                                       cases.data() + cases.size());
 }
 
@@ -2231,8 +2354,13 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
   Register input = i.InputRegister(0);
   size_t const case_count = instr->InputCount() - 2;
 
-  __ Branch(GetLabel(i.InputRpo(1)), hs, input, Operand(case_count));
-  __ GenerateSwitchTable(input, case_count, [&i, this](size_t index) {
+  UseScratchRegisterScope temps(masm());
+  Register scratch = temps.Acquire();
+  // The input register may contains dirty data in upper 32 bits, explicitly
+  // sign-extend it here.
+  __ slli_w(scratch, input, 0);
+  __ Branch(GetLabel(i.InputRpo(1)), hs, scratch, Operand(case_count));
+  __ GenerateSwitchTable(scratch, case_count, [&i, this](size_t index) {
     return GetLabel(i.InputRpo(index + 2));
   });
 }
@@ -2292,7 +2420,16 @@ void CodeGenerator::AssembleConstructFrame() {
         // accessors.
         __ Push(kWasmInstanceRegister);
       }
-      if (call_descriptor->IsWasmCapiFunction()) {
+      if (call_descriptor->IsWasmImportWrapper()) {
+        // If the wrapper is running on a secondary stack, it will switch to the
+        // central stack and fill these slots with the central stack pointer and
+        // secondary stack limit. Otherwise the slots remain empty.
+        static_assert(WasmImportWrapperFrameConstants::kCentralStackSPOffset ==
+                      -24);
+        static_assert(
+            WasmImportWrapperFrameConstants::kSecondaryStackLimitOffset == -32);
+        __ Push(zero_reg, zero_reg);
+      } else if (call_descriptor->IsWasmCapiFunction()) {
         // Reserve space for saving the PC later.
         __ Sub_d(sp, sp, Operand(kSystemPointerSize));
       }
@@ -2334,17 +2471,16 @@ void CodeGenerator::AssembleConstructFrame() {
       // check in the condition code.
       if (required_slots * kSystemPointerSize < v8_flags.stack_size * KB) {
         UseScratchRegisterScope temps(masm());
-        Register scratch = temps.Acquire();
-        __ Ld_d(scratch, FieldMemOperand(
-                             kWasmInstanceRegister,
-                             WasmInstanceObject::kRealStackLimitAddressOffset));
-        __ Ld_d(scratch, MemOperand(scratch, 0));
-        __ Add_d(scratch, scratch,
+        Register stack_limit = temps.Acquire();
+        __ LoadStackLimit(stack_limit,
+                          MacroAssembler::StackLimitKind::kRealStackLimit);
+        __ Add_d(stack_limit, stack_limit,
                  Operand(required_slots * kSystemPointerSize));
-        __ Branch(&done, uge, sp, Operand(scratch));
+        __ Branch(&done, uge, sp, Operand(stack_limit));
       }
 
-      __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+      __ Call(static_cast<intptr_t>(Builtin::kWasmStackOverflow),
+              RelocInfo::WASM_STUB_CALL);
       // The call does not return, hence we can ignore any references and just
       // define an empty safepoint.
       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
@@ -2669,6 +2805,24 @@ void CodeGenerator::SetPendingMove(MoveOperands* move) {
   }
 }
 
+namespace {
+
+bool Is32BitOperand(InstructionOperand* operand) {
+  DCHECK(operand->IsStackSlot() || operand->IsRegister());
+  MachineRepresentation mr = LocationOperand::cast(operand)->representation();
+  return mr == MachineRepresentation::kWord32 ||
+         mr == MachineRepresentation::kCompressed ||
+         mr == MachineRepresentation::kCompressedPointer;
+}
+
+// When we need only 32 bits, move only 32 bits, otherwise the destination
+// register' upper 32 bits may contain dirty data.
+bool Use32BitMove(InstructionOperand* source, InstructionOperand* destination) {
+  return Is32BitOperand(source) && Is32BitOperand(destination);
+}
+
+}  // namespace
+
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {
   Loong64OperandConverter g(this, nullptr);
@@ -2686,7 +2840,11 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
     DCHECK(destination->IsRegister() || destination->IsStackSlot());
     MemOperand src = g.ToMemOperand(source);
     if (destination->IsRegister()) {
-      __ Ld_d(g.ToRegister(destination), src);
+      if (Use32BitMove(source, destination)) {
+        __ Ld_w(g.ToRegister(destination), src);
+      } else {
+        __ Ld_d(g.ToRegister(destination), src);
+      }
     } else {
       UseScratchRegisterScope temps(masm());
       Register scratch = temps.Acquire();

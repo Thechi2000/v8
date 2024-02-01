@@ -54,7 +54,7 @@ RUNTIME_FUNCTION(Runtime_CompileLazy) {
 
   Handle<SharedFunctionInfo> sfi(function->shared(), isolate);
 
-  DCHECK(!function->is_compiled());
+  DCHECK(!function->is_compiled(isolate));
 #ifdef DEBUG
   if (v8_flags.trace_lazy && sfi->is_compiled()) {
     PrintF("[unoptimized: %s]\n", function->DebugNameCStr().get());
@@ -68,8 +68,8 @@ RUNTIME_FUNCTION(Runtime_CompileLazy) {
   if (V8_UNLIKELY(v8_flags.log_function_events)) {
     LogExecution(isolate, function);
   }
-  DCHECK(function->is_compiled());
-  return function->code();
+  DCHECK(function->is_compiled(isolate));
+  return function->code(isolate);
 }
 
 RUNTIME_FUNCTION(Runtime_InstallBaselineCode) {
@@ -79,13 +79,13 @@ RUNTIME_FUNCTION(Runtime_InstallBaselineCode) {
   Handle<SharedFunctionInfo> sfi(function->shared(), isolate);
   DCHECK(sfi->HasBaselineCode());
   IsCompiledScope is_compiled_scope(*sfi, isolate);
-  DCHECK(!function->HasAvailableOptimizedCode());
+  DCHECK(!function->HasAvailableOptimizedCode(isolate));
   DCHECK(!function->has_feedback_vector());
   JSFunction::CreateAndAttachFeedbackVector(isolate, function,
                                             &is_compiled_scope);
   {
     DisallowGarbageCollection no_gc;
-    Code baseline_code = sfi->baseline_code(kAcquireLoad);
+    Tagged<Code> baseline_code = sfi->baseline_code(kAcquireLoad);
     function->set_code(baseline_code);
     if V8_LIKELY (!v8_flags.log_function_events) return baseline_code;
   }
@@ -139,11 +139,11 @@ RUNTIME_FUNCTION(Runtime_CompileOptimized) {
 
   Compiler::CompileOptimized(isolate, function, mode, target_kind);
 
-  DCHECK(function->is_compiled());
+  DCHECK(function->is_compiled(isolate));
   if (V8_UNLIKELY(v8_flags.log_function_events)) {
     LogExecution(isolate, function);
   }
-  return function->code();
+  return function->code(isolate);
 }
 
 RUNTIME_FUNCTION(Runtime_FunctionLogNextExecution) {
@@ -152,7 +152,7 @@ RUNTIME_FUNCTION(Runtime_FunctionLogNextExecution) {
   Handle<JSFunction> js_function = args.at<JSFunction>(0);
   DCHECK(v8_flags.log_function_events);
   LogExecution(isolate, js_function);
-  return js_function->code();
+  return js_function->code(isolate);
 }
 
 RUNTIME_FUNCTION(Runtime_HealOptimizedCodeSlot) {
@@ -164,7 +164,7 @@ RUNTIME_FUNCTION(Runtime_HealOptimizedCodeSlot) {
 
   function->feedback_vector()->EvictOptimizedCodeMarkedForDeoptimization(
       isolate, function->shared(), "Runtime_HealOptimizedCodeSlot");
-  return function->code();
+  return function->code(isolate);
 }
 
 // The enum values need to match "AsmJsInstantiateResult" in
@@ -180,15 +180,15 @@ RUNTIME_FUNCTION(Runtime_InstantiateAsmJs) {
   Handle<JSFunction> function = args.at<JSFunction>(0);
 
   Handle<JSReceiver> stdlib;
-  if (args[1].IsJSReceiver()) {
+  if (IsJSReceiver(args[1])) {
     stdlib = args.at<JSReceiver>(1);
   }
   Handle<JSReceiver> foreign;
-  if (args[2].IsJSReceiver()) {
+  if (IsJSReceiver(args[2])) {
     foreign = args.at<JSReceiver>(2);
   }
   Handle<JSArrayBuffer> memory;
-  if (args[3].IsJSArrayBuffer()) {
+  if (IsJSArrayBuffer(args[3])) {
     memory = args.at<JSArrayBuffer>(3);
   }
   Handle<SharedFunctionInfo> shared(function->shared(), isolate);
@@ -202,6 +202,13 @@ RUNTIME_FUNCTION(Runtime_InstantiateAsmJs) {
           kAsmJsInstantiateSuccess);
       return *result.ToHandleChecked();
     }
+    if (isolate->has_exception()) {
+      // If instantiation fails, we do not propagate the exception but instead
+      // fall back to JS execution. The only exception (to that rule) is the
+      // termination exception.
+      DCHECK(isolate->is_execution_terminating());
+      return ReadOnlyRoots{isolate}.exception();
+    }
     isolate->counters()->asmjs_instantiate_result()->AddSample(
         kAsmJsInstantiateFail);
 
@@ -211,18 +218,18 @@ RUNTIME_FUNCTION(Runtime_InstantiateAsmJs) {
   }
   shared->set_is_asm_wasm_broken(true);
 #endif
-  DCHECK_EQ(function->code(), *BUILTIN_CODE(isolate, InstantiateAsmJs));
+  DCHECK_EQ(function->code(isolate), *BUILTIN_CODE(isolate, InstantiateAsmJs));
   function->set_code(*BUILTIN_CODE(isolate, CompileLazy));
-  DCHECK(!isolate->has_pending_exception());
+  DCHECK(!isolate->has_exception());
   return Smi::zero();
 }
 
 namespace {
 
-bool TryGetOptimizedOsrCode(Isolate* isolate, FeedbackVector vector,
+bool TryGetOptimizedOsrCode(Isolate* isolate, Tagged<FeedbackVector> vector,
                             const interpreter::BytecodeArrayIterator& it,
-                            Code* code_out) {
-  base::Optional<Code> maybe_code =
+                            Tagged<Code>* code_out) {
+  base::Optional<Tagged<Code>> maybe_code =
       vector->GetOptimizedOsrCode(isolate, it.GetSlotOperand(2));
   if (maybe_code.has_value()) {
     *code_out = maybe_code.value();
@@ -242,7 +249,8 @@ bool TryGetOptimizedOsrCode(Isolate* isolate, FeedbackVector vector,
 //      }  // Type b: deopt exit < loop start < OSR backedge
 //    } // Type c: loop start < deopt exit < OSR backedge
 //  }  // The outermost loop
-void DeoptAllOsrLoopsContainingDeoptExit(Isolate* isolate, JSFunction function,
+void DeoptAllOsrLoopsContainingDeoptExit(Isolate* isolate,
+                                         Tagged<JSFunction> function,
                                          BytecodeOffset deopt_exit_offset) {
   DisallowGarbageCollection no_gc;
   DCHECK(!deopt_exit_offset.IsNone());
@@ -259,9 +267,9 @@ void DeoptAllOsrLoopsContainingDeoptExit(Isolate* isolate, JSFunction function,
   interpreter::BytecodeArrayIterator it(bytecode_array,
                                         deopt_exit_offset.ToInt());
 
-  FeedbackVector vector = function->feedback_vector();
-  Code code;
-  base::SmallVector<Code, 8> osr_codes;
+  Tagged<FeedbackVector> vector = function->feedback_vector();
+  Tagged<Code> code;
+  base::SmallVector<Tagged<Code>, 8> osr_codes;
   // Visit before the first loop-with-deopt is found
   for (; !it.done(); it.Advance()) {
     // We're only interested in loop ranges.
@@ -337,6 +345,10 @@ RUNTIME_FUNCTION(Runtime_NotifyDeoptimized) {
   TimerEventScope<TimerEventDeoptimizeCode> timer(isolate);
   TRACE_EVENT0("v8", "V8.DeoptimizeCode");
   Handle<JSFunction> function = deoptimizer->function();
+  if (v8_flags.profile_guided_optimization) {
+    function->shared()->set_cached_tiering_decision(
+        CachedTieringDecision::kNormal);
+  }
   // For OSR the optimized code isn't installed on the function, so get the
   // code object from deoptimizer.
   Handle<Code> optimized_code = deoptimizer->compiled_code();
@@ -443,11 +455,14 @@ void GetOsrOffsetAndFunctionForOSR(Isolate* isolate, BytecodeOffset* osr_offset,
   DCHECK((*function)->shared()->HasBytecodeArray());
 }
 
-Object CompileOptimizedOSR(Isolate* isolate, Handle<JSFunction> function,
-                           CodeKind min_opt_level, BytecodeOffset osr_offset) {
+Tagged<Object> CompileOptimizedOSR(Isolate* isolate,
+                                   Handle<JSFunction> function,
+                                   CodeKind min_opt_level,
+                                   BytecodeOffset osr_offset) {
   const ConcurrencyMode mode =
       V8_LIKELY(isolate->concurrent_recompilation_enabled() &&
-                v8_flags.concurrent_osr)
+                v8_flags.concurrent_osr &&
+                !isolate->UseEfficiencyModeForTiering())
           ? ConcurrencyMode::kConcurrent
           : ConcurrencyMode::kSynchronous;
 
@@ -463,11 +478,11 @@ Object CompileOptimizedOSR(Isolate* isolate, Handle<JSFunction> function,
     // 1) we've started a concurrent compilation job - everything is fine.
     // 2) synchronous compilation failed for some reason.
 
-    if (!function->HasAttachedOptimizedCode()) {
+    if (!function->HasAttachedOptimizedCode(isolate)) {
       function->set_code(function->shared()->GetCode(isolate));
     }
 
-    return {};
+    return Smi::zero();
   }
 
   DCHECK(!result.is_null());
@@ -475,7 +490,7 @@ Object CompileOptimizedOSR(Isolate* isolate, Handle<JSFunction> function,
   DCHECK(CodeKindIsOptimizedJSFunction(result->kind()));
 
 #ifdef DEBUG
-  DeoptimizationData data =
+  Tagged<DeoptimizationData> data =
       DeoptimizationData::cast(result->deoptimization_data());
   DCHECK_EQ(BytecodeOffset(data->OsrBytecodeOffset().value()), osr_offset);
   DCHECK_GE(data->OsrPcOffset().value(), 0);
@@ -501,9 +516,9 @@ RUNTIME_FUNCTION(Runtime_CompileOptimizedOSR) {
 
 namespace {
 
-Object CompileOptimizedOSRFromMaglev(Isolate* isolate,
-                                     Handle<JSFunction> function,
-                                     BytecodeOffset osr_offset) {
+Tagged<Object> CompileOptimizedOSRFromMaglev(Isolate* isolate,
+                                             Handle<JSFunction> function,
+                                             BytecodeOffset osr_offset) {
   // This path is only relevant for tests (all production configurations enable
   // concurrent OSR). It's quite subtle, if interested read on:
   if (V8_UNLIKELY(!isolate->concurrent_recompilation_enabled() ||
@@ -529,7 +544,7 @@ Object CompileOptimizedOSRFromMaglev(Isolate* isolate,
              "concurrent_osr is disabled. function: %s, osr offset: %d]\n",
              function->DebugNameCStr().get(), osr_offset.ToInt());
     }
-    return function->code();
+    return function->code(isolate);
   }
 
   return CompileOptimizedOSR(isolate, function, CodeKind::TURBOFAN, osr_offset);
@@ -567,7 +582,7 @@ RUNTIME_FUNCTION(Runtime_CompileOptimizedOSRFromMaglevInlined) {
   if (*function != frame->function()) {
     // We are OSRing an inlined function. Mark the top frame one for
     // optimization.
-    if (!frame->function()->ActiveTierIsTurbofan()) {
+    if (!frame->function()->ActiveTierIsTurbofan(isolate)) {
       isolate->tiering_manager()->MarkForTurboFanOptimization(
           frame->function());
     }
@@ -596,11 +611,12 @@ RUNTIME_FUNCTION(Runtime_LogOrTraceOptimizedOSREntry) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-static Object CompileGlobalEval(Isolate* isolate,
-                                Handle<i::Object> source_object,
-                                Handle<SharedFunctionInfo> outer_info,
-                                LanguageMode language_mode,
-                                int eval_scope_position, int eval_position) {
+static Tagged<Object> CompileGlobalEval(Isolate* isolate,
+                                        Handle<i::Object> source_object,
+                                        Handle<SharedFunctionInfo> outer_info,
+                                        LanguageMode language_mode,
+                                        int eval_scope_position,
+                                        int eval_position) {
   Handle<NativeContext> native_context = isolate->native_context();
 
   // Check if native context allows code generation from

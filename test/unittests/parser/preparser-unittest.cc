@@ -57,7 +57,7 @@ TEST_F(PreParserTest, LazyFunctionLength) {
 
   Handle<Smi> length = RunJS<Smi>("lazy.length");
   int32_t value;
-  CHECK(length->ToInt32(&value));
+  CHECK(Object::ToInt32(*length, &value));
   CHECK_EQ(3, value);
 }
 
@@ -884,10 +884,10 @@ TEST_F(PreParserTest, ProducingAndConsumingByteData) {
     i::ZoneConsumedPreparseData::ByteData::ReadingScope reading_scope(
         &bytes_for_reading, wrapper);
 
-    CHECK_EQ(wrapper.data_length(), kDataSize);
+    CHECK_EQ(wrapper->data_length(), kDataSize);
 
     for (int i = 0; i < kDataSize; i++) {
-      CHECK_EQ(copied_buffer.at(i), wrapper.get(i));
+      CHECK_EQ(copied_buffer.at(i), wrapper->get(i));
     }
 
 #ifdef DEBUG

@@ -149,7 +149,7 @@ inline void MarkingBitmap::ClearRange(MarkBitIndex start_index,
 
 // static
 MarkingBitmap* MarkingBitmap::FromAddress(Address address) {
-  Address page_address = address & ~kPageAlignmentMask;
+  Address page_address = MemoryChunk::FromAddress(address)->address();
   return Cast(page_address + MemoryChunkLayout::kMarkingBitmapOffset);
 }
 
@@ -162,15 +162,22 @@ MarkBit MarkingBitmap::MarkBitFromAddress(Address address) {
 }
 
 // static
+constexpr MarkingBitmap::MarkBitIndex MarkingBitmap::AddressToIndex(
+    Address address) {
+  return MemoryChunkHeader::AddressToOffset(address) >> kTaggedSizeLog2;
+}
+
+// static
 constexpr MarkingBitmap::MarkBitIndex MarkingBitmap::LimitAddressToIndex(
     Address address) {
-  if (IsAligned(address, BasicMemoryChunk::kAlignment)) return kLength;
+  if (MemoryChunkHeader::IsAligned(address)) return kLength;
   return AddressToIndex(address);
 }
 
 // static
-inline Address MarkingBitmap::FindPreviousObjectForConservativeMarking(
-    const Page* page, Address maybe_inner_ptr) {
+inline Address MarkingBitmap::FindPreviousValidObject(const Page* page,
+                                                      Address maybe_inner_ptr) {
+  DCHECK(page->Contains(maybe_inner_ptr));
   const auto* bitmap = page->marking_bitmap();
   const MarkBit::CellType* cells = bitmap->cells();
 
@@ -188,11 +195,7 @@ inline Address MarkingBitmap::FindPreviousObjectForConservativeMarking(
   auto cell_index = MarkingBitmap::IndexToCell(index);
   const auto index_in_cell = MarkingBitmap::IndexInCell(index);
   DCHECK_GT(MarkingBitmap::kBitsPerCell, index_in_cell);
-  const auto mask = static_cast<MarkBit::CellType>(1u) << index_in_cell;
   auto cell = cells[cell_index];
-
-  // If the markbit is already set, bail out.
-  if ((cell & mask) != 0) return kNullAddress;
 
   // Clear the bits corresponding to higher addresses in the cell.
   cell &= ((~static_cast<MarkBit::CellType>(0)) >>
@@ -256,7 +259,7 @@ MarkBit MarkBit::From(Address address) {
 }
 
 // static
-MarkBit MarkBit::From(HeapObject heap_object) {
+MarkBit MarkBit::From(Tagged<HeapObject> heap_object) {
   return MarkingBitmap::MarkBitFromAddress(heap_object.ptr());
 }
 
@@ -306,7 +309,7 @@ bool LiveObjectRange::iterator::AdvanceToNextMarkedObject() {
     // well as other objects.
     Address next_object = current_object_.address() + current_size_;
     current_object_ = HeapObject();
-    if (IsAligned(next_object, BasicMemoryChunk::kAlignment)) {
+    if (MemoryChunkHeader::IsAligned(next_object)) {
       return false;
     }
     // Area end may not be exactly aligned to kAlignment. We don't need to bail

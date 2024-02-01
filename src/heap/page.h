@@ -37,11 +37,12 @@ class Page : public MemoryChunk {
   // is in fact in a page.
   static Page* FromAddress(Address addr) {
     DCHECK(!V8_ENABLE_THIRD_PARTY_HEAP_BOOL);
-    return reinterpret_cast<Page*>(addr & ~kPageAlignmentMask);
+    return reinterpret_cast<Page*>(
+        MemoryChunkHeader::FromAddress(addr)->MemoryChunk());
   }
-  static Page* FromHeapObject(HeapObject o) {
+  static Page* FromHeapObject(Tagged<HeapObject> o) {
     DCHECK(!V8_ENABLE_THIRD_PARTY_HEAP_BOOL);
-    return reinterpret_cast<Page*>(o.ptr() & ~kAlignmentMask);
+    return FromAddress(o.ptr());
   }
 
   static Page* cast(BasicMemoryChunk* chunk) {
@@ -64,12 +65,13 @@ class Page : public MemoryChunk {
 
   // Checks if address1 and address2 are on the same new space page.
   static bool OnSamePage(Address address1, Address address2) {
-    return Page::FromAddress(address1) == Page::FromAddress(address2);
+    return MemoryChunkHeader::FromAddress(address1) ==
+           MemoryChunkHeader::FromAddress(address2);
   }
 
   // Checks whether an address is page aligned.
   static bool IsAlignedToPageSize(Address addr) {
-    return (addr & kPageAlignmentMask) == 0;
+    return MemoryChunkHeader::IsAligned(addr);
   }
 
   static Page* ConvertNewToOld(Page* old_page);
@@ -137,11 +139,22 @@ class Page : public MemoryChunk {
 };
 
 // Validate our estimates on the header size.
-static_assert(sizeof(BasicMemoryChunk) <= BasicMemoryChunk::kHeaderSize);
-static_assert(sizeof(MemoryChunk) <= MemoryChunk::kHeaderSize);
-static_assert(sizeof(Page) <= MemoryChunk::kHeaderSize);
+static_assert(sizeof(BasicMemoryChunk) <=
+              MemoryChunkLayout::kBasicMemoryChunkHeaderSize);
+static_assert(sizeof(MemoryChunk) <= MemoryChunkLayout::kMemoryChunkHeaderSize);
+static_assert(sizeof(Page) <= MemoryChunkLayout::kMemoryChunkHeaderSize);
 
 }  // namespace internal
+
+namespace base {
+// Define special hash function for page pointers, to be used with std data
+// structures, e.g. std::unordered_set<Page*, base::hash<Page*>
+template <>
+struct hash<i::Page*> : hash<i::BasicMemoryChunk*> {};
+template <>
+struct hash<const i::Page*> : hash<const i::BasicMemoryChunk*> {};
+}  // namespace base
+
 }  // namespace v8
 
 #endif  // V8_HEAP_PAGE_H_

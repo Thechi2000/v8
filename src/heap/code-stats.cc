@@ -15,24 +15,25 @@ namespace v8 {
 namespace internal {
 
 // Record code statistics.
-void CodeStatistics::RecordCodeAndMetadataStatistics(HeapObject object,
+void CodeStatistics::RecordCodeAndMetadataStatistics(Tagged<HeapObject> object,
                                                      Isolate* isolate) {
   PtrComprCageBase cage_base(isolate);
-  if (object.IsScript(cage_base)) {
-    Script script = Script::cast(object);
+  if (IsScript(object, cage_base)) {
+    Tagged<Script> script = Script::cast(object);
     // Log the size of external source code.
-    Object source = script->source(cage_base);
-    if (source.IsExternalString(cage_base)) {
-      ExternalString external_source_string = ExternalString::cast(source);
+    Tagged<Object> source = script->source(cage_base);
+    if (IsExternalString(source, cage_base)) {
+      Tagged<ExternalString> external_source_string =
+          ExternalString::cast(source);
       int size = isolate->external_script_source_size();
       size += external_source_string->ExternalPayloadSize();
       isolate->set_external_script_source_size(size);
     }
-  } else if (object.IsAbstractCode(cage_base)) {
+  } else if (IsAbstractCode(object, cage_base)) {
     // Record code+metadata statistics.
-    AbstractCode abstract_code = AbstractCode::cast(object);
+    Tagged<AbstractCode> abstract_code = AbstractCode::cast(object);
     int size = abstract_code->SizeIncludingMetadata(cage_base);
-    if (abstract_code->IsCode(cage_base)) {
+    if (IsCode(abstract_code, cage_base)) {
       size += isolate->code_and_metadata_size();
       isolate->set_code_and_metadata_size(size);
     } else {
@@ -66,7 +67,8 @@ void CodeStatistics::ResetCodeAndMetadataStatistics(Isolate* isolate) {
 void CodeStatistics::CollectCodeStatistics(PagedSpace* space,
                                            Isolate* isolate) {
   PagedSpaceObjectIterator obj_it(isolate->heap(), space);
-  for (HeapObject obj = obj_it.Next(); !obj.is_null(); obj = obj_it.Next()) {
+  for (Tagged<HeapObject> obj = obj_it.Next(); !obj.is_null();
+       obj = obj_it.Next()) {
     RecordCodeAndMetadataStatistics(obj, isolate);
   }
 }
@@ -78,7 +80,8 @@ void CodeStatistics::CollectCodeStatistics(PagedSpace* space,
 void CodeStatistics::CollectCodeStatistics(OldLargeObjectSpace* space,
                                            Isolate* isolate) {
   LargeObjectSpaceObjectIterator obj_it(space);
-  for (HeapObject obj = obj_it.Next(); !obj.is_null(); obj = obj_it.Next()) {
+  for (Tagged<HeapObject> obj = obj_it.Next(); !obj.is_null();
+       obj = obj_it.Next()) {
     RecordCodeAndMetadataStatistics(obj, isolate);
   }
 }
@@ -197,13 +200,13 @@ void CodeStatistics::CollectCommentStatistics(Isolate* isolate,
 }
 
 // Collects code comment statistics.
-void CodeStatistics::CollectCodeCommentStatistics(AbstractCode obj,
+void CodeStatistics::CollectCodeCommentStatistics(Tagged<AbstractCode> obj,
                                                   Isolate* isolate) {
   // Bytecode objects do not contain RelocInfo.
   PtrComprCageBase cage_base{isolate};
-  if (!obj->IsCode(cage_base)) return;
+  if (!IsCode(obj, cage_base)) return;
 
-  Code code = Code::cast(obj);
+  Tagged<Code> code = Code::cast(obj);
 
   // Off-heap builtins might contain comments but they are a part of binary so
   // it doesn't make sense to account them in the stats.

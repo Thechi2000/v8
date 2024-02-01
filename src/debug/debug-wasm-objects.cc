@@ -72,7 +72,7 @@ Handle<Map> GetOrCreateDebugProxyMap(
     return handle(Map::cast(maps->get(id)), isolate);
   }
   auto tmp = (*create_template_fn)(reinterpret_cast<v8::Isolate*>(isolate));
-  auto fun = ApiNatives::InstantiateFunction(Utils::OpenHandle(*tmp))
+  auto fun = ApiNatives::InstantiateFunction(isolate, Utils::OpenHandle(*tmp))
                  .ToHandleChecked();
   auto map = JSFunction::GetDerivedMap(isolate, fun, fun).ToHandleChecked();
   Map::SetPrototype(isolate, map, isolate->factory()->null_value());
@@ -206,7 +206,7 @@ struct NamedDebugProxy : IndexedDebugProxy<T, id, Provider> {
     Handle<Symbol> symbol = isolate->factory()->wasm_debug_proxy_names_symbol();
     Handle<Object> table_or_undefined =
         JSObject::GetProperty(isolate, holder, symbol).ToHandleChecked();
-    if (!table_or_undefined->IsUndefined(isolate)) {
+    if (!IsUndefined(*table_or_undefined, isolate)) {
       return Handle<NameDictionary>::cast(table_or_undefined);
     }
     auto provider = T::GetProvider(holder, isolate);
@@ -276,9 +276,11 @@ struct FunctionsProxy : NamedDebugProxy<FunctionsProxy, kFunctionsProxy> {
   static Handle<Object> Get(Isolate* isolate,
                             Handle<WasmInstanceObject> instance,
                             uint32_t index) {
+    Handle<WasmTrustedInstanceData> trusted_data{
+        instance->trusted_data(isolate), isolate};
     Handle<WasmInternalFunction> internal =
-        WasmInstanceObject::GetOrCreateWasmInternalFunction(isolate, instance,
-                                                            index);
+        WasmTrustedInstanceData::GetOrCreateWasmInternalFunction(
+            isolate, trusted_data, index);
     return WasmInternalFunction::GetOrCreateExternal(internal);
   }
 
@@ -303,8 +305,8 @@ struct GlobalsProxy : NamedDebugProxy<GlobalsProxy, kGlobalsProxy> {
     Handle<WasmModuleObject> module(instance->module_object(), isolate);
     return WasmValueObject::New(
         isolate,
-        WasmInstanceObject::GetGlobalValue(instance,
-                                           instance->module()->globals[index]),
+        instance->trusted_data(isolate)->GetGlobalValue(
+            isolate, instance->module()->globals[index]),
         module);
   }
 
@@ -324,13 +326,14 @@ struct MemoriesProxy : NamedDebugProxy<MemoriesProxy, kMemoriesProxy> {
   static constexpr char const* kClassName = "Memories";
 
   static uint32_t Count(Isolate* isolate, Handle<WasmInstanceObject> instance) {
-    return instance->memory_objects()->length();
+    return instance->trusted_data(isolate)->memory_objects()->length();
   }
 
   static Handle<Object> Get(Isolate* isolate,
                             Handle<WasmInstanceObject> instance,
                             uint32_t index) {
-    return handle(instance->memory_object(index), isolate);
+    return handle(instance->trusted_data(isolate)->memory_object(index),
+                  isolate);
   }
 
   static Handle<String> GetName(Isolate* isolate,
@@ -349,13 +352,14 @@ struct TablesProxy : NamedDebugProxy<TablesProxy, kTablesProxy> {
   static constexpr char const* kClassName = "Tables";
 
   static uint32_t Count(Isolate* isolate, Handle<WasmInstanceObject> instance) {
-    return instance->tables()->length();
+    return instance->trusted_data(isolate)->tables()->length();
   }
 
   static Handle<Object> Get(Isolate* isolate,
                             Handle<WasmInstanceObject> instance,
                             uint32_t index) {
-    return handle(instance->tables()->get(index), isolate);
+    return handle(instance->trusted_data(isolate)->tables()->get(index),
+                  isolate);
   }
 
   static Handle<String> GetName(Isolate* isolate,
@@ -377,8 +381,8 @@ struct LocalsProxy : NamedDebugProxy<LocalsProxy, kLocalsProxy, FixedArray> {
     auto isolate = frame->isolate();
     auto debug_info = frame->native_module()->GetDebugInfo();
     // TODO(bmeurer): Check if pc is inspectable.
-    int count = debug_info->GetNumLocals(frame->pc());
-    auto function = debug_info->GetFunctionAtAddress(frame->pc());
+    int count = debug_info->GetNumLocals(frame->pc(), isolate);
+    auto function = debug_info->GetFunctionAtAddress(frame->pc(), isolate);
     auto values = isolate->factory()->NewFixedArray(count + 2);
     Handle<WasmModuleObject> module_object(
         frame->wasm_instance()->module_object(), isolate);
@@ -427,7 +431,7 @@ struct StackProxy : IndexedDebugProxy<StackProxy, kStackProxy, FixedArray> {
                           ->module_object()
                           ->native_module()
                           ->GetDebugInfo();
-    int count = debug_info->GetStackDepth(frame->pc());
+    int count = debug_info->GetStackDepth(frame->pc(), isolate);
     auto values = isolate->factory()->NewFixedArray(count);
     Handle<WasmModuleObject> module_object(
         frame->wasm_instance()->module_object(), isolate);
@@ -461,7 +465,7 @@ Handle<FixedArray> GetOrCreateInstanceProxyCache(
   Handle<Object> cache;
   Handle<Symbol> symbol = isolate->factory()->wasm_debug_proxy_cache_symbol();
   if (!Object::GetProperty(isolate, instance, symbol).ToHandle(&cache) ||
-      cache->IsUndefined(isolate)) {
+      IsUndefined(*cache, isolate)) {
     cache = isolate->factory()->NewFixedArrayWithHoles(kNumInstanceProxies);
     Object::SetProperty(isolate, instance, symbol, cache).Check();
   }
@@ -556,12 +560,12 @@ class ContextProxyPrototype {
         ASSIGN_RETURN_ON_EXCEPTION(
             isolate, delegate,
             JSObject::GetProperty(isolate, receiver, delegate_name), Object);
-        if (!delegate->IsUndefined(isolate)) {
+        if (!IsUndefined(*delegate, isolate)) {
           Handle<Object> value;
           ASSIGN_RETURN_ON_EXCEPTION(
               isolate, value, Object::GetProperty(isolate, delegate, name),
               Object);
-          if (!value->IsUndefined(isolate)) return value;
+          if (!IsUndefined(*value, isolate)) return value;
         }
       }
     }
@@ -647,7 +651,7 @@ class DebugWasmScopeIterator final : public debug::ScopeIterator {
     Isolate* isolate = frame_->isolate();
     switch (type_) {
       case debug::ScopeIterator::ScopeTypeModule: {
-        Handle<WasmInstanceObject> instance(frame_->wasm_instance(), isolate);
+        Handle<WasmInstanceObject> instance{frame_->wasm_instance(), isolate};
         Handle<JSObject> object =
             isolate->factory()->NewSlowJSObjectWithNullProto();
         JSObject::AddProperty(isolate, object, "instance", instance, FROZEN);
@@ -751,7 +755,7 @@ Handle<WasmValueObject> WasmValueObject::New(Isolate* isolate,
                                              Handle<Object> value) {
   auto maps = GetOrCreateDebugMaps(isolate);
   if (maps->is_the_hole(isolate, kWasmValueMapIndex)) {
-    Handle<Map> map = isolate->factory()->NewMap(
+    Handle<Map> map = isolate->factory()->NewContextfulMapForCurrentContext(
         WASM_VALUE_OBJECT_TYPE, WasmValueObject::kSize,
         TERMINAL_FAST_ELEMENTS_KIND, 2);
     Map::EnsureDescriptorSlack(isolate, map, 2);
@@ -920,23 +924,33 @@ Handle<WasmValueObject> WasmValueObject::New(
     case wasm::kRefNull:
     case wasm::kRef: {
       Handle<Object> ref = value.to_ref();
-      if (ref->IsWasmStruct()) {
-        WasmTypeInfo type_info = ref->GetHeapObject()->map()->wasm_type_info();
+      if (value.type().heap_type().representation() == wasm::HeapType::kExn) {
+        t = isolate->factory()->InternalizeString(
+            base::StaticCharVector("exnref"));
+        v = ref;
+      } else if (IsWasmStruct(*ref)) {
+        Tagged<WasmTypeInfo> type_info =
+            HeapObject::cast(*ref)->map()->wasm_type_info();
         wasm::ValueType type = wasm::ValueType::FromIndex(
             wasm::ValueKind::kRef, type_info->type_index());
-        Handle<WasmModuleObject> module(type_info->instance()->module_object(),
-                                        isolate);
+        // The cast is safe; structs always have the instance defined.
+        Handle<WasmModuleObject> module(
+            WasmInstanceObject::cast(type_info->instance())->module_object(),
+            isolate);
         t = GetRefTypeName(isolate, type, module->native_module());
         v = StructProxy::Create(isolate, Handle<WasmStruct>::cast(ref), module);
-      } else if (ref->IsWasmArray()) {
-        WasmTypeInfo type_info = ref->GetHeapObject()->map()->wasm_type_info();
+      } else if (IsWasmArray(*ref)) {
+        Tagged<WasmTypeInfo> type_info =
+            HeapObject::cast(*ref)->map()->wasm_type_info();
         wasm::ValueType type = wasm::ValueType::FromIndex(
             wasm::ValueKind::kRef, type_info->type_index());
-        Handle<WasmModuleObject> module(type_info->instance()->module_object(),
-                                        isolate);
+        // The cast is safe; arrays always have the instance defined.
+        Handle<WasmModuleObject> module(
+            WasmInstanceObject::cast(type_info->instance())->module_object(),
+            isolate);
         t = GetRefTypeName(isolate, type, module->native_module());
         v = ArrayProxy::Create(isolate, Handle<WasmArray>::cast(ref), module);
-      } else if (ref->IsWasmInternalFunction()) {
+      } else if (IsWasmInternalFunction(*ref)) {
         auto internal_fct = Handle<WasmInternalFunction>::cast(ref);
         v = WasmInternalFunction::GetOrCreateExternal(internal_fct);
         // If the module is not provided by the caller, retrieve it from the
@@ -944,18 +958,18 @@ Handle<WasmValueObject> WasmValueObject::New(
         // `new WebAssembly.Function(...)`, a module for name resolution is not
         // available.
         if (module_object.is_null() &&
-            internal_fct->ref().IsWasmInstanceObject()) {
+            IsWasmInstanceObject(internal_fct->ref())) {
           module_object = handle(
               WasmInstanceObject::cast(internal_fct->ref())->module_object(),
               isolate);
         }
         t = GetRefTypeName(isolate, value.type(), module_object);
-      } else if (ref->IsWasmNull()) {
+      } else if (IsWasmNull(*ref)) {
         // TODO(manoskouk): Is this value correct?
         v = isolate->factory()->null_value();
         t = GetRefTypeName(isolate, value.type(), module_object);
-      } else if (ref->IsJSFunction() || ref->IsSmi() || ref->IsNull() ||
-                 ref->IsString() ||
+      } else if (IsJSFunction(*ref) || IsSmi(*ref) || IsNull(*ref) ||
+                 IsString(*ref) ||
                  value.type().is_reference_to(wasm::HeapType::kExtern) ||
                  value.type().is_reference_to(wasm::HeapType::kAny)) {
         t = GetRefTypeName(isolate, value.type(), module_object);
@@ -989,13 +1003,14 @@ std::unique_ptr<debug::ScopeIterator> GetWasmScopeIterator(WasmFrame* frame) {
 Handle<String> GetWasmFunctionDebugName(Isolate* isolate,
                                         Handle<WasmInstanceObject> instance,
                                         uint32_t func_index) {
-  Handle<WasmModuleObject> module_object(instance->module_object(), isolate);
-  wasm::NamesProvider* names =
-      module_object->native_module()->GetNamesProvider();
+  wasm::NativeModule* native_module =
+      instance->module_object()->native_module();
+  wasm::NamesProvider* names = native_module->GetNamesProvider();
   StringBuilder sb;
   wasm::NamesProvider::FunctionNamesBehavior behavior =
-      module_object->is_asm_js() ? wasm::NamesProvider::kWasmInternal
-                                 : wasm::NamesProvider::kDevTools;
+      is_asmjs_module(native_module->module())
+          ? wasm::NamesProvider::kWasmInternal
+          : wasm::NamesProvider::kDevTools;
   names->PrintFunctionName(sb, func_index, behavior);
   return ToInternalString(sb, isolate);
 }
@@ -1061,7 +1076,7 @@ Handle<ArrayList> AddWasmTableObjectInternalProperties(
     Handle<Object> entry = WasmTableObject::Get(isolate, table, i);
     wasm::WasmValue wasm_value(entry, table->type());
     Handle<WasmModuleObject> module;
-    if (table->instance().IsWasmInstanceObject()) {
+    if (IsWasmInstanceObject(table->instance())) {
       module = Handle<WasmModuleObject>(
           WasmInstanceObject::cast(table->instance())->module_object(),
           isolate);

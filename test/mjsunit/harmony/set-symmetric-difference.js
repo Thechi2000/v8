@@ -200,3 +200,129 @@
 
   assertEquals(resultArray, symmetricDifferenceArray);
 })();
+
+(function TestSymmetricDifferenceGrowFastPath() {
+  const s1 = new Set([1, 2, 3]).symmetricDifference(new Set([4, 5, 6]));
+  assertEquals([1, 2, 3, 4, 5, 6], Array.from(s1));
+
+  const s2 = new Set([1, 2, 3]).symmetricDifference(new Set([3, 4, 5, 6]));
+  assertEquals([1, 2, 4, 5, 6], Array.from(s2));
+
+  const s3 =
+      new Set([1, 2, 3]).symmetricDifference(new Map([[4, 4], [5, 5], [6, 6]]));
+  assertEquals([1, 2, 3, 4, 5, 6], Array.from(s3));
+
+  const s4 = new Set([1, 2, 3]).symmetricDifference(
+      new Map([[3, 3], [4, 4], [5, 5], [6, 6]]));
+  assertEquals([1, 2, 4, 5, 6], Array.from(s4));
+})();
+
+(function TestSymmetricDifferenceAfterClearingTheReceiver() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+
+  const otherSet = new Set();
+  otherSet.add(42);
+  otherSet.add(46);
+  otherSet.add(47);
+
+  Object.defineProperty(otherSet, 'size', {
+    get: function() {
+      firstSet.clear();
+      return 3;
+    },
+
+  });
+
+  const resultSet = new Set();
+  resultSet.add(42);
+  resultSet.add(46);
+  resultSet.add(47);
+
+  const resultArray = Array.from(resultSet);
+  const symmetricDifferenceArray =
+      Array.from(firstSet.symmetricDifference(otherSet));
+
+  assertEquals(resultArray, symmetricDifferenceArray);
+})();
+
+(function TestSymmetricDifferenceAfterRewritingKeys() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+
+  const otherSet = new Set();
+  otherSet.add(42);
+  otherSet.add(46);
+  otherSet.add(47);
+
+  otherSet.keys =
+      () => {
+        firstSet.clear();
+        return otherSet[Symbol.iterator]();
+      }
+
+  const resultArray = [42, 46, 47];
+
+  const symmetricDifferenceArray =
+      Array.from(firstSet.symmetricDifference(otherSet));
+
+  assertEquals(resultArray, symmetricDifferenceArray);
+})();
+
+(function TestSymmetricDifferenceSetLikeAfterRewritingKeys() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+
+  const setLike = {
+    arr: [42, 46, 47],
+    size: 3,
+    keys() {
+      return this.arr[Symbol.iterator]();
+    },
+    has(key) {
+      return this.arr.indexOf(key) != -1;
+    }
+  };
+
+  setLike.keys =
+      () => {
+        firstSet.clear();
+        return setLike.arr[Symbol.iterator]();
+      }
+
+  const resultArray = [42, 46, 47];
+
+  const symmetricDifferenceArray =
+      Array.from(firstSet.symmetricDifference(setLike));
+
+  assertEquals(resultArray, symmetricDifferenceArray);
+})();
+
+(function TestEvilIterator() {
+  const firstSet = new Set([1,2,3,4]);
+
+  let i = 0;
+  const evil = {
+    has(v) { return v === 43; },
+    keys() {
+      return {
+        next() {
+          if (i++ === 0) {
+            firstSet.clear();
+            firstSet.add(43);
+            firstSet.add(42);
+            return { value: 43, done: false };
+          } else {
+            return { value: undefined, done: true };
+          }
+        }
+      };
+    },
+    get size() { return 1; }
+  };
+
+  assertEquals([1,2,3,4], Array.from(firstSet.symmetricDifference(evil)));
+})();

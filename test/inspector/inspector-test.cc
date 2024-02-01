@@ -2,10 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#if !defined(_WIN32) && !defined(_WIN64)
-#include <unistd.h>
-#endif  // !defined(_WIN32) && !defined(_WIN64)
-
 #include <locale.h>
 
 #include <string>
@@ -25,6 +21,10 @@
 #include "test/inspector/task-runner.h"
 #include "test/inspector/tasks.h"
 #include "test/inspector/utils.h"
+
+#if !defined(V8_OS_WIN)
+#include <unistd.h>
+#endif  // !defined(V8_OS_WIN)
 
 namespace v8 {
 namespace internal {
@@ -356,12 +356,20 @@ class UtilsExtension : public InspectorIsolateData::SetupGlobalTask {
                 });
   }
 
+  static bool IsValidConnectSessionArgs(
+      const v8::FunctionCallbackInfo<v8::Value>& info) {
+    if (info.Length() < 3 || info.Length() > 4) return false;
+    if (!info[0]->IsInt32() || !info[1]->IsString() || !info[2]->IsFunction()) {
+      return false;
+    }
+    return info.Length() == 3 || info[3]->IsBoolean();
+  }
+
   static void ConnectSession(const v8::FunctionCallbackInfo<v8::Value>& info) {
-    if (info.Length() != 3 || !info[0]->IsInt32() || !info[1]->IsString() ||
-        !info[2]->IsFunction()) {
+    if (!IsValidConnectSessionArgs(info)) {
       FATAL(
           "Internal error: connectionSession(context_group_id, state, "
-          "dispatch).");
+          "dispatch, is_fully_trusted).");
     }
     v8::Local<v8::Context> context = info.GetIsolate()->GetCurrentContext();
     std::unique_ptr<FrontendChannelImpl> channel =
@@ -374,14 +382,17 @@ class UtilsExtension : public InspectorIsolateData::SetupGlobalTask {
     std::vector<uint8_t> state =
         ToBytes(info.GetIsolate(), info[1].As<v8::String>());
     int context_group_id = info[0].As<v8::Int32>()->Value();
+    bool is_fully_trusted =
+        info.Length() == 3 || info[3].As<v8::Boolean>()->Value();
     base::Optional<int> session_id;
-    RunSyncTask(backend_runner_, [&context_group_id, &session_id, &channel,
-                                  &state](InspectorIsolateData* data) {
-      session_id = data->ConnectSession(
-          context_group_id,
-          v8_inspector::StringView(state.data(), state.size()),
-          std::move(channel));
-    });
+    RunSyncTask(backend_runner_,
+                [context_group_id, &session_id, &channel, &state,
+                 is_fully_trusted](InspectorIsolateData* data) {
+                  session_id = data->ConnectSession(
+                      context_group_id,
+                      v8_inspector::StringView(state.data(), state.size()),
+                      std::move(channel), is_fully_trusted);
+                });
 
     CHECK(session_id.has_value());
     info.GetReturnValue().Set(v8::Int32::New(info.GetIsolate(), *session_id));
@@ -450,8 +461,8 @@ class ConsoleExtension : public InspectorIsolateData::SetupGlobalTask {
            v8::Local<v8::ObjectTemplate> global) override {
     v8::Local<v8::String> name =
         v8::String::NewFromUtf8Literal(isolate, "console");
-    global->SetAccessor(name, &ConsoleGetterCallback, nullptr, {}, v8::DEFAULT,
-                        v8::DontEnum);
+    global->SetNativeDataProperty(name, &ConsoleGetterCallback, nullptr, {},
+                                  v8::DontEnum);
   }
 
  private:
@@ -813,9 +824,11 @@ class InspectorExtension : public InspectorIsolateData::SetupGlobalTask {
     v8::Local<v8::Context> context = isolate->GetCurrentContext();
 
     v8::Local<v8::Function> callback = v8::Local<v8::Function>::Cast(info[0]);
-    v8::MaybeLocal<v8::Value> result =
-        callback->Call(context, v8::Undefined(isolate), 0, nullptr);
-    info.GetReturnValue().Set(result.ToLocalChecked());
+    v8::Local<v8::Value> result;
+    if (callback->Call(context, v8::Undefined(isolate), 0, nullptr)
+            .ToLocal(&result)) {
+      info.GetReturnValue().Set(result);
+    }
   }
 
   static void RunNestedMessageLoop(

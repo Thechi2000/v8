@@ -66,7 +66,7 @@ RUNTIME_FUNCTION(Runtime_CreateJSGeneratorObject) {
   raw_generator->set_parameters_and_registers(*parameters_and_registers);
   raw_generator->set_resume_mode(JSGeneratorObject::ResumeMode::kNext);
   raw_generator->set_continuation(JSGeneratorObject::kGeneratorExecuting);
-  if (raw_generator->IsJSAsyncGeneratorObject()) {
+  if (IsJSAsyncGeneratorObject(*raw_generator)) {
     JSAsyncGeneratorObject::cast(raw_generator)->set_is_awaiting(0);
   }
   return raw_generator;
@@ -137,7 +137,7 @@ RUNTIME_FUNCTION(Runtime_AsyncGeneratorHasCatchHandlerForPC) {
   // not reach a catch handler.
   if (state < 1) return ReadOnlyRoots(isolate).false_value();
 
-  SharedFunctionInfo shared = generator->function()->shared();
+  Tagged<SharedFunctionInfo> shared = generator->function()->shared();
   DCHECK(shared->HasBytecodeArray());
   HandlerTable handler_table(shared->GetBytecodeArray(isolate));
 

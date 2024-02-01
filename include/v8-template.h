@@ -5,6 +5,9 @@
 #ifndef INCLUDE_V8_TEMPLATE_H_
 #define INCLUDE_V8_TEMPLATE_H_
 
+#include <cstddef>
+#include <string_view>
+
 #include "v8-data.h"               // NOLINT(build/include_directory)
 #include "v8-function-callback.h"  // NOLINT(build/include_directory)
 #include "v8-local-handle.h"       // NOLINT(build/include_directory)
@@ -61,7 +64,7 @@ class V8_EXPORT Template : public Data {
       Local<Name> name,
       Local<FunctionTemplate> getter = Local<FunctionTemplate>(),
       Local<FunctionTemplate> setter = Local<FunctionTemplate>(),
-      PropertyAttribute attribute = None, AccessControl settings = DEFAULT);
+      PropertyAttribute attribute = None);
 
   /**
    * Whenever the property with the given name is accessed on objects
@@ -74,29 +77,33 @@ class V8_EXPORT Template : public Data {
    * \param setter The callback to invoke when setting the property.
    * \param data A piece of data that will be passed to the getter and setter
    *   callbacks whenever they are invoked.
-   * \param settings Access control settings for the accessor. This is a bit
-   *   field consisting of one of more of
-   *   DEFAULT = 0, ALL_CAN_READ = 1, or ALL_CAN_WRITE = 2.
-   *   The default is to not allow cross-context access.
-   *   ALL_CAN_READ means that all cross-context reads are allowed.
-   *   ALL_CAN_WRITE means that all cross-context writes are allowed.
-   *   The combination ALL_CAN_READ | ALL_CAN_WRITE can be used to allow all
-   *   cross-context access.
    * \param attribute The attributes of the property for which an accessor
    *   is added.
    */
+  V8_DEPRECATE_SOON("Use SetNativeDataProperty without AccessControl instead")
+  void SetNativeDataProperty(
+      Local<String> name, AccessorGetterCallback getter,
+      AccessorSetterCallback setter, Local<Value> data,
+      PropertyAttribute attribute, AccessControl settings,
+      SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
+      SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
+  V8_DEPRECATE_SOON("Use SetNativeDataProperty without AccessControl instead")
+  void SetNativeDataProperty(
+      Local<Name> name, AccessorNameGetterCallback getter,
+      AccessorNameSetterCallback setter, Local<Value> data,
+      PropertyAttribute attribute, AccessControl settings,
+      SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
+      SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
   void SetNativeDataProperty(
       Local<String> name, AccessorGetterCallback getter,
       AccessorSetterCallback setter = nullptr,
       Local<Value> data = Local<Value>(), PropertyAttribute attribute = None,
-      AccessControl settings = DEFAULT,
       SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
       SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
   void SetNativeDataProperty(
       Local<Name> name, AccessorNameGetterCallback getter,
       AccessorNameSetterCallback setter = nullptr,
       Local<Value> data = Local<Value>(), PropertyAttribute attribute = None,
-      AccessControl settings = DEFAULT,
       SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
       SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
 
@@ -604,27 +611,22 @@ enum class PropertyHandlerFlags {
    */
   kNone = 0,
 
-  /**
-   * See ALL_CAN_READ above.
-   */
-  kAllCanRead = 1,
-
   /** Will not call into interceptor for properties on the receiver or prototype
    * chain, i.e., only call into interceptor for properties that do not exist.
    * Currently only valid for named interceptors.
    */
-  kNonMasking = 1 << 1,
+  kNonMasking = 1,
 
   /**
    * Will not call into interceptor for symbol lookup.  Only meaningful for
    * named interceptors.
    */
-  kOnlyInterceptStrings = 1 << 2,
+  kOnlyInterceptStrings = 1 << 1,
 
   /**
    * The getter, query, enumerator callbacks do not produce side effects.
    */
-  kHasNoSideEffect = 1 << 3,
+  kHasNoSideEffect = 1 << 2,
 };
 
 struct NamedPropertyHandlerConfiguration {
@@ -779,7 +781,11 @@ class V8_EXPORT ObjectTemplate : public Template {
       Isolate* isolate,
       Local<FunctionTemplate> constructor = Local<FunctionTemplate>());
 
-  /** Creates a new instance of this template.*/
+  /**
+   * Creates a new instance of this template.
+   *
+   * \param context The context in which the instance is created.
+   */
   V8_WARN_UNUSED_RESULT MaybeLocal<Object> NewInstance(Local<Context> context);
 
   /**
@@ -795,29 +801,19 @@ class V8_EXPORT ObjectTemplate : public Template {
    * \param setter The callback to invoke when setting the property.
    * \param data A piece of data that will be passed to the getter and setter
    *   callbacks whenever they are invoked.
-   * \param settings Access control settings for the accessor. This is a bit
-   *   field consisting of one of more of
-   *   DEFAULT = 0, ALL_CAN_READ = 1, or ALL_CAN_WRITE = 2.
-   *   The default is to not allow cross-context access.
-   *   ALL_CAN_READ means that all cross-context reads are allowed.
-   *   ALL_CAN_WRITE means that all cross-context writes are allowed.
-   *   The combination ALL_CAN_READ | ALL_CAN_WRITE can be used to allow all
-   *   cross-context access.
    * \param attribute The attributes of the property for which an accessor
    *   is added.
    */
   void SetAccessor(
       Local<String> name, AccessorGetterCallback getter,
       AccessorSetterCallback setter = nullptr,
-      Local<Value> data = Local<Value>(), AccessControl settings = DEFAULT,
-      PropertyAttribute attribute = None,
+      Local<Value> data = Local<Value>(), PropertyAttribute attribute = None,
       SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
       SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
   void SetAccessor(
       Local<Name> name, AccessorNameGetterCallback getter,
       AccessorNameSetterCallback setter = nullptr,
-      Local<Value> data = Local<Value>(), AccessControl settings = DEFAULT,
-      PropertyAttribute attribute = None,
+      Local<Value> data = Local<Value>(), PropertyAttribute attribute = None,
       SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
       SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
 
@@ -962,6 +958,41 @@ class V8_EXPORT ObjectTemplate : public Template {
 };
 
 /**
+ * A template to create dictionary objects at runtime.
+ */
+class V8_EXPORT DictionaryTemplate final {
+ public:
+  /** Creates a new template. Also declares data properties that can be passed
+   * on instantiation of the template. Properties can only be declared on
+   * construction and are then immutable. The values are passed on creating the
+   * object via `NewInstance()`.
+   *
+   * \param names the keys that can be passed on instantiation.
+   */
+  static Local<DictionaryTemplate> New(
+      Isolate* isolate, MemorySpan<const std::string_view> names);
+
+  /**
+   * Creates a new instance of this template.
+   *
+   * \param context The context used to create the dictionary object.
+   * \param property_values Values of properties that were declared using
+   *   `DeclareDataProperties()`. The span only passes values and expectes the
+   *   order to match the declaration. Non-existent properties are signaled via
+   *   empty `MaybeLocal`s.
+   */
+  V8_WARN_UNUSED_RESULT Local<Object> NewInstance(
+      Local<Context> context, MemorySpan<MaybeLocal<Value>> property_values);
+
+  V8_INLINE static DictionaryTemplate* Cast(Data* data);
+
+ private:
+  static void CheckCast(Data* that);
+
+  DictionaryTemplate();
+};
+
+/**
  * A Signature specifies which receiver is valid for a function.
  *
  * A receiver matches a given signature if the receiver (or any of its
@@ -1004,6 +1035,13 @@ ObjectTemplate* ObjectTemplate::Cast(Data* data) {
   CheckCast(data);
 #endif
   return reinterpret_cast<ObjectTemplate*>(data);
+}
+
+DictionaryTemplate* DictionaryTemplate::Cast(Data* data) {
+#ifdef V8_ENABLE_CHECKS
+  CheckCast(data);
+#endif
+  return reinterpret_cast<DictionaryTemplate*>(data);
 }
 
 Signature* Signature::Cast(Data* data) {

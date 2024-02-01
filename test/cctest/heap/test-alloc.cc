@@ -50,7 +50,7 @@ Handle<Object> HeapTester::TestAllocateAfterFailures() {
   AlwaysAllocateScopeForTesting scope(heap);
   int size = FixedArray::SizeFor(100);
   // Young generation.
-  HeapObject obj =
+  Tagged<HeapObject> obj =
       heap->AllocateRaw(size, AllocationType::kYoung).ToObjectChecked();
   // In order to pass heap verification on Isolate teardown, mark the
   // allocated area as a filler.
@@ -100,7 +100,7 @@ HEAP_TEST(StressHandles) {
   v8::Local<v8::Context> env = v8::Context::New(CcTest::isolate());
   env->Enter();
   Handle<Object> o = TestAllocateAfterFailures();
-  CHECK(o->IsTrue(CcTest::i_isolate()));
+  CHECK(IsTrue(*o, CcTest::i_isolate()));
   env->Exit();
 }
 

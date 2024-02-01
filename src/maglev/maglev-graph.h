@@ -31,7 +31,9 @@ class Graph final : public ZoneObject {
         root_(zone),
         osr_values_(zone),
         smi_(zone),
-        int_(zone),
+        tagged_index_(zone),
+        int32_(zone),
+        uint32_(zone),
         float_(zone),
         external_references_(zone),
         parameters_(zone),
@@ -89,7 +91,9 @@ class Graph final : public ZoneObject {
   ZoneMap<RootIndex, RootConstant*>& root() { return root_; }
   ZoneVector<InitialValue*>& osr_values() { return osr_values_; }
   ZoneMap<int, SmiConstant*>& smi() { return smi_; }
-  ZoneMap<int, Int32Constant*>& int32() { return int_; }
+  ZoneMap<int, TaggedIndexConstant*>& tagged_index() { return tagged_index_; }
+  ZoneMap<int32_t, Int32Constant*>& int32() { return int32_; }
+  ZoneMap<uint32_t, Uint32Constant*>& uint32() { return uint32_; }
   ZoneMap<uint64_t, Float64Constant*>& float64() { return float_; }
   ZoneMap<Address, ExternalConstant*>& external_references() {
     return external_references_;
@@ -124,7 +128,9 @@ class Graph final : public ZoneObject {
   ZoneMap<RootIndex, RootConstant*> root_;
   ZoneVector<InitialValue*> osr_values_;
   ZoneMap<int, SmiConstant*> smi_;
-  ZoneMap<int, Int32Constant*> int_;
+  ZoneMap<int, TaggedIndexConstant*> tagged_index_;
+  ZoneMap<int32_t, Int32Constant*> int32_;
+  ZoneMap<uint32_t, Uint32Constant*> uint32_;
   // Use the bits of the float as the key.
   ZoneMap<uint64_t, Float64Constant*> float_;
   ZoneMap<Address, ExternalConstant*> external_references_;

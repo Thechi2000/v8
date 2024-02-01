@@ -14,6 +14,7 @@
 #include "src/execution/isolate.h"
 #include "src/utils/ostreams.h"
 #include "src/wasm/baseline/liftoff-compiler.h"
+#include "src/wasm/compilation-environment-inl.h"
 #include "src/wasm/function-body-decoder-impl.h"
 #include "src/wasm/module-decoder-impl.h"
 #include "src/wasm/module-instantiate.h"
@@ -46,8 +47,9 @@ Handle<WasmModuleObject> CompileReferenceModule(
   CHECK(module_res.ok());
   std::shared_ptr<WasmModule> module = module_res.value();
   CHECK_NOT_NULL(module);
-  native_module =
-      GetWasmEngine()->NewNativeModule(isolate, enabled_features, module, 0);
+  // TODO(14179): Add fuzzer support for compile-time imports.
+  native_module = GetWasmEngine()->NewNativeModule(
+      isolate, enabled_features, CompileTimeImports{}, module, 0);
   native_module->SetWireBytes(base::OwnedVector<uint8_t>::Of(wire_bytes));
   // The module is known to be valid as this point (it was compiled by the
   // caller before).
@@ -55,7 +57,7 @@ Handle<WasmModuleObject> CompileReferenceModule(
 
   // Compile all functions with Liftoff.
   WasmCodeRefScope code_ref_scope;
-  auto env = native_module->CreateCompilationEnv();
+  CompilationEnv env = CompilationEnv::ForModule(native_module.get());
   ModuleWireBytes wire_bytes_accessor{wire_bytes};
   for (size_t i = module->num_imported_functions; i < module->functions.size();
        ++i) {
@@ -112,7 +114,7 @@ void ExecuteAgainstReference(Isolate* isolate,
              ->SyncInstantiate(isolate, &thrower, module_ref, {},
                                {})  // no imports & memory
              .ToHandle(&instance_ref)) {
-      isolate->clear_pending_exception();
+      isolate->clear_exception();
       thrower.Reset();  // Ignore errors.
       return;
     }
@@ -257,6 +259,10 @@ std::string HeapTypeToConstantName(HeapType heap_type) {
       return "kWasmNullFuncRef";
     case HeapType::kNoExtern:
       return "kWasmNullExternRef";
+    case HeapType::kExn:
+      return "kWasmExnRef";
+    case HeapType::kNoExn:
+      return "kWasmNullExnRef";
     case HeapType::kBottom:
       UNREACHABLE();
     default:
@@ -407,11 +413,11 @@ class InitExprInterface {
   void UnOp(FullDecoder* decoder, WasmOpcode opcode, const Value& value,
             Value* result) {
     switch (opcode) {
-      case kExprExternInternalize:
-        os_ << "kGCPrefix, kExprExternInternalize, ";
+      case kExprAnyConvertExtern:
+        os_ << "kGCPrefix, kExprAnyConvertExtern, ";
         break;
-      case kExprExternExternalize:
-        os_ << "kGCPrefix, kExprExternExternalize, ";
+      case kExprExternConvertAny:
+        os_ << "kGCPrefix, kExprExternConvertAny, ";
         break;
       default:
         UNREACHABLE();
@@ -470,8 +476,8 @@ class InitExprInterface {
     UNIMPLEMENTED();
   }
 
-  void I31New(FullDecoder* decoder, const Value& input, Value* result) {
-    os_ << "kGCPrefix, kExprI31New, ";
+  void RefI31(FullDecoder* decoder, const Value& input, Value* result) {
+    os_ << "kGCPrefix, kExprRefI31, ";
   }
 
   // Since we treat all instructions as rtt-less, we should not print rtts.
@@ -553,8 +559,7 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
         "can be\n"
         "// found in the LICENSE file.\n"
         "\n"
-        "// Flags: --wasm-staging --experimental-wasm-gc\n"
-        "// Flags: --experimental-wasm-relaxed-simd\n"
+        "// Flags: --wasm-staging\n"
         "\n"
         "d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');\n"
         "\n"
@@ -767,7 +772,11 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
 
   if (compiles) {
     os << "const instance = builder.instantiate();\n"
-          "print(instance.exports.main(1, 2, 3));\n";
+          "try {\n"
+          "  print(instance.exports.main(1, 2, 3));\n"
+          "} catch (e) {\n"
+          "  print('caught exception', e);\n"
+          "}\n";
   } else {
     os << "assertThrows(function() { builder.instantiate(); }, "
           "WebAssembly.CompileError);\n";
@@ -784,7 +793,7 @@ void EnableExperimentalWasmFeatures(v8::Isolate* isolate) {
 #undef ENABLE_STAGED_FEATURES
 
       // Enable non-staged experimental features that we also want to fuzz.
-      v8_flags.experimental_wasm_gc = true;
+      // <currently none>
 
       // Enforce implications from enabling features.
       FlagList::EnforceFlagImplications();
@@ -811,10 +820,13 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
 
   Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
 
-  // Clear any pending exceptions from a prior run.
-  i_isolate->clear_pending_exception();
-
   v8::Isolate::Scope isolate_scope(isolate);
+
+  // Clear any exceptions from a prior run.
+  if (i_isolate->has_exception()) {
+    i_isolate->clear_exception();
+  }
+
   v8::HandleScope handle_scope(isolate);
   v8::Context::Scope context_scope(support->GetContext());
 
@@ -841,17 +853,18 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
   // 0: TurboFan
   // 1: Liftoff
   // 2: Liftoff for debugging
+  // 3: Turboshaft
   uint8_t tier_mask = 0;
   uint8_t debug_mask = 0;
-  for (int i = 0; i < 4; ++i, configuration_byte /= 3) {
-    int compiler_config = configuration_byte % 3;
+  uint8_t turboshaft_mask = 0;
+  for (int i = 0; i < 4; ++i, configuration_byte /= 4) {
+    int compiler_config = configuration_byte % 4;
     tier_mask |= (compiler_config == 0) << i;
     debug_mask |= (compiler_config == 2) << i;
+    turboshaft_mask |= (compiler_config == 3) << i;
   }
-  // Note: After dividing by 3 for 4 times, configuration_byte is within [0, 3].
-
-  FlagScope<bool> turbo_mid_tier_regalloc(
-      &v8_flags.turbo_force_mid_tier_regalloc, configuration_byte == 0);
+  // Enable tierup for all turboshaft functions.
+  tier_mask |= turboshaft_mask;
 
   if (!GenerateModule(i_isolate, &zone, data, &buffer)) {
     return;
@@ -862,35 +875,36 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
   ModuleWireBytes wire_bytes(buffer.begin(), buffer.end());
 
   auto enabled_features = WasmFeatures::FromIsolate(i_isolate);
+  // TODO(14179): Add fuzzer support for compile-time imports.
+  CompileTimeImports compile_imports;
 
-  bool valid =
-      GetWasmEngine()->SyncValidate(i_isolate, enabled_features, wire_bytes);
+  bool valid = GetWasmEngine()->SyncValidate(i_isolate, enabled_features,
+                                             compile_imports, wire_bytes);
 
   if (v8_flags.wasm_fuzzer_gen_test) {
     GenerateTestCase(i_isolate, wire_bytes, valid);
   }
 
-  MaybeHandle<WasmModuleObject> compiled_module;
-  {
-    // Explicitly enable Liftoff, disable tiering and set the tier_mask. This
-    // way, we deterministically test a combination of Liftoff and Turbofan.
-    FlagScope<bool> liftoff(&v8_flags.liftoff, true);
-    FlagScope<bool> no_tier_up(&v8_flags.wasm_tier_up, false);
-    FlagScope<int> tier_mask_scope(&v8_flags.wasm_tier_mask_for_testing,
-                                   tier_mask);
-    FlagScope<int> debug_mask_scope(&v8_flags.wasm_debug_mask_for_testing,
-                                    debug_mask);
-    ErrorThrower thrower(i_isolate, "WasmFuzzerSyncCompile");
-    compiled_module = GetWasmEngine()->SyncCompile(i_isolate, enabled_features,
-                                                   &thrower, wire_bytes);
-    CHECK_EQ(valid, !compiled_module.is_null());
-    CHECK_EQ(!valid, thrower.error());
-    if (require_valid && !valid) {
-      FATAL("Generated module should validate, but got: %s",
-            thrower.error_msg());
-    }
-    thrower.Reset();
+  // Explicitly enable Liftoff, disable tiering and set the tier_mask. This
+  // way, we deterministically test a combination of Liftoff and Turbofan.
+  FlagScope<bool> liftoff(&v8_flags.liftoff, true);
+  FlagScope<bool> no_tier_up(&v8_flags.wasm_tier_up, false);
+  FlagScope<int> tier_mask_scope(&v8_flags.wasm_tier_mask_for_testing,
+                                 tier_mask);
+  FlagScope<int> debug_mask_scope(&v8_flags.wasm_debug_mask_for_testing,
+                                  debug_mask);
+  FlagScope<int> turboshaft_mask_scope(
+      &v8_flags.wasm_turboshaft_mask_for_testing, turboshaft_mask);
+
+  ErrorThrower thrower(i_isolate, "WasmFuzzerSyncCompile");
+  MaybeHandle<WasmModuleObject> compiled_module = GetWasmEngine()->SyncCompile(
+      i_isolate, enabled_features, compile_imports, &thrower, wire_bytes);
+  CHECK_EQ(valid, !compiled_module.is_null());
+  CHECK_EQ(!valid, thrower.error());
+  if (require_valid && !valid) {
+    FATAL("Generated module should validate, but got: %s", thrower.error_msg());
   }
+  thrower.Reset();
 
   if (valid) {
     ExecuteAgainstReference(i_isolate, compiled_module.ToHandleChecked(),

@@ -94,18 +94,27 @@ static Address ref_addr_isolate_independent_
 BUILTIN_LIST_C(FORWARD_DECLARE)
 #undef FORWARD_DECLARE
 
-void ExternalReferenceTable::Init(Isolate* isolate) {
+void ExternalReferenceTable::InitIsolateIndependent() {
+  DCHECK_EQ(is_initialized_, kUninitialized);
+
   int index = 0;
-
   CopyIsolateIndependentReferences(&index);
+  CHECK_EQ(kSizeIsolateIndependent, index);
 
+  is_initialized_ = kInitializedIsolateIndependent;
+}
+
+void ExternalReferenceTable::Init(Isolate* isolate) {
+  DCHECK_EQ(is_initialized_, kInitializedIsolateIndependent);
+
+  int index = kSizeIsolateIndependent;
   AddIsolateDependentReferences(isolate, &index);
   AddIsolateAddresses(isolate, &index);
   AddStubCache(isolate, &index);
   AddNativeCodeStatsCounters(isolate, &index);
-  is_initialized_ = static_cast<uint32_t>(true);
-
   CHECK_EQ(kSize, index);
+
+  is_initialized_ = kInitialized;
 }
 
 const char* ExternalReferenceTable::ResolveSymbol(void* address) {
@@ -279,26 +288,19 @@ void ExternalReferenceTable::AddStubCache(Isolate* isolate, int* index) {
                kIsolateAddressReferenceCount,
            *index);
 
-  StubCache* load_stub_cache = isolate->load_stub_cache();
-
   // Stub cache tables
-  Add(load_stub_cache->key_reference(StubCache::kPrimary).address(), index);
-  Add(load_stub_cache->value_reference(StubCache::kPrimary).address(), index);
-  Add(load_stub_cache->map_reference(StubCache::kPrimary).address(), index);
-  Add(load_stub_cache->key_reference(StubCache::kSecondary).address(), index);
-  Add(load_stub_cache->value_reference(StubCache::kSecondary).address(), index);
-  Add(load_stub_cache->map_reference(StubCache::kSecondary).address(), index);
+  std::array<StubCache*, 3> stub_caches{isolate->load_stub_cache(),
+                                        isolate->store_stub_cache(),
+                                        isolate->define_own_stub_cache()};
 
-  StubCache* store_stub_cache = isolate->store_stub_cache();
-
-  // Stub cache tables
-  Add(store_stub_cache->key_reference(StubCache::kPrimary).address(), index);
-  Add(store_stub_cache->value_reference(StubCache::kPrimary).address(), index);
-  Add(store_stub_cache->map_reference(StubCache::kPrimary).address(), index);
-  Add(store_stub_cache->key_reference(StubCache::kSecondary).address(), index);
-  Add(store_stub_cache->value_reference(StubCache::kSecondary).address(),
-      index);
-  Add(store_stub_cache->map_reference(StubCache::kSecondary).address(), index);
+  for (StubCache* stub_cache : stub_caches) {
+    Add(stub_cache->key_reference(StubCache::kPrimary).address(), index);
+    Add(stub_cache->value_reference(StubCache::kPrimary).address(), index);
+    Add(stub_cache->map_reference(StubCache::kPrimary).address(), index);
+    Add(stub_cache->key_reference(StubCache::kSecondary).address(), index);
+    Add(stub_cache->value_reference(StubCache::kSecondary).address(), index);
+    Add(stub_cache->map_reference(StubCache::kSecondary).address(), index);
+  }
 
   CHECK_EQ(kSizeIsolateIndependent + kExternalReferenceCountIsolateDependent +
                kIsolateAddressReferenceCount + kStubCacheReferenceCount,

@@ -5,7 +5,6 @@
 #include "src/debug/debug.h"
 
 #include <memory>
-#include <unordered_set>
 
 #include "src/api/api-inl.h"
 #include "src/base/platform/mutex.h"
@@ -50,28 +49,28 @@ class Debug::TemporaryObjectsTracker : public HeapObjectAllocationTracker {
   TemporaryObjectsTracker(const TemporaryObjectsTracker&) = delete;
   TemporaryObjectsTracker& operator=(const TemporaryObjectsTracker&) = delete;
 
-  void AllocationEvent(Address addr, int) override {
+  void AllocationEvent(Address addr, int size) override {
     if (disabled) return;
-    objects_.insert(addr);
+    AddRegion(addr, addr + size);
   }
 
-  void MoveEvent(Address from, Address to, int) override {
+  void MoveEvent(Address from, Address to, int size) override {
     if (from == to) return;
     base::MutexGuard guard(&mutex_);
-    auto it = objects_.find(from);
-    if (it == objects_.end()) {
-      // If temporary object was collected we can get MoveEvent which moves
-      // existing non temporary object to the address where we had temporary
-      // object. So we should mark new address as non temporary.
-      objects_.erase(to);
-      return;
+    if (RemoveFromRegions(from, from + size)) {
+      // We had the object tracked as temporary, so we will track the
+      // new location as temporary, too.
+      AddRegion(to, to + size);
+    } else {
+      // The object we moved is a non-temporary, so the new location is also
+      // non-temporary. Thus we remove everything we track there (because it
+      // must have become dead).
+      RemoveFromRegions(to, to + size);
     }
-    objects_.erase(it);
-    objects_.insert(to);
   }
 
-  bool HasObject(Handle<HeapObject> obj) const {
-    if (obj->IsJSObject() &&
+  bool HasObject(Handle<HeapObject> obj) {
+    if (IsJSObject(*obj) &&
         Handle<JSObject>::cast(obj)->GetEmbedderFieldCount()) {
       // Embedder may store any pointers using embedder fields and implements
       // non trivial logic, e.g. create wrappers lazily and store pointer to
@@ -79,13 +78,91 @@ class Debug::TemporaryObjectsTracker : public HeapObjectAllocationTracker {
       // with embedder fields as non temporary.
       return false;
     }
-    return objects_.find(obj->address()) != objects_.end();
+    Address addr = obj->address();
+    return HasRegionContainingObject(addr, addr + obj->Size());
   }
 
   bool disabled = false;
 
  private:
-  std::unordered_set<Address> objects_;
+  bool HasRegionContainingObject(Address start, Address end) {
+    // Check if there is a region that contains (overlaps) this object's space.
+    auto it = FindOverlappingRegion(start, end, false);
+    // If there is, we expect the region to contain the entire object.
+    DCHECK_IMPLIES(it != regions_.end(),
+                   it->second <= start && end <= it->first);
+    return it != regions_.end();
+  }
+
+  // This function returns any one of the overlapping regions (there might be
+  // multiple). If {include_adjacent} is true, it will also consider regions
+  // that have no overlap but are directly connected.
+  std::map<Address, Address>::iterator FindOverlappingRegion(
+      Address start, Address end, bool include_adjacent) {
+    // Region A = [start, end) overlaps with an existing region [existing_start,
+    // existing_end) iff (start <= existing_end) && (existing_start <= end).
+    // Since we index {regions_} by end address, we can find a candidate that
+    // satisfies the first condition using lower_bound.
+    if (include_adjacent) {
+      auto it = regions_.lower_bound(start);
+      if (it == regions_.end()) return regions_.end();
+      if (it->second <= end) return it;
+    } else {
+      auto it = regions_.upper_bound(start);
+      if (it == regions_.end()) return regions_.end();
+      if (it->second < end) return it;
+    }
+    return regions_.end();
+  }
+
+  void AddRegion(Address start, Address end) {
+    DCHECK_LT(start, end);
+
+    // Region [start, end) can be combined with an existing region if they
+    // overlap.
+    while (true) {
+      auto it = FindOverlappingRegion(start, end, true);
+      // If there is no such region, we don't need to merge anything.
+      if (it == regions_.end()) break;
+
+      // Otherwise, we found an overlapping region. We remove the old one and
+      // add the new region recursively (to handle cases where the new region
+      // overlaps multiple existing ones).
+      start = std::min(start, it->second);
+      end = std::max(end, it->first);
+      regions_.erase(it);
+    }
+
+    // Add the new (possibly combined) region.
+    regions_.emplace(end, start);
+  }
+
+  bool RemoveFromRegions(Address start, Address end) {
+    // Check if we have anything that overlaps with [start, end).
+    auto it = FindOverlappingRegion(start, end, false);
+    if (it == regions_.end()) return false;
+
+    // We need to update all overlapping regions.
+    for (; it != regions_.end();
+         it = FindOverlappingRegion(start, end, false)) {
+      Address existing_start = it->second;
+      Address existing_end = it->first;
+      // If we remove the region [start, end) from an existing region
+      // [existing_start, existing_end), there can be at most 2 regions left:
+      regions_.erase(it);
+      // The one before {start} is: [existing_start, start)
+      if (existing_start < start) AddRegion(existing_start, start);
+      // And the one after {end} is: [end, existing_end)
+      if (end < existing_end) AddRegion(end, existing_end);
+    }
+    return true;
+  }
+
+  // Tracking addresses is not enough, because a single allocation may combine
+  // multiple objects due to allocation folding. We track both start and end
+  // (exclusive) address of regions. We index by end address for faster lookup.
+  // Map: end address => start address
+  std::map<Address, Address> regions_;
   base::Mutex mutex_;
 };
 
@@ -99,7 +176,6 @@ Debug::Debug(Isolate* isolate)
       break_on_uncaught_exception_(false),
       side_effect_check_failed_(false),
       debug_infos_(isolate),
-      feature_tracker_(isolate),
       isolate_(isolate) {
   ThreadInit();
 }
@@ -149,7 +225,7 @@ MaybeHandle<FixedArray> Debug::CheckBreakPointsForLocations(
   *has_break_points = has_break_points_at_all;
   if (break_points_hit_count == 0) return {};
 
-  break_points_hit->Shrink(isolate_, break_points_hit_count);
+  break_points_hit->RightTrim(isolate_, break_points_hit_count);
   return break_points_hit;
 }
 
@@ -161,7 +237,7 @@ void BreakLocation::AllAtCurrentStatement(
   int offset = summary.code_offset();
   Handle<AbstractCode> abstract_code = summary.abstract_code();
   PtrComprCageBase cage_base = GetPtrComprCageBase(*debug_info);
-  if (abstract_code->IsCode(cage_base)) offset = offset - 1;
+  if (IsCode(*abstract_code, cage_base)) offset = offset - 1;
   int statement_position;
   {
     BreakIterator it(debug_info);
@@ -175,13 +251,14 @@ void BreakLocation::AllAtCurrentStatement(
   }
 }
 
-JSGeneratorObject BreakLocation::GetGeneratorObjectForSuspendedFrame(
+Tagged<JSGeneratorObject> BreakLocation::GetGeneratorObjectForSuspendedFrame(
     JavaScriptFrame* frame) const {
   DCHECK(IsSuspend());
   DCHECK_GE(generator_obj_reg_index_, 0);
 
-  Object generator_obj = UnoptimizedFrame::cast(frame)->ReadInterpreterRegister(
-      generator_obj_reg_index_);
+  Tagged<Object> generator_obj =
+      UnoptimizedFrame::cast(frame)->ReadInterpreterRegister(
+          generator_obj_reg_index_);
 
   return JSGeneratorObject::cast(generator_obj);
 }
@@ -220,7 +297,7 @@ bool BreakLocation::HasBreakPoint(Isolate* isolate,
     // Then check whether a break point at that source position would have
     // the same code offset. Otherwise it's just a break location that we can
     // step to, but not actually a location where we can put a break point.
-    DCHECK(abstract_code_->IsBytecodeArray(isolate));
+    DCHECK(IsBytecodeArray(*abstract_code_, isolate));
     BreakIterator it(debug_info);
     it.SkipToPosition(position_);
     return it.code_offset() == code_offset_;
@@ -247,7 +324,7 @@ BreakIterator::BreakIterator(Handle<DebugInfo> debug_info)
     : debug_info_(debug_info),
       break_index_(-1),
       source_position_iterator_(
-          debug_info->DebugBytecodeArray()->SourcePositionTable()) {
+          debug_info->DebugBytecodeArray(isolate())->SourcePositionTable()) {
   position_ = debug_info->shared()->StartPosition();
   statement_position_ = position_;
   // There is at least one break location.
@@ -292,7 +369,8 @@ void BreakIterator::Next() {
 }
 
 DebugBreakType BreakIterator::GetDebugBreakType() {
-  BytecodeArray bytecode_array = debug_info_->OriginalBytecodeArray();
+  Tagged<BytecodeArray> bytecode_array =
+      debug_info_->OriginalBytecodeArray(isolate());
   interpreter::Bytecode bytecode =
       interpreter::Bytecodes::FromByte(bytecode_array->get(code_offset()));
 
@@ -331,8 +409,8 @@ void BreakIterator::SetDebugBreak() {
   if (debug_break_type == DEBUGGER_STATEMENT) return;
   HandleScope scope(isolate());
   DCHECK(debug_break_type >= DEBUG_BREAK_SLOT);
-  Handle<BytecodeArray> bytecode_array(debug_info_->DebugBytecodeArray(),
-                                       isolate());
+  Handle<BytecodeArray> bytecode_array(
+      debug_info_->DebugBytecodeArray(isolate()), isolate());
   interpreter::BytecodeArrayIterator(bytecode_array, code_offset())
       .ApplyDebugBreak();
 }
@@ -341,14 +419,17 @@ void BreakIterator::ClearDebugBreak() {
   DebugBreakType debug_break_type = GetDebugBreakType();
   if (debug_break_type == DEBUGGER_STATEMENT) return;
   DCHECK(debug_break_type >= DEBUG_BREAK_SLOT);
-  BytecodeArray bytecode_array = debug_info_->DebugBytecodeArray();
-  BytecodeArray original = debug_info_->OriginalBytecodeArray();
+  Tagged<BytecodeArray> bytecode_array =
+      debug_info_->DebugBytecodeArray(isolate());
+  Tagged<BytecodeArray> original =
+      debug_info_->OriginalBytecodeArray(isolate());
   bytecode_array->set(code_offset(), original->get(code_offset()));
 }
 
 BreakLocation BreakIterator::GetBreakLocation() {
   Handle<AbstractCode> code(
-      AbstractCode::cast(debug_info_->DebugBytecodeArray()), isolate());
+      AbstractCode::cast(debug_info_->DebugBytecodeArray(isolate())),
+      isolate());
   DebugBreakType type = GetDebugBreakType();
   int generator_object_reg_index = -1;
   int generator_suspend_id = -1;
@@ -358,7 +439,8 @@ BreakLocation BreakIterator::GetBreakLocation() {
     // index that holds the generator object by reading it directly off the
     // bytecode array, and we'll read the actual generator object off the
     // interpreter stack frame in GetGeneratorObjectForSuspendedFrame.
-    BytecodeArray bytecode_array = debug_info_->OriginalBytecodeArray();
+    Tagged<BytecodeArray> bytecode_array =
+        debug_info_->OriginalBytecodeArray(isolate());
     interpreter::BytecodeArrayIterator iterator(
         handle(bytecode_array, isolate()), code_offset());
 
@@ -376,14 +458,6 @@ BreakLocation BreakIterator::GetBreakLocation() {
 }
 
 Isolate* BreakIterator::isolate() { return debug_info_->GetIsolate(); }
-
-void DebugFeatureTracker::Track(DebugFeatureTracker::Feature feature) {
-  uint32_t mask = 1 << feature;
-  // Only count one sample per feature and isolate.
-  if (bitfield_ & mask) return;
-  isolate_->counters()->debug_feature_usage()->AddSample(feature);
-  bitfield_ |= mask;
-}
 
 // Threading support.
 void Debug::ThreadInit() {
@@ -417,6 +491,8 @@ char* Debug::RestoreDebug(char* storage) {
   MemCopy(reinterpret_cast<char*>(&thread_local_), storage,
           ArchiveSpacePerThread());
 
+  // Enter the isolate.
+  v8::Isolate::Scope isolate_scope(reinterpret_cast<v8::Isolate*>(isolate_));
   // Enter the debugger.
   DebugScope debug_scope(this);
 
@@ -467,7 +543,8 @@ void Debug::Iterate(RootVisitor* v, ThreadLocal* thread_local_data) {
                       FullObjectSlot(&thread_local_data->promise_stack_));
 }
 
-void DebugInfoCollection::Insert(SharedFunctionInfo sfi, DebugInfo debug_info) {
+void DebugInfoCollection::Insert(Tagged<SharedFunctionInfo> sfi,
+                                 Tagged<DebugInfo> debug_info) {
   DisallowGarbageCollection no_gc;
   base::SharedMutexGuard<base::kExclusive> mutex_guard(
       isolate_->shared_function_info_access());
@@ -482,26 +559,26 @@ void DebugInfoCollection::Insert(SharedFunctionInfo sfi, DebugInfo debug_info) {
   DCHECK_EQ(list_.size(), map_.size());
 }
 
-bool DebugInfoCollection::Contains(SharedFunctionInfo sfi) const {
+bool DebugInfoCollection::Contains(Tagged<SharedFunctionInfo> sfi) const {
   auto it = map_.find(sfi->unique_id());
   if (it == map_.end()) return false;
-  DCHECK_EQ(DebugInfo::cast(Object(*it->second))->shared(), sfi);
+  DCHECK_EQ(DebugInfo::cast(Tagged<Object>(*it->second))->shared(), sfi);
   return true;
 }
 
-base::Optional<DebugInfo> DebugInfoCollection::Find(
-    SharedFunctionInfo sfi) const {
+base::Optional<Tagged<DebugInfo>> DebugInfoCollection::Find(
+    Tagged<SharedFunctionInfo> sfi) const {
   auto it = map_.find(sfi->unique_id());
   if (it == map_.end()) return {};
-  DebugInfo di = DebugInfo::cast(Object(*it->second));
+  Tagged<DebugInfo> di = DebugInfo::cast(Tagged<Object>(*it->second));
   DCHECK_EQ(di->shared(), sfi);
   return di;
 }
 
-void DebugInfoCollection::DeleteSlow(SharedFunctionInfo sfi) {
+void DebugInfoCollection::DeleteSlow(Tagged<SharedFunctionInfo> sfi) {
   DebugInfoCollection::Iterator it(this);
   for (; it.HasNext(); it.Advance()) {
-    DebugInfo debug_info = it.Next();
+    Tagged<DebugInfo> debug_info = it.Next();
     if (debug_info->shared() != sfi) continue;
     it.DeleteNext();
     return;
@@ -509,17 +586,17 @@ void DebugInfoCollection::DeleteSlow(SharedFunctionInfo sfi) {
   UNREACHABLE();
 }
 
-DebugInfo DebugInfoCollection::EntryAsDebugInfo(size_t index) const {
+Tagged<DebugInfo> DebugInfoCollection::EntryAsDebugInfo(size_t index) const {
   DCHECK_LT(index, list_.size());
-  return DebugInfo::cast(Object(*list_[index]));
+  return DebugInfo::cast(Tagged<Object>(*list_[index]));
 }
 
 void DebugInfoCollection::DeleteIndex(size_t index) {
   base::SharedMutexGuard<base::kExclusive> mutex_guard(
       isolate_->shared_function_info_access());
 
-  DebugInfo debug_info = EntryAsDebugInfo(index);
-  SharedFunctionInfo sfi = debug_info->shared();
+  Tagged<DebugInfo> debug_info = EntryAsDebugInfo(index);
+  Tagged<SharedFunctionInfo> sfi = debug_info->shared();
   DCHECK(Contains(sfi));
 
   auto it = map_.find(sfi->unique_id());
@@ -715,8 +792,8 @@ bool Debug::IsBreakOnInstrumentation(Handle<DebugInfo> debug_info,
 
   Handle<Object> break_points =
       debug_info->GetBreakPoints(isolate_, location.position());
-  DCHECK(!break_points->IsUndefined(isolate_));
-  if (!break_points->IsFixedArray()) {
+  DCHECK(!IsUndefined(*break_points, isolate_));
+  if (!IsFixedArray(*break_points)) {
     const Handle<BreakPoint> break_point =
         Handle<BreakPoint>::cast(break_points);
     return break_point->id() == kInstrumentationId;
@@ -770,7 +847,7 @@ bool Debug::IsMutedAtCurrentLocation(JavaScriptFrame* frame) {
 namespace {
 
 // Convenience helper for easier base::Optional translation.
-bool ToHandle(Isolate* isolate, base::Optional<DebugInfo> debug_info,
+bool ToHandle(Isolate* isolate, base::Optional<Tagged<DebugInfo>> debug_info,
               Handle<DebugInfo>* out) {
   if (!debug_info.has_value()) return false;
   *out = handle(debug_info.value(), isolate);
@@ -830,9 +907,9 @@ bool Debug::CheckBreakPoint(Handle<BreakPoint> break_point,
   bool exception_thrown = true;
   if (maybe_result.ToHandle(&result)) {
     exception_thrown = false;
-  } else if (isolate_->has_pending_exception()) {
-    maybe_exception = handle(isolate_->pending_exception(), isolate_);
-    isolate_->clear_pending_exception();
+  } else if (isolate_->has_exception()) {
+    maybe_exception = handle(isolate_->exception(), isolate_);
+    isolate_->clear_exception();
   }
 
   CHECK(in_debug_scope());
@@ -845,7 +922,7 @@ bool Debug::CheckBreakPoint(Handle<BreakPoint> break_point,
         exception_thrown, v8::Utils::ToLocal(maybe_exception));
   }
 
-  return !result.is_null() ? result->BooleanValue(isolate_) : false;
+  return !result.is_null() ? Object::BooleanValue(*result, isolate_) : false;
 }
 
 bool Debug::SetBreakpoint(Handle<SharedFunctionInfo> shared,
@@ -870,8 +947,6 @@ bool Debug::SetBreakpoint(Handle<SharedFunctionInfo> shared,
 
   ClearBreakPoints(debug_info);
   ApplyBreakPoints(debug_info);
-
-  feature_tracker()->Track(DebugFeatureTracker::kBreakPoint);
   return true;
 }
 
@@ -895,7 +970,7 @@ bool Debug::SetBreakPointForScript(Handle<Script> script,
   // position.
   Handle<Object> result =
       FindInnermostContainingFunctionInfo(script, *source_position);
-  if (result->IsUndefined(isolate_)) return false;
+  if (IsUndefined(*result, isolate_)) return false;
 
   auto shared = Handle<SharedFunctionInfo>::cast(result);
   if (!EnsureBreakInfo(shared)) return false;
@@ -930,10 +1005,10 @@ void Debug::ApplyBreakPoints(Handle<DebugInfo> debug_info) {
     debug_info->SetBreakAtEntry();
   } else {
     if (!debug_info->HasInstrumentedBytecodeArray()) return;
-    FixedArray break_points = debug_info->break_points();
+    Tagged<FixedArray> break_points = debug_info->break_points();
     for (int i = 0; i < break_points->length(); i++) {
-      if (break_points->get(i).IsUndefined(isolate_)) continue;
-      BreakPointInfo info = BreakPointInfo::cast(break_points->get(i));
+      if (IsUndefined(break_points->get(i), isolate_)) continue;
+      Tagged<BreakPointInfo> info = BreakPointInfo::cast(break_points->get(i));
       if (info->GetBreakPointCount(isolate_) == 0) continue;
       DCHECK(debug_info->HasInstrumentedBytecodeArray());
       BreakIterator it(debug_info);
@@ -974,7 +1049,7 @@ void Debug::ClearBreakPoint(Handle<BreakPoint> break_point) {
 
     Handle<Object> result =
         DebugInfo::FindBreakPointInfo(isolate_, debug_info, break_point);
-    if (result->IsUndefined(isolate_)) continue;
+    if (IsUndefined(*result, isolate_)) continue;
 
     if (DebugInfo::ClearBreakPoint(isolate_, debug_info, break_point)) {
       ClearBreakPoints(debug_info);
@@ -1066,7 +1141,7 @@ void Debug::RecordWasmScriptWithBreakpoints(Handle<Script> script) {
     DisallowGarbageCollection no_gc;
     for (int idx = wasm_scripts_with_break_points_->length() - 1; idx >= 0;
          --idx) {
-      HeapObject wasm_script;
+      Tagged<HeapObject> wasm_script;
       if (wasm_scripts_with_break_points_->Get(idx).GetHeapObject(
               &wasm_script) &&
           wasm_script == *script) {
@@ -1098,10 +1173,10 @@ void Debug::ClearAllBreakPoints() {
     DisallowGarbageCollection no_gc;
     for (int idx = wasm_scripts_with_break_points_->length() - 1; idx >= 0;
          --idx) {
-      HeapObject raw_wasm_script;
+      Tagged<HeapObject> raw_wasm_script;
       if (wasm_scripts_with_break_points_->Get(idx).GetHeapObject(
               &raw_wasm_script)) {
-        Script wasm_script = Script::cast(raw_wasm_script);
+        Tagged<Script> wasm_script = Script::cast(raw_wasm_script);
         WasmScript::ClearAllBreakpoints(wasm_script);
         wasm_script->wasm_native_module()->GetDebugInfo()->RemoveIsolate(
             isolate_);
@@ -1151,8 +1226,8 @@ MaybeHandle<FixedArray> Debug::GetHitBreakPoints(Handle<DebugInfo> debug_info,
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   Handle<Object> break_points = debug_info->GetBreakPoints(isolate_, position);
   bool is_break_at_entry = debug_info->BreakAtEntry();
-  DCHECK(!break_points->IsUndefined(isolate_));
-  if (!break_points->IsFixedArray()) {
+  DCHECK(!IsUndefined(*break_points, isolate_));
+  if (!IsFixedArray(*break_points)) {
     const Handle<BreakPoint> break_point =
         Handle<BreakPoint>::cast(break_points);
     *has_break_points = break_point->id() != kInstrumentationId;
@@ -1179,7 +1254,7 @@ MaybeHandle<FixedArray> Debug::GetHitBreakPoints(Handle<DebugInfo> debug_info,
     }
   }
   if (break_points_hit_count == 0) return {};
-  break_points_hit->Shrink(isolate_, break_points_hit_count);
+  break_points_hit->RightTrim(isolate_, break_points_hit_count);
   return break_points_hit;
 }
 
@@ -1244,7 +1319,7 @@ void Debug::PrepareStepOnThrow() {
   while (!it.done()) {
     JavaScriptFrame* frame = it.frame();
     if (frame->LookupExceptionHandlerInTable(nullptr, nullptr) > 0) break;
-    std::vector<SharedFunctionInfo> infos;
+    std::vector<Tagged<SharedFunctionInfo>> infos;
     frame->GetFunctions(&infos);
     current_frame_count -= infos.size();
     it.Advance();
@@ -1314,8 +1389,6 @@ void Debug::PrepareStep(StepAction step_action) {
   // If there is no JavaScript stack don't do anything.
   if (frame_id == StackFrameId::NO_ID) return;
 
-  feature_tracker()->Track(DebugFeatureTracker::kStepping);
-
   thread_local_.last_step_action_ = step_action;
 
   DebuggableStackFrameIterator frames_it(isolate_, frame_id);
@@ -1327,7 +1400,7 @@ void Debug::PrepareStep(StepAction step_action) {
 
   if (frame->is_java_script()) {
     JavaScriptFrame* js_frame = JavaScriptFrame::cast(frame);
-    DCHECK(js_frame->function().IsJSFunction());
+    DCHECK(IsJSFunction(js_frame->function()));
 
     // Get the debug info (create it if it does not exist).
     auto summary = FrameSummary::GetTop(frame).AsJavaScript();
@@ -1410,15 +1483,15 @@ void Debug::PrepareStep(StepAction step_action) {
           Handle<Object> awaited_by_holder = JSReceiver::GetDataProperty(
               isolate_, return_value,
               isolate_->factory()->promise_awaited_by_symbol());
-          if (awaited_by_holder->IsWeakFixedArray(isolate_)) {
+          if (IsWeakFixedArray(*awaited_by_holder, isolate_)) {
             Handle<WeakFixedArray> weak_fixed_array =
                 Handle<WeakFixedArray>::cast(awaited_by_holder);
             if (weak_fixed_array->length() == 1 &&
-                weak_fixed_array->Get(0).IsWeak()) {
+                weak_fixed_array->get(0).IsWeak()) {
               Handle<HeapObject> awaited_by(
-                  weak_fixed_array->Get(0).GetHeapObjectAssumeWeak(isolate_),
+                  weak_fixed_array->get(0).GetHeapObjectAssumeWeak(isolate_),
                   isolate_);
-              if (awaited_by->IsJSGeneratorObject()) {
+              if (IsJSGeneratorObject(*awaited_by)) {
                 DCHECK(!has_suspended_generator());
                 thread_local_.suspended_generator_ = *awaited_by;
                 ClearStepping();
@@ -1496,8 +1569,8 @@ Handle<Object> Debug::GetSourceBreakLocations(
       debug_info->GetBreakPointCount(isolate));
   int count = 0;
   for (int i = 0; i < debug_info->break_points()->length(); ++i) {
-    if (!debug_info->break_points()->get(i).IsUndefined(isolate)) {
-      BreakPointInfo break_point_info =
+    if (!IsUndefined(debug_info->break_points()->get(i), isolate)) {
+      Tagged<BreakPointInfo> break_point_info =
           BreakPointInfo::cast(debug_info->break_points()->get(i));
       int break_points = break_point_info->GetBreakPointCount(isolate);
       if (break_points == 0) continue;
@@ -1548,7 +1621,7 @@ void Debug::ClearOneShot() {
 namespace {
 class DiscardBaselineCodeVisitor : public ThreadVisitor {
  public:
-  explicit DiscardBaselineCodeVisitor(SharedFunctionInfo shared)
+  explicit DiscardBaselineCodeVisitor(Tagged<SharedFunctionInfo> shared)
       : shared_(shared) {}
   DiscardBaselineCodeVisitor() : shared_(SharedFunctionInfo()) {}
 
@@ -1598,11 +1671,11 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
   }
 
  private:
-  SharedFunctionInfo shared_;
+  Tagged<SharedFunctionInfo> shared_;
 };
 }  // namespace
 
-void Debug::DiscardBaselineCode(SharedFunctionInfo shared) {
+void Debug::DiscardBaselineCode(Tagged<SharedFunctionInfo> shared) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DCHECK(shared->HasBaselineCode());
   DiscardBaselineCodeVisitor visitor(shared);
@@ -1611,12 +1684,12 @@ void Debug::DiscardBaselineCode(SharedFunctionInfo shared) {
   // TODO(v8:11429): Avoid this heap walk somehow.
   HeapObjectIterator iterator(isolate_->heap());
   auto trampoline = BUILTIN_CODE(isolate_, InterpreterEntryTrampoline);
-  shared->FlushBaselineCode();
-  for (HeapObject obj = iterator.Next(); !obj.is_null();
+  shared->FlushBaselineCode(isolate_);
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    if (obj.IsJSFunction()) {
-      JSFunction fun = JSFunction::cast(obj);
-      if (fun->shared() == shared && fun->ActiveTierIsBaseline()) {
+    if (IsJSFunction(obj)) {
+      Tagged<JSFunction> fun = JSFunction::cast(obj);
+      if (fun->shared() == shared && fun->ActiveTierIsBaseline(isolate_)) {
         fun->set_code(*trampoline);
       }
     }
@@ -1630,17 +1703,17 @@ void Debug::DiscardAllBaselineCode() {
   HeapObjectIterator iterator(isolate_->heap());
   auto trampoline = BUILTIN_CODE(isolate_, InterpreterEntryTrampoline);
   isolate_->thread_manager()->IterateArchivedThreads(&visitor);
-  for (HeapObject obj = iterator.Next(); !obj.is_null();
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    if (obj.IsJSFunction()) {
-      JSFunction fun = JSFunction::cast(obj);
-      if (fun->ActiveTierIsBaseline()) {
+    if (IsJSFunction(obj)) {
+      Tagged<JSFunction> fun = JSFunction::cast(obj);
+      if (fun->ActiveTierIsBaseline(isolate_)) {
         fun->set_code(*trampoline);
       }
-    } else if (obj.IsSharedFunctionInfo()) {
-      SharedFunctionInfo shared = SharedFunctionInfo::cast(obj);
+    } else if (IsSharedFunctionInfo(obj)) {
+      Tagged<SharedFunctionInfo> shared = SharedFunctionInfo::cast(obj);
       if (shared->HasBaselineCode()) {
-        shared->FlushBaselineCode();
+        shared->FlushBaselineCode(isolate_);
       }
     }
   }
@@ -1699,11 +1772,13 @@ void Debug::PrepareFunctionForDebugExecution(
 
 namespace {
 
-bool IsJSFunctionAndNeedsTrampoline(Isolate* isolate, Object maybe_function) {
-  if (!maybe_function.IsJSFunction()) return false;
-  base::Optional<DebugInfo> debug_info = isolate->debug()->TryGetDebugInfo(
-      JSFunction::cast(maybe_function)->shared());
-  return debug_info.has_value() && debug_info->CanBreakAtEntry();
+bool IsJSFunctionAndNeedsTrampoline(Isolate* isolate,
+                                    Tagged<Object> maybe_function) {
+  if (!IsJSFunction(maybe_function)) return false;
+  base::Optional<Tagged<DebugInfo>> debug_info =
+      isolate->debug()->TryGetDebugInfo(
+          JSFunction::cast(maybe_function)->shared());
+  return debug_info.has_value() && debug_info.value()->CanBreakAtEntry();
 }
 
 }  // namespace
@@ -1720,7 +1795,7 @@ void Debug::InstallDebugBreakTrampoline() {
 
   DebugInfoCollection::Iterator it(&debug_infos_);
   for (; it.HasNext(); it.Advance()) {
-    DebugInfo debug_info = it.Next();
+    Tagged<DebugInfo> debug_info = it.Next();
     if (debug_info->CanBreakAtEntry()) {
       needs_to_use_trampoline = true;
       if (debug_info->shared()->IsApiFunction()) {
@@ -1740,41 +1815,41 @@ void Debug::InstallDebugBreakTrampoline() {
   std::vector<AccessorPairWithContext> needs_instantiate;
   {
     // Deduplicate {needs_instantiate} by recording all collected AccessorPairs.
-    std::set<AccessorPair> recorded;
+    std::set<Tagged<AccessorPair>> recorded;
     HeapObjectIterator iterator(isolate_->heap());
     DisallowGarbageCollection no_gc;
-    for (HeapObject obj = iterator.Next(); !obj.is_null();
+    for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
          obj = iterator.Next()) {
-      if (needs_to_clear_ic && obj.IsFeedbackVector()) {
+      if (needs_to_clear_ic && IsFeedbackVector(obj)) {
         FeedbackVector::cast(obj)->ClearSlots(isolate_);
         continue;
       } else if (IsJSFunctionAndNeedsTrampoline(isolate_, obj)) {
-        JSFunction fun = JSFunction::cast(obj);
-        if (!fun->is_compiled()) {
+        Tagged<JSFunction> fun = JSFunction::cast(obj);
+        if (!fun->is_compiled(isolate_)) {
           needs_compile.push_back(handle(fun, isolate_));
         } else {
           fun->set_code(*trampoline);
         }
-      } else if (obj.IsJSObject()) {
-        JSObject object = JSObject::cast(obj);
-        DescriptorArray descriptors =
+      } else if (IsJSObject(obj)) {
+        Tagged<JSObject> object = JSObject::cast(obj);
+        Tagged<DescriptorArray> descriptors =
             object->map()->instance_descriptors(kRelaxedLoad);
 
         for (InternalIndex i : object->map()->IterateOwnDescriptors()) {
           if (descriptors->GetDetails(i).kind() == PropertyKind::kAccessor) {
-            Object value = descriptors->GetStrongValue(i);
-            if (!value.IsAccessorPair()) continue;
+            Tagged<Object> value = descriptors->GetStrongValue(i);
+            if (!IsAccessorPair(value)) continue;
 
-            AccessorPair accessor_pair = AccessorPair::cast(value);
-            if (!accessor_pair->getter().IsFunctionTemplateInfo() &&
-                !accessor_pair->setter().IsFunctionTemplateInfo()) {
+            Tagged<AccessorPair> accessor_pair = AccessorPair::cast(value);
+            if (!IsFunctionTemplateInfo(accessor_pair->getter()) &&
+                !IsFunctionTemplateInfo(accessor_pair->setter())) {
               continue;
             }
             if (recorded.find(accessor_pair) != recorded.end()) continue;
 
             needs_instantiate.emplace_back(
                 handle(accessor_pair, isolate_),
-                object->GetCreationContext().ToHandleChecked());
+                handle(object->GetCreationContext().value(), isolate_));
             recorded.insert(accessor_pair);
           }
         }
@@ -1826,7 +1901,8 @@ void FindBreakablePositions(Handle<DebugInfo> debug_info, int start_position,
   }
 }
 
-bool CompileTopLevel(Isolate* isolate, Handle<Script> script) {
+bool CompileTopLevel(Isolate* isolate, Handle<Script> script,
+                     MaybeHandle<SharedFunctionInfo>* result = nullptr) {
   UnoptimizedCompileState compile_state;
   ReusableUnoptimizedCompileState reusable_state(isolate);
   UnoptimizedCompileFlags flags =
@@ -1838,11 +1914,12 @@ bool CompileTopLevel(Isolate* isolate, Handle<Script> script) {
       Compiler::CompileToplevel(&parse_info, script, isolate,
                                 &is_compiled_scope);
   if (maybe_result.is_null()) {
-    if (isolate->has_pending_exception()) {
-      isolate->clear_pending_exception();
+    if (isolate->has_exception()) {
+      isolate->clear_exception();
     }
     return false;
   }
+  if (result) *result = maybe_result;
   return true;
 }
 }  // namespace
@@ -1854,7 +1931,7 @@ bool Debug::GetPossibleBreakpoints(Handle<Script> script, int start_position,
   if (restrict_to_function) {
     Handle<Object> result =
         FindInnermostContainingFunctionInfo(script, start_position);
-    if (result->IsUndefined(isolate_)) return false;
+    if (IsUndefined(*result, isolate_)) return false;
 
     // Make sure the function has set up the debug info.
     Handle<SharedFunctionInfo> shared =
@@ -1887,8 +1964,8 @@ class SharedFunctionInfoFinder {
       : current_start_position_(kNoSourcePosition),
         target_position_(target_position) {}
 
-  void NewCandidate(SharedFunctionInfo shared,
-                    JSFunction closure = JSFunction()) {
+  void NewCandidate(Tagged<SharedFunctionInfo> shared,
+                    Tagged<JSFunction> closure = JSFunction()) {
     if (!shared->IsSubjectToDebugging()) return;
     int start_position = shared->function_token_position();
     if (start_position == kNoSourcePosition) {
@@ -1927,25 +2004,24 @@ class SharedFunctionInfoFinder {
     current_candidate_closure_ = closure;
   }
 
-  SharedFunctionInfo Result() { return current_candidate_; }
+  Tagged<SharedFunctionInfo> Result() { return current_candidate_; }
 
-  JSFunction ResultClosure() { return current_candidate_closure_; }
+  Tagged<JSFunction> ResultClosure() { return current_candidate_closure_; }
 
  private:
-  SharedFunctionInfo current_candidate_;
-  JSFunction current_candidate_closure_;
+  Tagged<SharedFunctionInfo> current_candidate_;
+  Tagged<JSFunction> current_candidate_closure_;
   int current_start_position_;
   int target_position_;
   DISALLOW_GARBAGE_COLLECTION(no_gc_)
 };
 
 namespace {
-SharedFunctionInfo FindSharedFunctionInfoCandidate(int position,
-                                                   Handle<Script> script,
-                                                   Isolate* isolate) {
+Tagged<SharedFunctionInfo> FindSharedFunctionInfoCandidate(
+    int position, Handle<Script> script, Isolate* isolate) {
   SharedFunctionInfoFinder finder(position);
   SharedFunctionInfo::ScriptIterator iterator(isolate, *script);
-  for (SharedFunctionInfo info = iterator.Next(); !info.is_null();
+  for (Tagged<SharedFunctionInfo> info = iterator.Next(); !info.is_null();
        info = iterator.Next()) {
     finder.NewCandidate(info);
   }
@@ -2003,7 +2079,7 @@ bool Debug::FindSharedFunctionInfosIntersectingRange(
     {
       DisallowGarbageCollection no_gc;
       SharedFunctionInfo::ScriptIterator iterator(isolate_, *script);
-      for (SharedFunctionInfo info = iterator.Next(); !info.is_null();
+      for (Tagged<SharedFunctionInfo> info = iterator.Next(); !info.is_null();
            info = iterator.Next()) {
         if (info->EndPosition() < start_position ||
             info->StartPosition() >= end_position) {
@@ -2019,19 +2095,10 @@ bool Debug::FindSharedFunctionInfosIntersectingRange(
 
     if (!triedTopLevelCompile && !candidateSubsumesRange &&
         script->shared_function_info_count() > 0) {
-      DCHECK_LE(script->shared_function_info_count(),
-                script->shared_function_infos()->length());
-      MaybeObject maybeToplevel = script->shared_function_infos()->Get(0);
-      HeapObject heap_object;
-      const bool topLevelInfoExists =
-          maybeToplevel->GetHeapObject(&heap_object) &&
-          !heap_object.IsUndefined();
-      if (!topLevelInfoExists) {
-        triedTopLevelCompile = true;
-        const bool success = CompileTopLevel(isolate_, script);
-        if (!success) return false;
-        continue;
-      }
+      MaybeHandle<SharedFunctionInfo> shared =
+          GetTopLevelWithRecompile(script, &triedTopLevelCompile);
+      if (shared.is_null()) return false;
+      if (triedTopLevelCompile) continue;
     }
 
     bool was_compiled = false;
@@ -2060,6 +2127,26 @@ bool Debug::FindSharedFunctionInfosIntersectingRange(
   UNREACHABLE();
 }
 
+MaybeHandle<SharedFunctionInfo> Debug::GetTopLevelWithRecompile(
+    Handle<Script> script, bool* did_compile) {
+  DCHECK_LE(kFunctionLiteralIdTopLevel, script->shared_function_info_count());
+  DCHECK_LE(script->shared_function_info_count(),
+            script->shared_function_infos()->length());
+  MaybeObject maybeToplevel = script->shared_function_infos()->get(0);
+  Tagged<HeapObject> heap_object;
+  const bool topLevelInfoExists =
+      maybeToplevel.GetHeapObject(&heap_object) && !IsUndefined(heap_object);
+  if (topLevelInfoExists) {
+    if (did_compile) *did_compile = false;
+    return handle(SharedFunctionInfo::cast(heap_object), isolate_);
+  }
+
+  MaybeHandle<SharedFunctionInfo> shared;
+  CompileTopLevel(isolate_, script, &shared);
+  if (did_compile) *did_compile = true;
+  return shared;
+}
+
 // We need to find a SFI for a literal that may not yet have been compiled yet,
 // and there may not be a JSFunction referencing it. Find the SFI closest to
 // the given position, compile it to reveal possible inner SFIs and repeat.
@@ -2075,7 +2162,7 @@ Handle<Object> Debug::FindInnermostContainingFunctionInfo(Handle<Script> script,
     // If there is no shared function info for this script at all, there is
     // no point in looking for it by walking the heap.
 
-    SharedFunctionInfo shared;
+    Tagged<SharedFunctionInfo> shared;
     IsCompiledScope is_compiled_scope;
     {
       shared = FindSharedFunctionInfoCandidate(position, script, isolate_);
@@ -2162,7 +2249,7 @@ Handle<DebugInfo> Debug::GetOrCreateDebugInfo(
     Handle<SharedFunctionInfo> shared) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
 
-  if (base::Optional<DebugInfo> di = debug_infos_.Find(*shared)) {
+  if (base::Optional<Tagged<DebugInfo>> di = debug_infos_.Find(*shared)) {
     return handle(di.value(), isolate_);
   }
 
@@ -2240,7 +2327,7 @@ Handle<FixedArray> Debug::GetLoadedScripts() {
   isolate_->heap()->CollectAllGarbage(GCFlag::kNoFlags,
                                       GarbageCollectionReason::kDebugger);
   Factory* factory = isolate_->factory();
-  if (!factory->script_list()->IsWeakArrayList()) {
+  if (!IsWeakArrayList(*factory->script_list())) {
     return factory->empty_fixed_array();
   }
   Handle<WeakArrayList> array =
@@ -2249,60 +2336,57 @@ Handle<FixedArray> Debug::GetLoadedScripts() {
   int length = 0;
   {
     Script::Iterator iterator(isolate_);
-    for (Script script = iterator.Next(); !script.is_null();
+    for (Tagged<Script> script = iterator.Next(); !script.is_null();
          script = iterator.Next()) {
       if (script->HasValidSource()) results->set(length++, script);
     }
   }
-  return FixedArray::ShrinkOrEmpty(isolate_, results, length);
+  return FixedArray::RightTrimOrEmpty(isolate_, results, length);
 }
 
-base::Optional<DebugInfo> Debug::TryGetDebugInfo(SharedFunctionInfo sfi) {
+base::Optional<Tagged<DebugInfo>> Debug::TryGetDebugInfo(
+    Tagged<SharedFunctionInfo> sfi) {
   return debug_infos_.Find(sfi);
 }
 
-bool Debug::HasDebugInfo(SharedFunctionInfo sfi) {
+bool Debug::HasDebugInfo(Tagged<SharedFunctionInfo> sfi) {
   return TryGetDebugInfo(sfi).has_value();
 }
 
-bool Debug::HasCoverageInfo(SharedFunctionInfo sfi) {
-  if (base::Optional<DebugInfo> debug_info = TryGetDebugInfo(sfi)) {
-    return debug_info->HasCoverageInfo();
+bool Debug::HasCoverageInfo(Tagged<SharedFunctionInfo> sfi) {
+  if (base::Optional<Tagged<DebugInfo>> debug_info = TryGetDebugInfo(sfi)) {
+    return debug_info.value()->HasCoverageInfo();
   }
   return false;
 }
 
-bool Debug::HasBreakInfo(SharedFunctionInfo sfi) {
-  if (base::Optional<DebugInfo> debug_info = TryGetDebugInfo(sfi)) {
-    return debug_info->HasBreakInfo();
+bool Debug::HasBreakInfo(Tagged<SharedFunctionInfo> sfi) {
+  if (base::Optional<Tagged<DebugInfo>> debug_info = TryGetDebugInfo(sfi)) {
+    return debug_info.value()->HasBreakInfo();
   }
   return false;
 }
 
-bool Debug::BreakAtEntry(SharedFunctionInfo sfi) {
-  if (base::Optional<DebugInfo> debug_info = TryGetDebugInfo(sfi)) {
-    return debug_info->BreakAtEntry();
+bool Debug::BreakAtEntry(Tagged<SharedFunctionInfo> sfi) {
+  if (base::Optional<Tagged<DebugInfo>> debug_info = TryGetDebugInfo(sfi)) {
+    return debug_info.value()->BreakAtEntry();
   }
   return false;
 }
 
-base::Optional<Object> Debug::OnThrow(Handle<Object> exception) {
+base::Optional<Tagged<Object>> Debug::OnThrow(Handle<Object> exception) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   if (in_debug_scope() || ignore_events()) return {};
-  // Temporarily clear any scheduled_exception to allow evaluating
+  // Temporarily clear any exception to allow evaluating
   // JavaScript from the debug event handler.
   HandleScope scope(isolate_);
-  Handle<Object> scheduled_exception;
-  if (isolate_->has_scheduled_exception()) {
-    scheduled_exception = handle(isolate_->scheduled_exception(), isolate_);
-    isolate_->clear_scheduled_exception();
-  }
-  Handle<Object> maybe_promise = isolate_->GetPromiseOnStackOnThrow();
-  OnException(exception, maybe_promise,
-              maybe_promise->IsJSPromise() ? v8::debug::kPromiseRejection
-                                           : v8::debug::kException);
-  if (!scheduled_exception.is_null()) {
-    isolate_->set_scheduled_exception(*scheduled_exception);
+  {
+    base::Optional<Isolate::ExceptionScope> exception_scope;
+    if (isolate_->has_exception()) exception_scope.emplace(isolate_);
+    Handle<Object> maybe_promise = isolate_->GetPromiseOnStackOnThrow();
+    OnException(exception, maybe_promise,
+                IsJSPromise(*maybe_promise) ? v8::debug::kPromiseRejection
+                                            : v8::debug::kException);
   }
   PrepareStepOnThrow();
   // If the OnException handler requested termination, then indicated this to
@@ -2321,26 +2405,12 @@ void Debug::OnPromiseReject(Handle<Object> promise, Handle<Object> value) {
   HandleScope scope(isolate_);
   // Check whether the promise has been marked as having triggered a message.
   Handle<Symbol> key = isolate_->factory()->promise_debug_marker_symbol();
-  if (!promise->IsJSObject() ||
-      JSReceiver::GetDataProperty(isolate_, Handle<JSObject>::cast(promise),
-                                  key)
-          ->IsUndefined(isolate_)) {
+  if (!IsJSObject(*promise) ||
+      IsUndefined(*JSReceiver::GetDataProperty(
+                      isolate_, Handle<JSObject>::cast(promise), key),
+                  isolate_)) {
     OnException(value, promise, v8::debug::kPromiseRejection);
   }
-}
-
-bool Debug::IsExceptionBlackboxed(bool uncaught) {
-  RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
-  // Uncaught exception is blackboxed if all current frames are blackboxed,
-  // caught exception if top frame is blackboxed.
-  DebuggableStackFrameIterator it(isolate_);
-#if V8_ENABLE_WEBASSEMBLY
-  while (!it.done() && it.is_wasm()) it.Advance();
-#endif  // V8_ENABLE_WEBASSEMBLY
-  bool is_top_frame_blackboxed =
-      !it.done() ? IsFrameBlackboxed(it.javascript_frame()) : true;
-  if (!uncaught || !is_top_frame_blackboxed) return is_top_frame_blackboxed;
-  return AllFramesOnStackAreBlackboxed();
 }
 
 bool Debug::IsFrameBlackboxed(JavaScriptFrame* frame) {
@@ -2371,7 +2441,7 @@ void Debug::OnException(Handle<Object> exception, Handle<Object> promise,
   Isolate::CatchType catch_type = isolate_->PredictExceptionCatcher();
 
   bool uncaught = catch_type == Isolate::NOT_CAUGHT;
-  if (promise->IsJSObject()) {
+  if (IsJSObject(*promise)) {
     Handle<JSObject> jsobject = Handle<JSObject>::cast(promise);
     // Mark the promise as already having triggered a message.
     Handle<Symbol> key = isolate_->factory()->promise_debug_marker_symbol();
@@ -2379,7 +2449,7 @@ void Debug::OnException(Handle<Object> exception, Handle<Object> promise,
                         Just(ShouldThrow::kThrowOnError))
         .Assert();
     // Check whether the promise reject is considered an uncaught exception.
-    if (jsobject->IsJSPromise()) {
+    if (IsJSPromise(*jsobject)) {
       Handle<JSPromise> jspromise = Handle<JSPromise>::cast(jsobject);
 
       // Ignore the exception if the promise was marked as silent
@@ -2403,9 +2473,12 @@ void Debug::OnException(Handle<Object> exception, Handle<Object> promise,
 
   {
     JavaScriptStackFrameIterator it(isolate_);
-    // Check whether the top frame is blackboxed or the break location is muted.
-    if (!it.done() && (IsMutedAtCurrentLocation(it.frame()) ||
-                       IsExceptionBlackboxed(uncaught))) {
+    // Check whether the affected frames are blackboxed or the break location is
+    // muted.
+    if (!it.done() &&
+        (IsMutedAtCurrentLocation(it.frame()) ||
+         AllFramesOnStackAreBlackboxed(
+             exception_type == debug::kPromiseRejection, !uncaught))) {
       return;
     }
     if (it.done()) return;  // Do not trigger an event with an empty stack.
@@ -2453,7 +2526,7 @@ void Debug::OnDebugBreak(Handle<FixedArray> break_points_hit,
   std::vector<int> inspector_break_points_hit;
   // This array contains breakpoints installed using JS debug API.
   for (int i = 0; i < break_points_hit->length(); ++i) {
-    BreakPoint break_point = BreakPoint::cast(break_points_hit->get(i));
+    Tagged<BreakPoint> break_point = BreakPoint::cast(break_points_hit->get(i));
     inspector_break_points_hit.push_back(break_point->id());
   }
   {
@@ -2486,13 +2559,13 @@ bool Debug::IsBlackboxed(Handle<SharedFunctionInfo> shared) {
   Handle<DebugInfo> debug_info = GetOrCreateDebugInfo(shared);
   if (!debug_info->computed_debug_is_blackboxed()) {
     bool is_blackboxed =
-        !shared->IsSubjectToDebugging() || !shared->script().IsScript();
+        !shared->IsSubjectToDebugging() || !IsScript(shared->script());
     if (!is_blackboxed) {
       SuppressDebug while_processing(this);
       HandleScope handle_scope(isolate_);
       PostponeInterruptsScope no_interrupts(isolate_);
       DisableBreak no_recursive_break(this);
-      DCHECK(shared->script().IsScript());
+      DCHECK(IsScript(shared->script()));
       Handle<Script> script(Script::cast(shared->script()), isolate_);
       DCHECK(script->IsUserJavaScript());
       debug::Location start = GetDebugLocation(script, shared->StartPosition());
@@ -2518,7 +2591,7 @@ bool Debug::ShouldBeSkipped() {
   DebuggableStackFrameIterator iterator(isolate_);
   FrameSummary summary = iterator.GetTopValidFrame();
   Handle<Object> script_obj = summary.script();
-  if (!script_obj->IsScript()) return false;
+  if (!IsScript(*script_obj)) return false;
 
   Handle<Script> script = Handle<Script>::cast(script_obj);
   summary.EnsureSourcePositionsAvailable();
@@ -2532,12 +2605,62 @@ bool Debug::ShouldBeSkipped() {
   }
 }
 
-bool Debug::AllFramesOnStackAreBlackboxed() {
+namespace {
+bool ReceiverIsBlackboxed(Isolate* isolate, Handle<JSReceiver> receiver) {
+  if (!IsJSFunction(*receiver)) return true;
+
+  Handle<SharedFunctionInfo> function_info(
+      Handle<JSFunction>::cast(receiver)->shared(), isolate);
+  return isolate->debug()->IsBlackboxed(function_info);
+}
+}  // namespace
+
+bool Debug::AllFramesOnStackAreBlackboxed(bool include_async,
+                                          bool stop_at_caught) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   HandleScope scope(isolate_);
-  for (DebuggableStackFrameIterator it(isolate_); !it.done(); it.Advance()) {
-    if (!it.is_javascript()) continue;
-    if (!IsFrameBlackboxed(it.javascript_frame())) return false;
+  Handle<Object> promise_stack(thread_local_.promise_stack_, isolate_);
+
+  for (StackFrameIterator it(isolate_); !it.done(); it.Advance()) {
+    StackFrame* frame = it.frame();
+    if (frame->is_java_script() &&
+        !IsFrameBlackboxed(JavaScriptFrame::cast(frame))) {
+      return false;
+    }
+    if (!stop_at_caught && !include_async) continue;
+
+    Isolate::CatchType prediction =
+        isolate_->PredictExceptionCatchAtFrame(frame);
+    if (include_async && prediction == Isolate::CAUGHT_BY_ASYNC_AWAIT) {
+      // This logic is duplicated from Isolate::GetPromiseOnStackOnThrow.
+      // In the future a more advanced version of Isolate::WalkPromiseTree
+      // could further reduce duplicated logic by walking both frames and
+      // promises.
+      if (!IsPromiseOnStack(*promise_stack)) continue;
+      Handle<PromiseOnStack> promise_on_stack =
+          Handle<PromiseOnStack>::cast(promise_stack);
+      MaybeHandle<JSObject> maybe_promise =
+          PromiseOnStack::GetPromise(promise_on_stack);
+      Handle<JSObject> object_handle;
+      if (maybe_promise.ToHandle(&object_handle) &&
+          IsJSPromise(*object_handle)) {
+        bool is_caught = false;
+        bool is_blackboxed = true;
+        isolate_->WalkPromiseTree(
+            Handle<JSPromise>::cast(object_handle),
+            [this, &is_caught,
+             &is_blackboxed](Isolate::PromiseHandler handler) {
+              is_caught = handler.catches;
+              is_blackboxed = ReceiverIsBlackboxed(isolate_, handler.receiver);
+              return is_caught || !is_blackboxed;
+            });
+        if ((stop_at_caught && is_caught) || !is_blackboxed) {
+          return is_blackboxed;
+        }
+      }
+    } else if (stop_at_caught && prediction != Isolate::NOT_CAUGHT) {
+      break;
+    }
   }
   return true;
 }
@@ -2558,7 +2681,6 @@ bool Debug::SetScriptSource(Handle<Script> script, Handle<String> source,
                             debug::LiveEditResult* result) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DebugScope debug_scope(this);
-  feature_tracker()->Track(DebugFeatureTracker::kLiveEdit);
   running_live_edit_ = true;
   LiveEdit::PatchScript(isolate_, script, source, preview,
                         allow_top_frame_live_editing, result);
@@ -2628,7 +2750,6 @@ void Debug::UpdateState() {
     isolate_->compilation_cache()->DisableScriptAndEval();
     isolate_->CollectSourcePositionsForAllBytecodeArrays();
     is_active = true;
-    feature_tracker()->Track(DebugFeatureTracker::kActive);
   } else {
     isolate_->compilation_cache()->EnableScriptAndEval();
     Unload();
@@ -2666,7 +2787,7 @@ void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode,
     JavaScriptFrame* frame = it.frame()->is_java_script()
                                  ? JavaScriptFrame::cast(it.frame())
                                  : nullptr;
-    if (frame && frame->function().IsJSFunction()) {
+    if (frame && IsJSFunction(frame->function())) {
       Handle<JSFunction> function(frame->function(), isolate_);
       Handle<SharedFunctionInfo> shared(function->shared(), isolate_);
 
@@ -2745,7 +2866,7 @@ void Debug::PrintBreakLocation() {
   PrintF("[debug] break in function '");
   inspector.GetFunctionName()->PrintOn(stdout);
   PrintF("'.\n");
-  if (script_obj->IsScript()) {
+  if (IsScript(*script_obj)) {
     Handle<Script> script = Handle<Script>::cast(script_obj);
     Handle<String> source(String::cast(script->source()), isolate_);
     Script::InitLineEnds(isolate_, script);
@@ -2872,10 +2993,19 @@ void Debug::StartSideEffectCheckMode() {
   DCHECK(!temporary_objects_);
   temporary_objects_.reset(new TemporaryObjectsTracker());
   isolate_->heap()->AddHeapObjectAllocationTracker(temporary_objects_.get());
-  Handle<FixedArray> array(isolate_->native_context()->regexp_last_match_info(),
-                           isolate_);
-  regexp_match_info_ =
-      Handle<RegExpMatchInfo>::cast(isolate_->factory()->CopyFixedArray(array));
+
+  Handle<RegExpMatchInfo> current_match_info(
+      isolate_->native_context()->regexp_last_match_info(), isolate_);
+  int register_count = current_match_info->number_of_capture_registers();
+  regexp_match_info_ = RegExpMatchInfo::New(
+      isolate_, JSRegExp::CaptureCountForRegisters(register_count));
+  DCHECK_EQ(regexp_match_info_->number_of_capture_registers(),
+            current_match_info->number_of_capture_registers());
+  regexp_match_info_->set_last_subject(current_match_info->last_subject());
+  regexp_match_info_->set_last_input(current_match_info->last_input());
+  RegExpMatchInfo::CopyElements(isolate_, *regexp_match_info_, 0,
+                                *current_match_info, 0, register_count,
+                                SKIP_WRITE_BARRIER);
 
   // Update debug infos to have correct execution mode.
   UpdateDebugInfosForExecutionMode();
@@ -2885,9 +3015,9 @@ void Debug::StopSideEffectCheckMode() {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
   if (side_effect_check_failed_) {
-    DCHECK(isolate_->has_pending_exception());
+    DCHECK(isolate_->has_exception());
     DCHECK_IMPLIES(v8_flags.strict_termination_checks,
-                   isolate_->is_execution_termination_pending());
+                   isolate_->is_execution_terminating());
     // Convert the termination exception into a regular exception.
     isolate_->CancelTerminateExecution();
     isolate_->Throw(*isolate_->factory()->NewEvalError(
@@ -2910,7 +3040,7 @@ void Debug::StopSideEffectCheckMode() {
 void Debug::ApplySideEffectChecks(Handle<DebugInfo> debug_info) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DCHECK(debug_info->HasInstrumentedBytecodeArray());
-  Handle<BytecodeArray> debug_bytecode(debug_info->DebugBytecodeArray(),
+  Handle<BytecodeArray> debug_bytecode(debug_info->DebugBytecodeArray(isolate_),
                                        isolate_);
   DebugEvaluate::ApplySideEffectChecks(debug_bytecode);
   debug_info->SetDebugExecutionMode(DebugInfo::kSideEffects);
@@ -2919,9 +3049,10 @@ void Debug::ApplySideEffectChecks(Handle<DebugInfo> debug_info) {
 void Debug::ClearSideEffectChecks(Handle<DebugInfo> debug_info) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DCHECK(debug_info->HasInstrumentedBytecodeArray());
-  Handle<BytecodeArray> debug_bytecode(debug_info->DebugBytecodeArray(),
+  Handle<BytecodeArray> debug_bytecode(debug_info->DebugBytecodeArray(isolate_),
                                        isolate_);
-  Handle<BytecodeArray> original(debug_info->OriginalBytecodeArray(), isolate_);
+  Handle<BytecodeArray> original(debug_info->OriginalBytecodeArray(isolate_),
+                                 isolate_);
   for (interpreter::BytecodeArrayIterator it(debug_bytecode); !it.done();
        it.Advance()) {
     // Restore from original. This may copy only the scaling prefix, which is
@@ -2938,7 +3069,7 @@ bool Debug::PerformSideEffectCheck(Handle<JSFunction> function,
   DisallowJavascriptExecution no_js(isolate_);
   IsCompiledScope is_compiled_scope(
       function->shared()->is_compiled_scope(isolate_));
-  if (!function->is_compiled() &&
+  if (!function->is_compiled(isolate_) &&
       !Compiler::Compile(isolate_, function, Compiler::KEEP_EXCEPTION,
                          &is_compiled_scope)) {
     return false;
@@ -3004,7 +3135,6 @@ bool Debug::PerformSideEffectCheckForAccessor(
     case SideEffectType::kHasSideEffectToReceiver:
       DCHECK(!receiver.is_null());
       if (PerformSideEffectCheckForObject(receiver)) return true;
-      isolate_->OptionalRescheduleException(false);
       return false;
 
     case SideEffectType::kHasSideEffect:
@@ -3012,14 +3142,13 @@ bool Debug::PerformSideEffectCheckForAccessor(
   }
   if (v8_flags.trace_side_effect_free_debug_evaluate) {
     PrintF("[debug-evaluate] API Callback '");
-    accessor_info->name().ShortPrint();
+    ShortPrint(accessor_info->name());
     PrintF("' may cause side effect.\n");
   }
 
   side_effect_check_failed_ = true;
   // Throw an uncatchable termination exception.
   isolate_->TerminateExecution();
-  isolate_->OptionalRescheduleException(false);
   return false;
 }
 
@@ -3059,7 +3188,6 @@ bool Debug::PerformSideEffectCheckForCallback(
   side_effect_check_failed_ = true;
   // Throw an uncatchable termination exception.
   isolate_->TerminateExecution();
-  isolate_->OptionalRescheduleException(false);
   return false;
 }
 
@@ -3079,7 +3207,6 @@ bool Debug::PerformSideEffectCheckForInterceptor(
   side_effect_check_failed_ = true;
   // Throw an uncatchable termination exception.
   isolate_->TerminateExecution();
-  isolate_->OptionalRescheduleException(false);
   return false;
 }
 
@@ -3088,8 +3215,8 @@ bool Debug::PerformSideEffectCheckAtBytecode(InterpretedFrame* frame) {
   using interpreter::Bytecode;
 
   DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
-  SharedFunctionInfo shared = frame->function()->shared();
-  BytecodeArray bytecode_array = shared->GetBytecodeArray(isolate_);
+  Tagged<SharedFunctionInfo> shared = frame->function()->shared();
+  Tagged<BytecodeArray> bytecode_array = shared->GetBytecodeArray(isolate_);
   int offset = frame->GetBytecodeOffset();
   interpreter::BytecodeArrayIterator bytecode_iterator(
       handle(bytecode_array, isolate_), offset);
@@ -3126,8 +3253,8 @@ bool Debug::PerformSideEffectCheckForObject(Handle<Object> object) {
   DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
 
   // We expect no side-effects for primitives.
-  if (object->IsNumber()) return true;
-  if (object->IsName()) return true;
+  if (IsNumber(*object)) return true;
+  if (IsName(*object)) return true;
 
   if (temporary_objects_->HasObject(Handle<HeapObject>::cast(object))) {
     return true;

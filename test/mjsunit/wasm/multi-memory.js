@@ -460,3 +460,125 @@ function assertMemoryEquals(expected, memory) {
     assertEquals(3, instance.exports.grow(1));
   }
 })();
+
+(function testMultipleMemoriesInOneFunction() {
+  print(arguments.callee.name);
+  // Some "interesting" access patterns.
+  const mem_indexes_list =
+      [[0, 1, 0, 1], [1, 0, 1, 0], [0, 0, 1, 1], [1, 1, 0, 0]];
+  const builder = new WasmModuleBuilder();
+  const mem0_idx = builder.addMemory(1, 1);
+  const mem1_idx = builder.addMemory(1, 1);
+  for (let [idx, mem_indexes] of mem_indexes_list.entries()) {
+    let sig = makeSig(new Array(4).fill(kWasmI32), [kWasmI32]);
+    builder.addFunction(`load${idx}`, sig)
+        .addBody([
+          kExprLocalGet, 0, kExprI32LoadMem, 0x40, mem_indexes[0], 0,  // load 1
+          kExprLocalGet, 1, kExprI32LoadMem, 0x40, mem_indexes[1], 0,  // load 2
+          kExprI32Add,                                                 // add
+          kExprLocalGet, 2, kExprI32LoadMem, 0x40, mem_indexes[2], 0,  // load 3
+          kExprI32Add,                                                 // add
+          kExprLocalGet, 3, kExprI32LoadMem, 0x40, mem_indexes[3], 0,  // load 4
+          kExprI32Add,                                                 // add
+        ])
+        .exportFunc();
+  }
+  builder.exportMemoryAs('mem0', mem0_idx);
+  builder.exportMemoryAs('mem1', mem1_idx);
+
+  const instance = builder.instantiate();
+
+  // Create random memory contents.
+  let buf0 = new DataView(instance.exports.mem0.buffer);
+  let buf1 = new DataView(instance.exports.mem1.buffer);
+  for (let i = 0; i < kPageSize; ++i) {
+    buf0.setUint8(i, Math.floor(Math.random() * 0xff));
+    buf1.setUint8(i, Math.floor(Math.random() * 0xff));
+  }
+
+  for (let run = 0; run < 10; ++run) {
+    // Return a random index in [0, kPageSize - 3) such that we can read four
+    // bytes from there.
+    let get_random_offset = () => Math.floor(Math.random() * (kPageSize - 3));
+    let inputs = new Array(4).fill(0).map(get_random_offset);
+    for (let [func_idx, mem_indexes] of mem_indexes_list.entries()) {
+      let expected = 0;
+      for (let i = 0; i < 4; ++i) {
+        let buf = mem_indexes[i] == 0 ? buf0 : buf1;
+        expected += buf.getInt32(inputs[i], true);
+      }
+      expected >>= 0;  // Truncate to 32 bit.
+      assertEquals(expected, instance.exports[`load${func_idx}`](...inputs));
+    }
+  }
+})();
+
+(function testAtomicsOnMultiMemory() {
+  print(arguments.callee.name);
+  const builder = new WasmModuleBuilder();
+  const mem0_idx = builder.addMemory(1, 1, true);
+  const mem1_idx = builder.addMemory(2, 2, true);
+  builder.exportMemoryAs('mem0', mem0_idx);
+  builder.exportMemoryAs('mem1', mem1_idx);
+
+  for (let mem_idx of [mem0_idx, mem1_idx]) {
+    builder.addFunction(`load${mem_idx}`, kSig_i_i)
+        .addBody([
+          kExprLocalGet, 0,                                    // -
+          kAtomicPrefix, kExprI32AtomicLoad, 0x42, mem_idx, 0  // -
+        ])
+        .exportFunc();
+    builder.addFunction(`store${mem_idx}`, kSig_v_ii)
+        .addBody([
+          kExprLocalGet, 0,                                     // -
+          kExprLocalGet, 1,                                     // -
+          kAtomicPrefix, kExprI32AtomicStore, 0x42, mem_idx, 0  // -
+        ])
+        .exportFunc();
+    builder.addFunction(`cmpxchg${mem_idx}`, kSig_i_iii)
+        .addBody([
+          kExprLocalGet, 0,                                               // -
+          kExprLocalGet, 1,                                               // -
+          kExprLocalGet, 2,                                               // -
+          kAtomicPrefix, kExprI32AtomicCompareExchange, 0x42, mem_idx, 0  // -
+        ])
+        .exportFunc();
+  }
+
+  const instance = builder.instantiate();
+
+  const {mem0, load0, store0, cmpxchg0, mem1, load1, store1, cmpxchg1} =
+      instance.exports;
+
+  const data0 = new DataView(mem0.buffer);
+  const data1 = new DataView(mem1.buffer);
+
+  const offset0 = 16;
+  const value0 = 13;
+  store0(offset0, value0);
+  assertEquals(value0, load0(offset0));
+  assertEquals(0, load1(offset0));
+
+  const offset1 = 24;
+  const value1 = 11;
+  store1(offset1, value1);
+  assertEquals(value1, load1(offset1));
+  assertEquals(0, load0(offset1));
+
+  assertEquals(value0, cmpxchg0(offset0, -1, -1));
+  assertEquals(value0, cmpxchg0(offset0, value0, value1));
+  assertEquals(value1, load0(offset0));
+
+  assertEquals(value1, cmpxchg1(offset1, -1, -1));
+  assertEquals(value1, cmpxchg1(offset1, value1, value0));
+  assertEquals(value0, load1(offset1));
+
+  assertEquals(0, load0(offset1));
+  assertEquals(0, load1(offset0));
+
+  // Test traps.
+  assertEquals(0, load0(kPageSize - 4));
+  assertEquals(0, load1(2 * kPageSize - 4));
+  assertTraps(kTrapMemOutOfBounds, () => load0(kPageSize));
+  assertTraps(kTrapMemOutOfBounds, () => load1(2 * kPageSize));
+})();

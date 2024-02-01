@@ -5,6 +5,7 @@
 #include "src/compiler/turboshaft/operations.h"
 
 #include <atomic>
+#include <iomanip>
 #include <sstream>
 
 #include "src/base/logging.h"
@@ -16,11 +17,13 @@
 #include "src/compiler/backend/instruction-selector.h"
 #include "src/compiler/frame-states.h"
 #include "src/compiler/graph-visualizer.h"
+#include "src/compiler/js-heap-broker.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/turboshaft/deopt-data.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/handles/handles-inl.h"
 #include "src/handles/maybe-handles-inl.h"
+#include "src/objects/code-inl.h"
 
 #ifdef DEBUG
 // For InWritableSharedSpace
@@ -37,51 +40,60 @@ namespace v8::internal::compiler::turboshaft {
 
 void Print(const Operation& op) { std::cout << op << "\n"; }
 
-bool AllowImplicitRepresentationChange(RegisterRepresentation actual_rep,
-                                       RegisterRepresentation expected_rep) {
-  if (actual_rep == expected_rep) {
-    return true;
+Zone* get_zone(Graph* graph) { return graph->graph_zone(); }
+
+base::Optional<Builtin> TryGetBuiltinId(const ConstantOp* target,
+                                        JSHeapBroker* broker) {
+  if (!target) return base::nullopt;
+  if (target->kind != ConstantOp::Kind::kHeapObject) return base::nullopt;
+  // TODO(nicohartmann@): For builtin compilation we don't have a broker. We
+  // could try to access the heap directly instead.
+  if (broker == nullptr) return base::nullopt;
+  UnparkedScopeIfNeeded scope(broker);
+  AllowHandleDereference allow_handle_dereference;
+  HeapObjectRef ref = MakeRef(broker, target->handle());
+  if (ref.IsCode()) {
+    CodeRef code = ref.AsCode();
+    if (code.object()->is_builtin()) {
+      return code.object()->builtin_id();
+    }
   }
-  switch (expected_rep.value()) {
-    case RegisterRepresentation::Word32():
-      // We allow implicit 64- to 32-bit truncation.
-      if (actual_rep == RegisterRepresentation::Word64()) {
-        return true;
-      }
-      // We allow implicit tagged -> untagged conversions.
-      // Even without pointer compression, we use `Word32And` for Smi-checks on
-      // tagged values.
-      if (actual_rep == any_of(RegisterRepresentation::Tagged(),
-                               RegisterRepresentation::Compressed())) {
-        return true;
-      }
-      break;
-    case RegisterRepresentation::Word64():
-      // We allow implicit tagged -> untagged conversions.
-      if (kTaggedSize == kInt64Size &&
-          actual_rep == RegisterRepresentation::Tagged()) {
-        return true;
-      }
-      break;
-    case RegisterRepresentation::Tagged():
-      // We allow implicit untagged -> tagged conversions. This is only safe for
-      // Smi values.
-      if (actual_rep == RegisterRepresentation::PointerSized()) {
-        return true;
-      }
-      break;
-    case RegisterRepresentation::Compressed():
-      // Compression is a no-op.
-      if (actual_rep == any_of(RegisterRepresentation::Tagged(),
-                               RegisterRepresentation::PointerSized(),
-                               RegisterRepresentation::Word32())) {
-        return true;
-      }
-      break;
-    default:
-      break;
+  return base::nullopt;
+}
+
+bool CallOp::IsStackCheck(const Graph& graph, JSHeapBroker* broker,
+                          StackCheckKind kind) const {
+  auto builtin_id =
+      TryGetBuiltinId(graph.Get(callee()).TryCast<ConstantOp>(), broker);
+  if (!builtin_id.has_value()) return false;
+  if (*builtin_id != Builtin::kCEntry_Return1_ArgvOnStack_NoBuiltinExit) {
+    return false;
   }
-  return false;
+  DCHECK_GE(input_count, 4);
+  Runtime::FunctionId builtin = GetBuiltinForStackCheckKind(kind);
+  auto is_this_builtin = [&](int input_index) {
+    if (const ConstantOp* real_callee =
+            graph.Get(input(input_index)).TryCast<ConstantOp>();
+        real_callee != nullptr &&
+        real_callee->kind == ConstantOp::Kind::kExternal &&
+        real_callee->external_reference() ==
+            ExternalReference::Create(builtin)) {
+      return true;
+    }
+    return false;
+  };
+  // The function called by `CEntry_Return1_ArgvOnStack_NoBuiltinExit` is the
+  // 3rd or the 4th argument of the CallOp (depending on the stack check kind),
+  // so we check both of them.
+  return is_this_builtin(2) || is_this_builtin(3);
+}
+
+void CallOp::PrintOptions(std::ostream& os) const {
+  os << '[' << *descriptor->descriptor << ']';
+}
+
+void TailCallOp::PrintOptions(std::ostream& os) const {
+  os << '[' << *descriptor->descriptor << ']';
 }
 
 bool ValidOpInputRep(
@@ -112,7 +124,7 @@ bool ValidOpInputRep(
     return false;
   }
   for (RegisterRepresentation expected_rep : expected_reps) {
-    if (AllowImplicitRepresentationChange(input_rep, expected_rep)) {
+    if (input_rep.AllowImplicitRepresentationChangeTo(expected_rep)) {
       return true;
     }
   }
@@ -292,6 +304,8 @@ std::ostream& operator<<(std::ostream& os, ShiftOp::Kind kind) {
 
 std::ostream& operator<<(std::ostream& os, ComparisonOp::Kind kind) {
   switch (kind) {
+    case ComparisonOp::Kind::kEqual:
+      return os << "Equal";
     case ComparisonOp::Kind::kSignedLessThan:
       return os << "SignedLessThan";
     case ComparisonOp::Kind::kSignedLessThanOrEqual:
@@ -325,6 +339,8 @@ std::ostream& operator<<(std::ostream& os, ChangeOp::Kind kind) {
       return os << "ZeroExtend";
     case ChangeOp::Kind::kSignExtend:
       return os << "SignExtend";
+    case ChangeOp::Kind::kTruncate:
+      return os << "Truncate";
     case ChangeOp::Kind::kBitcast:
       return os << "Bitcast";
   }
@@ -358,6 +374,19 @@ std::ostream& operator<<(std::ostream& os, TryChangeOp::Kind kind) {
   }
 }
 
+std::ostream& operator<<(std::ostream& os, TaggedBitcastOp::Kind kind) {
+  switch (kind) {
+    case TaggedBitcastOp::Kind::kSmi:
+      return os << "Smi";
+    case TaggedBitcastOp::Kind::kHeapObject:
+      return os << "HeapObject";
+    case TaggedBitcastOp::Kind::kTagAndSmiBits:
+      return os << "TagAndSmiBits";
+    case TaggedBitcastOp::Kind::kAny:
+      return os << "Any";
+  }
+}
+
 std::ostream& operator<<(std::ostream& os, ChangeOp::Assumption assumption) {
   switch (assumption) {
     case ChangeOp::Assumption::kNoAssumption:
@@ -375,6 +404,48 @@ std::ostream& operator<<(std::ostream& os, SelectOp::Implementation kind) {
       return os << "Branch";
     case SelectOp::Implementation::kCMove:
       return os << "CMove";
+  }
+}
+
+std::ostream& operator<<(std::ostream& os, AtomicRMWOp::BinOp bin_op) {
+  switch (bin_op) {
+    case AtomicRMWOp::BinOp::kAdd:
+      return os << "add";
+    case AtomicRMWOp::BinOp::kSub:
+      return os << "sub";
+    case AtomicRMWOp::BinOp::kAnd:
+      return os << "and";
+    case AtomicRMWOp::BinOp::kOr:
+      return os << "or";
+    case AtomicRMWOp::BinOp::kXor:
+      return os << "xor";
+    case AtomicRMWOp::BinOp::kExchange:
+      return os << "exchange";
+    case AtomicRMWOp::BinOp::kCompareExchange:
+      return os << "compare-exchange";
+  }
+}
+
+std::ostream& operator<<(std::ostream& os, AtomicWord32PairOp::Kind bin_op) {
+  switch (bin_op) {
+    case AtomicWord32PairOp::Kind::kAdd:
+      return os << "add";
+    case AtomicWord32PairOp::Kind::kSub:
+      return os << "sub";
+    case AtomicWord32PairOp::Kind::kAnd:
+      return os << "and";
+    case AtomicWord32PairOp::Kind::kOr:
+      return os << "or";
+    case AtomicWord32PairOp::Kind::kXor:
+      return os << "xor";
+    case AtomicWord32PairOp::Kind::kExchange:
+      return os << "exchange";
+    case AtomicWord32PairOp::Kind::kCompareExchange:
+      return os << "compare-exchange";
+    case AtomicWord32PairOp::Kind::kLoad:
+      return os << "load";
+    case AtomicWord32PairOp::Kind::kStore:
+      return os << "store";
   }
 }
 
@@ -410,25 +481,6 @@ void Operation::PrintOptions(std::ostream& os) const {
     TURBOSHAFT_OPERATION_LIST(SWITCH_CASE)
 #undef SWITCH_CASE
   }
-}
-
-void PendingLoopPhiOp::PrintOptions(std::ostream& os) const {
-  os << "[" << rep << ", ";
-  switch (kind) {
-    case Kind::kOldGraphIndex:
-      os << "#o" << old_backedge_index();
-      break;
-    case Kind::kFromSeaOfNodes:
-      os << "Node(#" << old_backedge_node()->id() << ")";
-      break;
-    case Kind::kLabelParameter:
-      os << "PhiIndex(" << phi_index().index << ")";
-      break;
-    case Kind::kVariable:
-      os << "Variable(" << &variable().data() << ")";
-      break;
-  }
-  os << "]";
 }
 
 void ConstantOp::PrintOptions(std::ostream& os) const {
@@ -479,6 +531,17 @@ void ParameterOp::PrintOptions(std::ostream& os) const {
   os << "]";
 }
 
+MachineType LoadOp::machine_type() const {
+  if (result_rep == RegisterRepresentation::Compressed()) {
+    if (loaded_rep == MemoryRepresentation::AnyTagged()) {
+      return MachineType::AnyCompressed();
+    } else if (loaded_rep == MemoryRepresentation::TaggedPointer()) {
+      return MachineType::CompressedPointer();
+    }
+  }
+  return loaded_rep.ToMachineType();
+}
+
 void LoadOp::PrintInputs(std::ostream& os,
                          const std::string& op_index_prefix) const {
   os << " *(" << op_index_prefix << base().id();
@@ -488,7 +551,7 @@ void LoadOp::PrintInputs(std::ostream& os,
     os << " + " << offset;
   }
   if (index().valid()) {
-    os << " + " << op_index_prefix << index().id();
+    os << " + " << op_index_prefix << index().value().id();
     if (element_size_log2 > 0) os << "*" << (1 << element_size_log2);
   }
   os << ") ";
@@ -497,11 +560,62 @@ void LoadOp::PrintOptions(std::ostream& os) const {
   os << "[";
   os << (kind.tagged_base ? "tagged base" : "raw");
   if (kind.maybe_unaligned) os << ", unaligned";
+  if (kind.with_trap_handler) os << ", protected";
   os << ", " << loaded_rep;
+  os << ", " << result_rep;
   if (element_size_log2 != 0)
     os << ", element size: 2^" << int{element_size_log2};
   if (offset != 0) os << ", offset: " << offset;
   os << "]";
+}
+
+void AtomicRMWOp::PrintInputs(std::ostream& os,
+                              const std::string& op_index_prefix) const {
+  os << " *(" << op_index_prefix << base().id() << " + " << op_index_prefix
+     << index().id() << ").atomic_" << bin_op << "(";
+  if (bin_op == BinOp::kCompareExchange) {
+    os << "expected: " << op_index_prefix << expected();
+    os << ", new: " << op_index_prefix << value();
+  } else {
+    os << op_index_prefix << value().id();
+  }
+  os << ")";
+}
+
+void AtomicRMWOp::PrintOptions(std::ostream& os) const {
+  os << "["
+     << "binop: " << bin_op << ", result_rep: " << result_rep
+     << ", input_rep: " << input_rep << "]";
+}
+
+void AtomicWord32PairOp::PrintInputs(std::ostream& os,
+                                     const std::string& op_index_prefix) const {
+  os << " *(" << op_index_prefix << base().id();
+  if (index().valid()) {
+    os << " + " << op_index_prefix << index().value().id();
+  }
+  if (offset) {
+    os << " + offset=" << offset;
+  }
+  os << ").atomic_word32_pair_" << kind << "(";
+  if (kind == Kind::kCompareExchange) {
+    os << "expected: {lo: " << op_index_prefix << value_low()
+       << ", hi: " << op_index_prefix << value_high();
+    os << "}, value: {lo: " << op_index_prefix << value_low()
+       << ", hi: " << op_index_prefix << value_high() << "}";
+  } else if (kind != Kind::kLoad) {
+    os << "lo: " << op_index_prefix << value_low()
+       << ", hi: " << op_index_prefix << value_high();
+  }
+  os << ")";
+}
+
+void AtomicWord32PairOp::PrintOptions(std::ostream& os) const {
+  os << "[opkind: " << kind << "]";
+}
+
+void MemoryBarrierOp::PrintOptions(std::ostream& os) const {
+  os << "[memory order: " << memory_order << "]";
 }
 
 void StoreOp::PrintInputs(std::ostream& os,
@@ -513,7 +627,7 @@ void StoreOp::PrintInputs(std::ostream& os,
     os << " + " << offset;
   }
   if (index().valid()) {
-    os << " + " << op_index_prefix << index().id();
+    os << " + " << op_index_prefix << index().value().id();
     if (element_size_log2 > 0) os << "*" << (1 << element_size_log2);
   }
   os << ") = " << op_index_prefix << value().id() << " ";
@@ -522,6 +636,7 @@ void StoreOp::PrintOptions(std::ostream& os) const {
   os << "[";
   os << (kind.tagged_base ? "tagged base" : "raw");
   if (kind.maybe_unaligned) os << ", unaligned";
+  if (kind.with_trap_handler) os << ", protected";
   os << ", " << stored_rep;
   os << ", " << write_barrier;
   if (element_size_log2 != 0)
@@ -533,9 +648,7 @@ void StoreOp::PrintOptions(std::ostream& os) const {
 
 void AllocateOp::PrintOptions(std::ostream& os) const {
   os << "[";
-  os << type << ", ";
-  os << (allow_large_objects == AllowLargeObjects::kTrue ? "allow large objects"
-                                                         : "no large objects");
+  os << type;
   os << "]";
 }
 
@@ -643,6 +756,32 @@ void FrameStateOp::Validate(const Graph& graph) const {
   }
 }
 
+void DidntThrowOp::Validate(const Graph& graph) const {
+#ifdef DEBUG
+  DCHECK(MayThrow(graph.Get(throwing_operation()).opcode));
+  switch (graph.Get(throwing_operation()).opcode) {
+    case Opcode::kCall: {
+      auto& call_op = graph.Get(throwing_operation()).Cast<CallOp>();
+      DCHECK(call_op.descriptor->out_reps == outputs_rep());
+      break;
+    }
+    default:
+      UNREACHABLE();
+  }
+  // Check that `may_throw()` is either immediately before or that there is only
+  // a `CheckExceptionOp` in-between.
+  OpIndex this_index = graph.Index(*this);
+  OpIndex in_between = graph.NextIndex(throwing_operation());
+  if (has_catch_block) {
+    DCHECK_NE(in_between, this_index);
+    auto& catch_op = graph.Get(in_between).Cast<CheckExceptionOp>();
+    DCHECK_EQ(catch_op.didnt_throw_block->begin(), this_index);
+  } else {
+    DCHECK_EQ(in_between, this_index);
+  }
+#endif
+}
+
 void WordBinopOp::PrintOptions(std::ostream& os) const {
   os << "[";
   switch (kind) {
@@ -744,6 +883,35 @@ void Word32PairBinopOp::PrintOptions(std::ostream& os) const {
       os << "ShiftRightUnsigned";
       break;
   }
+  os << "]";
+}
+
+void WordBinopDeoptOnOverflowOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  switch (kind) {
+    case Kind::kSignedAdd:
+      os << "signed add, ";
+      break;
+    case Kind::kSignedMul:
+      os << "signed mul, ";
+      break;
+    case Kind::kSignedSub:
+      os << "signed sub, ";
+      break;
+    case Kind::kSignedDiv:
+      os << "signed div, ";
+      break;
+    case Kind::kSignedMod:
+      os << "signed mod, ";
+      break;
+    case Kind::kUnsignedDiv:
+      os << "unsigned div, ";
+      break;
+    case Kind::kUnsignedMod:
+      os << "unsigned mod, ";
+      break;
+  }
+  os << rep;
   os << "]";
 }
 
@@ -918,6 +1086,9 @@ std::ostream& operator<<(std::ostream& os,
       return os << "Boolean";
     case ConvertUntaggedToJSPrimitiveOp::JSPrimitiveKind::kHeapNumber:
       return os << "HeapNumber";
+    case ConvertUntaggedToJSPrimitiveOp::JSPrimitiveKind::
+        kHeapNumberOrUndefined:
+      return os << "HeapNumberOrUndefined";
     case ConvertUntaggedToJSPrimitiveOp::JSPrimitiveKind::kNumber:
       return os << "Number";
     case ConvertUntaggedToJSPrimitiveOp::JSPrimitiveKind::kSmi:
@@ -1109,6 +1280,8 @@ std::ostream& operator<<(std::ostream& os, BigIntBinopOp::Kind kind) {
 
 std::ostream& operator<<(std::ostream& os, BigIntComparisonOp::Kind kind) {
   switch (kind) {
+    case BigIntComparisonOp::Kind::kEqual:
+      return os << "Equal";
     case BigIntComparisonOp::Kind::kLessThan:
       return os << "LessThan";
     case BigIntComparisonOp::Kind::kLessThanOrEqual:
@@ -1145,6 +1318,8 @@ std::ostream& operator<<(std::ostream& os, StringToCaseIntlOp::Kind kind) {
 
 std::ostream& operator<<(std::ostream& os, StringComparisonOp::Kind kind) {
   switch (kind) {
+    case StringComparisonOp::Kind::kEqual:
+      return os << "Equal";
     case StringComparisonOp::Kind::kLessThan:
       return os << "LessThan";
     case StringComparisonOp::Kind::kLessThanOrEqual:
@@ -1197,6 +1372,32 @@ std::ostream& operator<<(std::ostream& os, FindOrderedHashEntryOp::Kind kind) {
   }
 }
 
+std::ostream& operator<<(std::ostream& os,
+                         SpeculativeNumberBinopOp::Kind kind) {
+  switch (kind) {
+    case SpeculativeNumberBinopOp::Kind::kSafeIntegerAdd:
+      return os << "SafeIntegerAdd";
+  }
+}
+
+std::ostream& operator<<(std::ostream& os, StackCheckOp::CheckOrigin origin) {
+  switch (origin) {
+    case StackCheckOp::CheckOrigin::kFromJS:
+      return os << "JavaScript";
+    case StackCheckOp::CheckOrigin::kFromWasm:
+      return os << "WebAssembly";
+  }
+}
+
+std::ostream& operator<<(std::ostream& os, StackCheckOp::CheckKind kind) {
+  switch (kind) {
+    case StackCheckOp::CheckKind::kFunctionHeaderCheck:
+      return os << "function-entry";
+    case StackCheckOp::CheckKind::kLoopCheck:
+      return os << "loop";
+  }
+}
+
 #if V8_ENABLE_WEBASSEMBLY
 
 const RegisterRepresentation& RepresentationFor(wasm::ValueType type) {
@@ -1210,6 +1411,8 @@ const RegisterRepresentation& RepresentationFor(wasm::ValueType type) {
       RegisterRepresentation::Float64();
   static const RegisterRepresentation kTagged =
       RegisterRepresentation::Tagged();
+  static const RegisterRepresentation kSimd128 =
+      RegisterRepresentation::Simd128();
 
   switch (type.kind()) {
     case wasm::kI8:
@@ -1226,12 +1429,200 @@ const RegisterRepresentation& RepresentationFor(wasm::ValueType type) {
     case wasm::kRef:
       return kTagged;
     case wasm::kS128:
-      UNIMPLEMENTED();
+      return kSimd128;
     case wasm::kVoid:
     case wasm::kRtt:
     case wasm::kBottom:
       UNREACHABLE();
   }
+}
+
+namespace {
+void PrintSimd128Value(std::ostream& os, const uint8_t value[kSimd128Size]) {
+  os << "0x" << std::hex << std::setfill('0');
+#ifdef V8_TARGET_BIG_ENDIAN
+  for (int i = 0; i < kSimd128Size; i++) {
+#else
+  for (int i = kSimd128Size - 1; i >= 0; i--) {
+#endif
+    os << std::setw(2) << static_cast<int>(value[i]);
+  }
+  os << std::dec << std::setfill(' ');
+}
+}  // namespace
+
+void Simd128ConstantOp::PrintOptions(std::ostream& os) const {
+  PrintSimd128Value(os, value);
+}
+
+std::ostream& operator<<(std::ostream& os, Simd128BinopOp::Kind kind) {
+  switch (kind) {
+#define PRINT_KIND(kind)              \
+  case Simd128BinopOp::Kind::k##kind: \
+    return os << #kind;
+    FOREACH_SIMD_128_BINARY_OPCODE(PRINT_KIND)
+  }
+#undef PRINT_KIND
+}
+
+std::ostream& operator<<(std::ostream& os, Simd128UnaryOp::Kind kind) {
+  switch (kind) {
+#define PRINT_KIND(kind)              \
+  case Simd128UnaryOp::Kind::k##kind: \
+    return os << #kind;
+    FOREACH_SIMD_128_UNARY_OPCODE(PRINT_KIND)
+  }
+#undef PRINT_KIND
+}
+
+std::ostream& operator<<(std::ostream& os, Simd128ShiftOp::Kind kind) {
+  switch (kind) {
+#define PRINT_KIND(kind)              \
+  case Simd128ShiftOp::Kind::k##kind: \
+    return os << #kind;
+    FOREACH_SIMD_128_SHIFT_OPCODE(PRINT_KIND)
+  }
+#undef PRINT_KIND
+}
+
+std::ostream& operator<<(std::ostream& os, Simd128TestOp::Kind kind) {
+  switch (kind) {
+#define PRINT_KIND(kind)             \
+  case Simd128TestOp::Kind::k##kind: \
+    return os << #kind;
+    FOREACH_SIMD_128_TEST_OPCODE(PRINT_KIND)
+  }
+#undef PRINT_KIND
+}
+
+std::ostream& operator<<(std::ostream& os, Simd128SplatOp::Kind kind) {
+  switch (kind) {
+#define PRINT_KIND(kind)              \
+  case Simd128SplatOp::Kind::k##kind: \
+    return os << #kind;
+    FOREACH_SIMD_128_SPLAT_OPCODE(PRINT_KIND)
+  }
+#undef PRINT_KIND
+}
+
+std::ostream& operator<<(std::ostream& os, Simd128TernaryOp::Kind kind) {
+  switch (kind) {
+#define PRINT_KIND(kind)                \
+  case Simd128TernaryOp::Kind::k##kind: \
+    return os << #kind;
+    FOREACH_SIMD_128_TERNARY_OPCODE(PRINT_KIND)
+  }
+#undef PRINT_KIND
+}
+
+void Simd128ExtractLaneOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  switch (kind) {
+    case Kind::kI8x16S:
+      os << "I8x16S";
+      break;
+    case Kind::kI8x16U:
+      os << "I8x16U";
+      break;
+    case Kind::kI16x8S:
+      os << "I16x8S";
+      break;
+    case Kind::kI16x8U:
+      os << "I16x8U";
+      break;
+    case Kind::kI32x4:
+      os << "I32x4";
+      break;
+    case Kind::kI64x2:
+      os << "I64x2";
+      break;
+    case Kind::kF32x4:
+      os << "F32x4";
+      break;
+    case Kind::kF64x2:
+      os << "F64x2";
+      break;
+  }
+  os << ", " << static_cast<int32_t>(lane) << "]";
+}
+
+void Simd128ReplaceLaneOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  switch (kind) {
+    case Kind::kI8x16:
+      os << "I8x16";
+      break;
+    case Kind::kI16x8:
+      os << "I16x8";
+      break;
+    case Kind::kI32x4:
+      os << "I32x4";
+      break;
+    case Kind::kI64x2:
+      os << "I64x2";
+      break;
+    case Kind::kF32x4:
+      os << "F32x4";
+      break;
+    case Kind::kF64x2:
+      os << "F64x2";
+      break;
+  }
+  os << ", " << static_cast<int32_t>(lane) << "]";
+}
+
+void Simd128LaneMemoryOp::PrintOptions(std::ostream& os) const {
+  os << "[" << (mode == Mode::kLoad ? "Load" : "Store") << ", ";
+  if (kind.maybe_unaligned) os << "unaligned, ";
+  if (kind.with_trap_handler) os << "protected, ";
+  switch (lane_kind) {
+    case LaneKind::k8:
+      os << "8";
+      break;
+    case LaneKind::k16:
+      os << "16";
+      break;
+    case LaneKind::k32:
+      os << "32";
+      break;
+    case LaneKind::k64:
+      os << "64";
+      break;
+  }
+  os << "bit, lane: " << static_cast<int>(lane);
+  if (offset != 0) os << ", offset: " << offset;
+  os << "]";
+}
+
+void Simd128LoadTransformOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  if (load_kind.maybe_unaligned) os << "unaligned, ";
+  if (load_kind.with_trap_handler) os << "protected, ";
+
+  switch (transform_kind) {
+#define PRINT_KIND(kind)       \
+  case TransformKind::k##kind: \
+    os << #kind;               \
+    break;
+    FOREACH_SIMD_128_LOAD_TRANSFORM_OPCODE(PRINT_KIND)
+#undef PRINT_KIND
+  }
+
+  os << ", offset: " << offset << "]";
+}
+
+void Simd128ShuffleOp::PrintOptions(std::ostream& os) const {
+  PrintSimd128Value(os, shuffle);
+}
+
+void WasmAllocateArrayOp::PrintOptions(std::ostream& os) const {
+  os << '[' << array_type->element_type() << "]";
+}
+
+void ArrayGetOp::PrintOptions(std::ostream& os) const {
+  os << "[" << (is_signed ? "signed " : "")
+     << (array_type->mutability() ? "" : "immutable ")
+     << array_type->element_type() << "]";
 }
 
 #endif  // V8_ENABLE_WEBASSEBMLY
@@ -1260,6 +1651,11 @@ void SupportedOperations::Initialize() {
 #undef SET_SUPPORTED
 }
 
+base::SmallVector<Block*, 4> SuccessorBlocks(const Block& block,
+                                             const Graph& graph) {
+  return SuccessorBlocks(block.LastOperation(graph));
+}
+
 // static
 bool SupportedOperations::IsUnalignedLoadSupported(MemoryRepresentation repr) {
   return InstructionSelector::AlignmentRequirements().IsUnalignedLoadSupported(
@@ -1270,6 +1666,83 @@ bool SupportedOperations::IsUnalignedLoadSupported(MemoryRepresentation repr) {
 bool SupportedOperations::IsUnalignedStoreSupported(MemoryRepresentation repr) {
   return InstructionSelector::AlignmentRequirements().IsUnalignedStoreSupported(
       repr.ToMachineType().representation());
+}
+
+void CheckExceptionOp::Validate(const Graph& graph) const {
+  DCHECK_NE(didnt_throw_block, catch_block);
+  // `CheckException` should follow right after the throwing operation.
+  DCHECK_EQ(throwing_operation(), graph.PreviousIndex(graph.Index(*this)));
+}
+
+namespace {
+// Ensures basic consistency of representation mapping.
+class InputsRepFactoryCheck : InputsRepFactory {
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Word32()) ==
+                MaybeRegisterRepresentation::Word32());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Word64()) ==
+                MaybeRegisterRepresentation::Word64());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Float32()) ==
+                MaybeRegisterRepresentation::Float32());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Float64()) ==
+                MaybeRegisterRepresentation::Float64());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Tagged()) ==
+                MaybeRegisterRepresentation::Tagged());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Compressed()) ==
+                MaybeRegisterRepresentation::Compressed());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Simd128()) ==
+                MaybeRegisterRepresentation::Simd128());
+};
+}  // namespace
+
+bool IsUnlikelySuccessor(const Block* block, const Block* successor,
+                         const Graph& graph) {
+  DCHECK(base::contains(successor->Predecessors(), block));
+  const Operation& terminator = block->LastOperation(graph);
+  switch (terminator.opcode) {
+    case Opcode::kCheckException: {
+      const CheckExceptionOp& check_exception =
+          terminator.Cast<CheckExceptionOp>();
+      return successor == check_exception.catch_block;
+    }
+    case Opcode::kGoto:
+      return false;
+    case Opcode::kBranch: {
+      const BranchOp& branch = terminator.Cast<BranchOp>();
+      return (branch.hint == BranchHint::kTrue &&
+              successor == branch.if_false) ||
+             (branch.hint == BranchHint::kFalse && successor == branch.if_true);
+    }
+    case Opcode::kSwitch: {
+      const SwitchOp& swtch = terminator.Cast<SwitchOp>();
+      if (successor == swtch.default_case) {
+        return swtch.default_hint == BranchHint::kFalse;
+      }
+      auto it = std::find_if(swtch.cases.begin(), swtch.cases.end(),
+                             [successor](const SwitchOp::Case& c) {
+                               return c.destination == successor;
+                             });
+      DCHECK_NE(it, swtch.cases.end());
+      return it->hint == BranchHint::kFalse;
+    }
+    case Opcode::kDeoptimize:
+    case Opcode::kTailCall:
+    case Opcode::kUnreachable:
+    case Opcode::kReturn:
+      UNREACHABLE();
+
+#define NON_TERMINATOR_CASE(op) case Opcode::k##op:
+      TURBOSHAFT_OPERATION_LIST_NOT_BLOCK_TERMINATOR(NON_TERMINATOR_CASE)
+      UNREACHABLE();
+#undef NON_TERMINATOR_CASE
+  }
+}
+
+bool Operation::IsOnlyUserOf(const Operation& value, const Graph& graph) const {
+  DCHECK_GE(std::count(inputs().begin(), inputs().end(), graph.Index(value)),
+            1);
+  if (value.saturated_use_count.IsOne()) return true;
+  return std::count(inputs().begin(), inputs().end(), graph.Index(value)) ==
+         value.saturated_use_count.Get();
 }
 
 }  // namespace v8::internal::compiler::turboshaft

@@ -44,16 +44,6 @@ class OptionalOperator final {
   const Operator* const op_;
 };
 
-enum class MemoryAccessKind {
-  kNormal,
-  kUnaligned,
-  kProtected,
-};
-
-size_t hash_value(MemoryAccessKind);
-
-V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&, MemoryAccessKind);
-
 // A Load needs a MachineType.
 using LoadRepresentation = MachineType;
 
@@ -128,6 +118,8 @@ enum class LoadTransformation {
   kS128Load16x4U,
   kS128Load32x2S,
   kS128Load32x2U,
+  kFirst128Extend = kS128Load8x8S,
+  kLast128Extend = kS128Load32x2U,
   kS128Load32Zero,
   kS128Load64Zero,
   // 256-bit transformations must be last.
@@ -135,6 +127,12 @@ enum class LoadTransformation {
   kS256Load16Splat,
   kS256Load32Splat,
   kS256Load64Splat,
+  kS256Load8x16S,
+  kS256Load8x16U,
+  kS256Load16x8S,
+  kS256Load16x8U,
+  kS256Load32x4S,
+  kS256Load32x4U,
   kFirst256Transform = kS256Load8Splat
 };
 
@@ -293,31 +291,58 @@ V8_EXPORT_PRIVATE StackSlotRepresentation const& StackSlotRepresentationOf(
 
 MachineType AtomicOpType(Operator const* op) V8_WARN_UNUSED_RESULT;
 
-class S128ImmediateParameter {
+template <const int simd_size = kSimd128Size,
+          typename = std::enable_if_t<simd_size == kSimd128Size ||
+                                      simd_size == kSimd256Size>>
+class SimdImmediateParameter {
  public:
-  explicit S128ImmediateParameter(const uint8_t immediate[16]) {
-    std::copy(immediate, immediate + 16, immediate_.begin());
+  explicit SimdImmediateParameter(const uint8_t immediate[simd_size]) {
+    std::copy(immediate, immediate + simd_size, immediate_.begin());
   }
-  S128ImmediateParameter() = default;
-  const std::array<uint8_t, 16>& immediate() const { return immediate_; }
+  SimdImmediateParameter() = default;
+  const std::array<uint8_t, simd_size>& immediate() const { return immediate_; }
   const uint8_t* data() const { return immediate_.data(); }
   uint8_t operator[](int x) const { return immediate_[x]; }
 
  private:
-  std::array<uint8_t, 16> immediate_;
+  std::array<uint8_t, simd_size> immediate_;
 };
 
-V8_EXPORT_PRIVATE bool operator==(S128ImmediateParameter const& lhs,
-                                  S128ImmediateParameter const& rhs);
-bool operator!=(S128ImmediateParameter const& lhs,
-                S128ImmediateParameter const& rhs);
+using S128ImmediateParameter = SimdImmediateParameter<kSimd128Size>;
+using S256ImmediateParameter = SimdImmediateParameter<kSimd256Size>;
 
-size_t hash_value(S128ImmediateParameter const& p);
+template <const int simd_size>
+V8_EXPORT_PRIVATE inline bool operator==(
+    SimdImmediateParameter<simd_size> const& lhs,
+    SimdImmediateParameter<simd_size> const& rhs) {
+  return (lhs.immediate() == rhs.immediate());
+}
 
-V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&,
-                                           S128ImmediateParameter const&);
+template <const int simd_size>
+bool operator!=(SimdImmediateParameter<simd_size> const& lhs,
+                SimdImmediateParameter<simd_size> const& rhs) {
+  return !(lhs == rhs);
+}
+
+template <const int simd_size>
+size_t hash_value(SimdImmediateParameter<simd_size> const& p) {
+  return base::hash_range(p.immediate().begin(), p.immediate().end());
+}
+
+template <const int simd_size>
+V8_EXPORT_PRIVATE inline std::ostream& operator<<(
+    std::ostream& os, SimdImmediateParameter<simd_size> const& p) {
+  for (int i = 0; i < simd_size; i++) {
+    const char* separator = (i < simd_size - 1) ? "," : "";
+    os << static_cast<uint32_t>(p[i]) << separator;
+  }
+  return os;
+}
 
 V8_EXPORT_PRIVATE S128ImmediateParameter const& S128ImmediateParameterOf(
+    Operator const* op) V8_WARN_UNUSED_RESULT;
+
+V8_EXPORT_PRIVATE S256ImmediateParameter const& S256ImmediateParameterOf(
     Operator const* op) V8_WARN_UNUSED_RESULT;
 
 StackCheckKind StackCheckKindOf(Operator const* op) V8_WARN_UNUSED_RESULT;
@@ -758,6 +783,12 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   // Identity for any input that is not signalling NaN.
   const Operator* Float64SilenceNaN();
 
+  // SIMD operators also used outside of Wasm (e.g. swisstable).
+  const Operator* I8x16Splat();
+  const Operator* I8x16Eq();
+  const Operator* I8x16BitMask();
+
+#if V8_ENABLE_WEBASSEMBLY
   // SIMD operators.
   const Operator* F64x2Splat();
   const Operator* F64x2Abs();
@@ -924,7 +955,6 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I16x8ExtAddPairwiseI8x16S();
   const Operator* I16x8ExtAddPairwiseI8x16U();
 
-  const Operator* I8x16Splat();
   const Operator* I8x16ExtractLaneU(int32_t);
   const Operator* I8x16ExtractLaneS(int32_t);
   const Operator* I8x16ReplaceLane(int32_t);
@@ -938,7 +968,6 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I8x16SubSatS();
   const Operator* I8x16MinS();
   const Operator* I8x16MaxS();
-  const Operator* I8x16Eq();
   const Operator* I8x16Ne();
   const Operator* I8x16GtS();
   const Operator* I8x16GeS();
@@ -954,7 +983,6 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I8x16RoundingAverageU();
   const Operator* I8x16Popcnt();
   const Operator* I8x16Abs();
-  const Operator* I8x16BitMask();
 
   const Operator* S128Const(const uint8_t value[16]);
 
@@ -967,6 +995,8 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* S128AndNot();
 
   const Operator* I8x16Swizzle(bool relaxed = false);
+  // Helper for turboshaft/recreate-schedule.cc.
+  const Operator* I8x16RelaxedSwizzle() { return I8x16Swizzle(true); }
   const Operator* I8x16Shuffle(const uint8_t shuffle[16]);
 
   const Operator* V128AnyTrue();
@@ -991,8 +1021,6 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I16x8RelaxedQ15MulRS();
   const Operator* I16x8DotI8x16I7x16S();
   const Operator* I32x4DotI8x16I7x16AddS();
-
-  const Operator* TraceInstruction(uint32_t markid);
 
   // SIMD256
   const Operator* F64x4Min();
@@ -1125,7 +1153,9 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* F64x4Pmax();
   const Operator* F64x4Splat();
   const Operator* F32x8Splat();
+  const Operator* I8x32Shuffle(const uint8_t shuffle[32]);
 
+  const Operator* S256Const(const uint8_t value[32]);
   const Operator* S256Zero();
   const Operator* S256And();
   const Operator* S256Or();
@@ -1134,12 +1164,6 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* S256Select();
   const Operator* S256AndNot();
 
-  // load [base + index]
-  const Operator* Load(LoadRepresentation rep);
-  const Operator* LoadImmutable(LoadRepresentation rep);
-  const Operator* ProtectedLoad(LoadRepresentation rep);
-  const Operator* LoadTrapOnNull(LoadRepresentation rep);
-
   const Operator* LoadTransform(MemoryAccessKind kind,
                                 LoadTransformation transform);
 
@@ -1147,16 +1171,27 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* LoadLane(MemoryAccessKind kind, LoadRepresentation rep,
                            uint8_t laneidx);
 
+  // SIMD store: store a specified lane of value into [base + index].
+  const Operator* StoreLane(MemoryAccessKind kind, MachineRepresentation rep,
+                            uint8_t laneidx);
+
+#endif  // V8_ENABLE_WEBASSEMBLY
+
+  const Operator* TraceInstruction(uint32_t markid);
+
+  // load [base + index]
+  const Operator* Load(LoadRepresentation rep);
+  const Operator* LoadImmutable(LoadRepresentation rep);
+  const Operator* ProtectedLoad(LoadRepresentation rep);
+  const Operator* LoadTrapOnNull(LoadRepresentation rep);
+
   // store [base + index], value
   const Operator* Store(StoreRepresentation rep);
   base::Optional<const Operator*> TryStorePair(StoreRepresentation rep1,
                                                StoreRepresentation rep2);
+  const Operator* StoreIndirectPointer(WriteBarrierKind write_barrier_kind);
   const Operator* ProtectedStore(MachineRepresentation rep);
   const Operator* StoreTrapOnNull(StoreRepresentation rep);
-
-  // SIMD store: store a specified lane of value into [base + index].
-  const Operator* StoreLane(MemoryAccessKind kind, MachineRepresentation rep,
-                            uint8_t laneidx);
 
   // unaligned load [base + index]
   const Operator* UnalignedLoad(LoadRepresentation rep);
@@ -1176,6 +1211,10 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   // Access to the machine stack.
   const Operator* LoadFramePointer();
   const Operator* LoadParentFramePointer();
+#if V8_ENABLE_WEBASSEMBLY
+  const Operator* LoadStackPointer();
+  const Operator* SetStackPointer(wasm::FPRelativeScope fp_scope);
+#endif
 
   // Compares: stack_pointer [- offset] > value. The offset is optionally
   // applied for kFunctionEntry stack checks.
