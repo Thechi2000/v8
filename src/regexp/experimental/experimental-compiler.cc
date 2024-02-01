@@ -495,7 +495,7 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
   // at the start of its bytecode.
   class BFEntry {
    public:
-    BFEntry(RegExpTree* node) : label(), node(node) {}
+    explicit BFEntry(RegExpTree* node) : label(), node(node) {}
 
     Label label;
     RegExpTree* node;

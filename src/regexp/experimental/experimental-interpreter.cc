@@ -314,7 +314,8 @@ class NfaInterpreter {
       if (bytecode_[i].opcode == RegExpInstruction::Opcode::ACCEPT) {
         ++i;
 
-        if (RegExpInstruction::IsFilter(bytecode_[i]) && i < bytecode_.length()) {
+        if (RegExpInstruction::IsFilter(bytecode_[i]) &&
+            i < bytecode_.length()) {
           filter_groups_pc_ = i;
         }
 
