@@ -103,29 +103,29 @@ struct RegExpInstruction {
     SET_REGISTER_TO_CP,
     BEGIN_LOOP,
     END_LOOP,
-    WRITE_LOOKBEHIND_TABLE,
-    READ_LOOKBEHIND_TABLE,
+    WRITE_LOOKAROUND_TABLE,
+    READ_LOOKAROUND_TABLE,
   };
 
   struct Uc16Range {
     base::uc16 min;  // Inclusive.
     base::uc16 max;  // Inclusive.
   };
-  class ReadLookbehindTablePayload {
+  class ReadLookaroundTablePayload {
    public:
-    ReadLookbehindTablePayload() = default;
-    ReadLookbehindTablePayload(int32_t lookbehind_index, bool is_positive)
-        : payload_(IsPositive::update(LookbehindIndex::encode(lookbehind_index),
+    ReadLookaroundTablePayload() = default;
+    ReadLookaroundTablePayload(int32_t lookbehind_index, bool is_positive)
+        : payload_(IsPositive::update(LookaroundIndex::encode(lookbehind_index),
                                       is_positive)) {}
 
-    int32_t lookbehind_index() const {
-      return LookbehindIndex::decode(payload_);
+    int32_t lookaround_index() const {
+      return LookaroundIndex::decode(payload_);
     }
     bool is_positive() const { return IsPositive::decode(payload_); }
 
    private:
     using IsPositive = base::BitField<bool, 0, 1>;
-    using LookbehindIndex = base::BitField<int32_t, 1, 31>;
+    using LookaroundIndex = base::BitField<int32_t, 1, 31>;
     uint32_t payload_;
   };
 
@@ -201,17 +201,17 @@ struct RegExpInstruction {
 
   static RegExpInstruction WriteLookTable(int32_t index) {
     RegExpInstruction result;
-    result.opcode = WRITE_LOOKBEHIND_TABLE;
+    result.opcode = WRITE_LOOKAROUND_TABLE;
     result.payload.looktable_index = index;
     return result;
   }
 
   static RegExpInstruction ReadLookTable(int32_t index, bool is_positive) {
     RegExpInstruction result;
-    result.opcode = READ_LOOKBEHIND_TABLE;
+    result.opcode = READ_LOOKAROUND_TABLE;
 
-    result.payload.read_lookbehind =
-        ReadLookbehindTablePayload(index, is_positive);
+    result.payload.read_lookaround =
+        ReadLookaroundTablePayload(index, is_positive);
     return result;
   }
 
@@ -228,7 +228,7 @@ struct RegExpInstruction {
     // Payload of WRITE_LOOKBEHIND_TABLE:
     int32_t looktable_index;
     // Payload of READ_LOOKBEHIND_TABLE:
-    ReadLookbehindTablePayload read_lookbehind;
+    ReadLookaroundTablePayload read_lookaround;
   } payload;
   static_assert(sizeof(payload) == 4);
 };

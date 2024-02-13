@@ -154,24 +154,24 @@ class NfaInterpreter {
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
         best_match_registers_(base::nullopt),
-        lookbehind_pc_(0, zone),
-        lookbehind_table_(0, zone),
+        lookaround_pc_(0, zone),
+        lookaround_table_(0, zone),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    // Finds the starting PC of every lookbehind. Since they are listed one
+    // Finds the starting PC of every lookaround. Since they are listed one
     // after the other, they start after each `ACCEPT` and
-    // `WRITE_LOOKBEHIND_TABLE` instructions (except the last one). We do not
+    // `WRITE_AROUND_TABLE` instructions (except the last one). We do not
     // iterate over the last instruction, since it cannot be followed by a
-    // lookbehind's bytecode.
+    // lookaround's bytecode.
     for (int i = 0; i < bytecode_.length() - 1; ++i) {
       if ((bytecode_[i].opcode == RegExpInstruction::Opcode::ACCEPT ||
            bytecode_[i].opcode ==
-               RegExpInstruction::Opcode::WRITE_LOOKBEHIND_TABLE)) {
-        lookbehind_pc_.Add(i + 1, zone_);
-        lookbehind_table_.Add(false, zone_);
+               RegExpInstruction::Opcode::WRITE_LOOKAROUND_TABLE)) {
+        lookaround_pc_.Add(i + 1, zone_);
+        lookaround_table_.Add(false, zone_);
       }
     }
 
@@ -345,7 +345,7 @@ class NfaInterpreter {
     // something about this in `SetInputIndex`.
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
-    std::fill(lookbehind_table_.begin(), lookbehind_table_.end(), false);
+    std::fill(lookaround_table_.begin(), lookaround_table_.end(), false);
 
     // Clean up left-over data from a previous call to FindNextMatch.
     for (InterpreterThread t : blocked_threads_) {
@@ -373,7 +373,7 @@ class NfaInterpreter {
                           InterpreterThread::ConsumedCharacter::DidConsume),
         zone_);
 
-    for (int i : lookbehind_pc_) {
+    for (int i : lookaround_pc_) {
       active_threads_.Add(
           InterpreterThread(i, NewRegisterArray(kUndefinedRegisterValue),
                             InterpreterThread::ConsumedCharacter::DidConsume),
@@ -396,7 +396,7 @@ class NfaInterpreter {
       base::uc16 input_char = input_[input_index_];
       ++input_index_;
 
-      std::fill(lookbehind_table_.begin(), lookbehind_table_.end(), false);
+      std::fill(lookaround_table_.begin(), lookaround_table_.end(), false);
 
       static constexpr int kTicksBetweenInterruptHandling = 64;
       if (input_index_ % kTicksBetweenInterruptHandling == 0) {
@@ -492,22 +492,21 @@ class NfaInterpreter {
           }
           ++t.pc;
           break;
-        case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
+        case RegExpInstruction::WRITE_LOOKAROUND_TABLE:
           // Reaching this instruction means that the current lookbehind thread
           // has found a match and needs to be destroyed. Since the lookbehind
           // is verified at this position, we update the `lookbehind_table_`.
-          lookbehind_table_[inst.payload.looktable_index] = true;
+          lookaround_table_[inst.payload.looktable_index] = true;
           DestroyThread(t);
           return;
-        case RegExpInstruction::READ_LOOKBEHIND_TABLE:
+        case RegExpInstruction::READ_LOOKAROUND_TABLE:
           // Destroy the thread if the corresponding lookbehind did or did not
           // complete a match at the current position (depending on whether or
           // not the lookbehind is positive). The thread's priority ensures that
           // all the threads of the lookbehind have already been run at this
           // position.
-          if (lookbehind_table_[inst.payload.read_lookbehind
-                                    .lookbehind_index()] !=
-              inst.payload.read_lookbehind.is_positive()) {
+          if (lookaround_table_[inst.payload.read_lookaround.lookaround_index()] !=
+              inst.payload.read_lookaround.is_positive()) {
             DestroyThread(t);
             return;
           }
@@ -682,11 +681,11 @@ class NfaInterpreter {
 
   // Starting PC of each of the lookbehinds in the bytecode. Computed during the
   // NFA instantiation (see the constructor).
-  ZoneList<int> lookbehind_pc_;
+  ZoneList<int> lookaround_pc_;
 
   // Truth table for the lookbehinds. lookbehind_table_[k] indicates whether the
   // lookbehind of index k did complete a match on the current position.
-  ZoneList<bool> lookbehind_table_;
+  ZoneList<bool> lookaround_table_;
 
   Zone* zone_;
 };

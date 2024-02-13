@@ -289,11 +289,11 @@ class BytecodeAssembler {
 
   void EndLoop() { code_.Add(RegExpInstruction::EndLoop(), zone_); }
 
-  void WriteLookTable(int index) {
+  void WriteLookaroundTable(int index) {
     code_.Add(RegExpInstruction::WriteLookTable(index), zone_);
   }
 
-  void ReadLookTable(int index, bool is_positive) {
+  void ReadLookaroundTable(int index, bool is_positive) {
     code_.Add(RegExpInstruction::ReadLookTable(index, is_positive), zone_);
   }
 
@@ -412,7 +412,7 @@ class CompileVisitor : private RegExpVisitor {
     reverse_ = lookaround->type() == RegExpLookaround::LOOKAHEAD;
 
     lookaround->body()->Accept(this, nullptr);
-    assembler_.WriteLookTable(lookaround->index());
+    assembler_.WriteLookaroundTable(lookaround->index());
   }
 
   // Generate a disjunction of code fragments compiled by a function `alt_gen`.
@@ -888,7 +888,7 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   void* VisitLookaround(RegExpLookaround* node, void*) override {
-    assembler_.ReadLookTable(node->index(), node->is_positive());
+    assembler_.ReadLookaroundTable(node->index(), node->is_positive());
 
     // Add the lookbehind to the queue of lookbehinds to be compiled.
     lookarounds_.push_back(node);
