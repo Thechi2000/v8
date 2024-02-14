@@ -165,7 +165,6 @@ class NfaInterpreter {
         lookaround_pc_(0, zone),
         lookaround_table_(zone),
         reverse_(false),
-        capture_(true),
         current_lookaround_(-1),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
@@ -194,15 +193,16 @@ class NfaInterpreter {
   int FindMatches(int32_t* output_registers, int output_register_count) {
     const int max_match_num = output_register_count / register_count_per_match_;
 
-    FillLookaroundTable();
-
     std::cout << "Bytecode:" << std::endl;
     for (int i = 0; i < bytecode_.length(); ++i) {
       std::cout << i << ": " << bytecode_.at(i) << std::endl;
     }
+
+    FillLookaroundTable();
+
     std::cout << std::endl << "Lookaround table:" << std::endl;
     std::cout << "s: ";
-    for(auto c : input_) {
+    for (auto c : input_) {
       std::cout << c << ", ";
     }
     std::cout << std::endl;
@@ -281,8 +281,6 @@ class NfaInterpreter {
   };
 
   void FillLookaroundTable() {
-    capture_ = false;
-
     for (int i = lookaround_pc_.length() - 1; i >= 0; --i) {
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
@@ -299,8 +297,10 @@ class NfaInterpreter {
       reverse_ = bytecode_.at(lookaround_pc_.at(i)).payload.ahead;
       input_index_ = reverse_ ? input_.length() - 1 : 0;
 
+      // TODO avoid unused allocation ?
       active_threads_.Add(
-          InterpreterThread(lookaround_pc_.at(i), nullptr,
+          InterpreterThread(lookaround_pc_.at(i),
+                            NewRegisterArrayUninitialized(),
                             InterpreterThread::ConsumedCharacter::DidConsume),
           zone_);
 
@@ -308,7 +308,6 @@ class NfaInterpreter {
     }
 
     reverse_ = false;
-    capture_ = true;
     current_lookaround_ = -1;
     input_index_ = 0;
   }
@@ -525,17 +524,14 @@ class NfaInterpreter {
           ++t.pc;
           break;
         case RegExpInstruction::FORK: {
-          InterpreterThread fork(
-              inst.payload.pc,
-              capture_ ? NewRegisterArrayUninitialized() : nullptr,
-              t.consumed_since_last_quantifier);
-          if (capture_) {
-            base::Vector<int> fork_registers = GetRegisterArray(fork);
-            base::Vector<int> t_registers = GetRegisterArray(t);
-            DCHECK_EQ(fork_registers.length(), t_registers.length());
-            std::copy(t_registers.begin(), t_registers.end(),
-                      fork_registers.begin());
-          }
+          InterpreterThread fork(inst.payload.pc,
+                                 NewRegisterArrayUninitialized(),
+                                 t.consumed_since_last_quantifier);
+          base::Vector<int> fork_registers = GetRegisterArray(fork);
+          base::Vector<int> t_registers = GetRegisterArray(t);
+          DCHECK_EQ(fork_registers.length(), t_registers.length());
+          std::copy(t_registers.begin(), t_registers.end(),
+                    fork_registers.begin());
           active_threads_.Add(fork, zone_);
 
           ++t.pc;
@@ -556,17 +552,13 @@ class NfaInterpreter {
           active_threads_.DropAndClear();
           return;
         case RegExpInstruction::SET_REGISTER_TO_CP:
-          if (capture_) {
-            GetRegisterArray(t)[inst.payload.register_index] = input_index_;
-            ++t.pc;
-          }
+          GetRegisterArray(t)[inst.payload.register_index] = input_index_;
+          ++t.pc;
           break;
         case RegExpInstruction::CLEAR_REGISTER:
-          if (capture_) {
-            GetRegisterArray(t)[inst.payload.register_index] =
-                kUndefinedRegisterValue;
-            ++t.pc;
-          }
+          GetRegisterArray(t)[inst.payload.register_index] =
+              kUndefinedRegisterValue;
+          ++t.pc;
           break;
         case RegExpInstruction::BEGIN_LOOP:
           t.consumed_since_last_quantifier =
@@ -591,7 +583,7 @@ class NfaInterpreter {
           // Reaching this instruction means that the current lookbehind thread
           // has found a match and needs to be destroyed. Since the lookbehind
           // is verified at this position, we update the `lookbehind_table_`.
-          DCHECK_NE(current_lookaround__, -1);
+          DCHECK_NE(current_lookaround_, -1);
           lookaround_table_[current_lookaround_]
                            [input_index_ + (reverse_ ? 1 : 0)] = true;
           DestroyThread(t);
@@ -787,7 +779,6 @@ class NfaInterpreter {
   ZoneVector<ZoneVector<bool>> lookaround_table_;
 
   bool reverse_;
-  bool capture_;
   int current_lookaround_;
 
   Zone* zone_;
