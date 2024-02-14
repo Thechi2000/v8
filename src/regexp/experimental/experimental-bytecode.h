@@ -103,6 +103,7 @@ struct RegExpInstruction {
     SET_REGISTER_TO_CP,
     BEGIN_LOOP,
     END_LOOP,
+    START_LOOKAROUND,
     WRITE_LOOKAROUND_TABLE,
     READ_LOOKAROUND_TABLE,
   };
@@ -199,6 +200,13 @@ struct RegExpInstruction {
     return result;
   }
 
+  static RegExpInstruction StartLookaround(bool ahead) {
+    RegExpInstruction result;
+    result.opcode = START_LOOKAROUND;
+    result.payload.ahead = ahead;
+    return result;
+  }
+
   static RegExpInstruction WriteLookTable(int32_t index) {
     RegExpInstruction result;
     result.opcode = WRITE_LOOKAROUND_TABLE;
@@ -225,6 +233,8 @@ struct RegExpInstruction {
     int32_t register_index;
     // Payload of ASSERTION:
     RegExpAssertion::Type assertion_type;
+    // Payload of START_LOOKBEHIND_TABLE:
+    bool ahead;
     // Payload of WRITE_LOOKBEHIND_TABLE:
     int32_t looktable_index;
     // Payload of READ_LOOKBEHIND_TABLE:

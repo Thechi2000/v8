@@ -289,6 +289,10 @@ class BytecodeAssembler {
 
   void EndLoop() { code_.Add(RegExpInstruction::EndLoop(), zone_); }
 
+  void StartLookaround(bool ahead) {
+    code_.Add(RegExpInstruction::StartLookaround(ahead), zone_);
+  }
+
   void WriteLookaroundTable(int index) {
     code_.Add(RegExpInstruction::WriteLookTable(index), zone_);
   }
@@ -398,6 +402,7 @@ class CompileVisitor : private RegExpVisitor {
 
   void CompileLookaround(RegExpLookaround* lookaround) {
     // TODO handle anchored lookarounds
+    assembler_.StartLookaround(lookaround->type() == RegExpLookaround::LOOKAHEAD);
 
     // Lookbehinds are never anchored, i.e. may start at any input position,
     // so we emit a preamble corresponding to /.*?/.  This skips an arbitrary
