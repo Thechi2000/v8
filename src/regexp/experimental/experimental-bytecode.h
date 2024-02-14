@@ -5,6 +5,7 @@
 #ifndef V8_REGEXP_EXPERIMENTAL_EXPERIMENTAL_BYTECODE_H_
 #define V8_REGEXP_EXPERIMENTAL_EXPERIMENTAL_BYTECODE_H_
 
+#include <cstdint>
 #include <ios>
 
 #include "src/base/bit-field.h"

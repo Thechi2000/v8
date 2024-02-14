@@ -345,7 +345,6 @@ class BytecodeAssembler {
   ZoneList<RegExpInstruction> code_;
 };
 
-#include <iostream>
 class CompileVisitor : private RegExpVisitor {
  public:
   static ZoneList<RegExpInstruction> Compile(RegExpTree* tree,
@@ -385,11 +384,7 @@ class CompileVisitor : private RegExpVisitor {
       compiler.lookarounds_.pop_front();
     }
 
-    auto res = std::move(compiler.assembler_).IntoCode();
-    for (int i = 0; i < res.length(); ++i) {
-      std::cout << i << ": " << res.at(i) << std::endl;
-    }
-    return res;
+    return std::move(compiler.assembler_).IntoCode();
   }
 
  private:
@@ -402,7 +397,8 @@ class CompileVisitor : private RegExpVisitor {
 
   void CompileLookaround(RegExpLookaround* lookaround) {
     // TODO handle anchored lookarounds
-    assembler_.StartLookaround(lookaround->type() == RegExpLookaround::LOOKAHEAD);
+    assembler_.StartLookaround(lookaround->type() ==
+                               RegExpLookaround::LOOKAHEAD);
 
     // Lookbehinds are never anchored, i.e. may start at any input position,
     // so we emit a preamble corresponding to /.*?/.  This skips an arbitrary
@@ -489,32 +485,7 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   void* VisitAssertion(RegExpAssertion* node, void*) override {
-    RegExpAssertion::Type actual_assertion;
-
-    if (!reverse_) {
-      actual_assertion = node->assertion_type();
-    } else {
-      switch (node->assertion_type()) {
-        case RegExpAssertion::Type::START_OF_LINE:
-          actual_assertion = RegExpAssertion::Type::END_OF_LINE;
-          break;
-        case RegExpAssertion::Type::START_OF_INPUT:
-          actual_assertion = RegExpAssertion::Type::END_OF_INPUT;
-          break;
-        case RegExpAssertion::Type::END_OF_LINE:
-          actual_assertion = RegExpAssertion::Type::START_OF_LINE;
-          break;
-        case RegExpAssertion::Type::END_OF_INPUT:
-          actual_assertion = RegExpAssertion::Type::START_OF_INPUT;
-          break;
-        case RegExpAssertion::Type::BOUNDARY:
-        case RegExpAssertion::Type::NON_BOUNDARY:
-          actual_assertion = node->assertion_type();  // TODO check
-          break;
-      }
-    }
-
-    assembler_.Assertion(actual_assertion);
+    assembler_.Assertion(node->assertion_type());
     return nullptr;
   }
 

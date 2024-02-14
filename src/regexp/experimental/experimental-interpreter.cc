@@ -4,20 +4,28 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
+#include <cstddef>
+#include <type_traits>
+
+#include "src/base/logging.h"
 #include "src/base/optional.h"
 #include "src/base/strings.h"
+#include "src/base/vector.h"
 #include "src/common/assert-scope.h"
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/string-inl.h"
 #include "src/regexp/experimental/experimental.h"
 #include "src/strings/char-predicates-inl.h"
 #include "src/zone/zone-allocator.h"
+#include "src/zone/zone-containers.h"
 #include "src/zone/zone-list-inl.h"
+#include "src/zone/zone-list.h"
 
 namespace v8 {
 namespace internal {
 
 namespace {
+const int debug_lookaround = -2;
 
 constexpr int kUndefinedRegisterValue = -1;
 
@@ -155,23 +163,22 @@ class NfaInterpreter {
         register_array_allocator_(zone),
         best_match_registers_(base::nullopt),
         lookaround_pc_(0, zone),
-        lookaround_table_(0, zone),
+        lookaround_table_(zone),
+        reverse_(false),
+        capture_(true),
+        current_lookaround_(-1),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    // Finds the starting PC of every lookaround. Since they are listed one
-    // after the other, they start after each `ACCEPT` and
-    // `WRITE_AROUND_TABLE` instructions (except the last one). We do not
-    // iterate over the last instruction, since it cannot be followed by a
-    // lookaround's bytecode.
+    // Finds the starting PC of every lookaround by location all the
+    // `START_LOOKAROUND` instructions.
     for (int i = 0; i < bytecode_.length() - 1; ++i) {
-      if ((bytecode_[i].opcode == RegExpInstruction::Opcode::ACCEPT ||
-           bytecode_[i].opcode ==
-               RegExpInstruction::Opcode::WRITE_LOOKAROUND_TABLE)) {
-        lookaround_pc_.Add(i + 1, zone_);
-        lookaround_table_.Add(false, zone_);
+      if ((bytecode_[i].opcode ==
+           RegExpInstruction::Opcode::START_LOOKAROUND)) {
+        lookaround_pc_.Add(i, zone_);
+        lookaround_table_.emplace_back(input_.length(), zone);
       }
     }
 
@@ -186,6 +193,26 @@ class NfaInterpreter {
   // the number of matches found.
   int FindMatches(int32_t* output_registers, int output_register_count) {
     const int max_match_num = output_register_count / register_count_per_match_;
+
+    FillLookaroundTable();
+
+    std::cout << "Bytecode:" << std::endl;
+    for (int i = 0; i < bytecode_.length(); ++i) {
+      std::cout << i << ": " << bytecode_.at(i) << std::endl;
+    }
+    std::cout << std::endl << "Lookaround table:" << std::endl;
+    std::cout << "s: ";
+    for(auto c : input_) {
+      std::cout << c << ", ";
+    }
+    std::cout << std::endl;
+    for (size_t i = 0; i < lookaround_table_.size(); ++i) {
+      std::cout << i << ": ";
+      for (size_t j = 0; j <= lookaround_table_[i].size(); ++j) {
+        std::cout << lookaround_table_[i][j] << ", ";
+      }
+      std::cout << std::endl;
+    }
 
     int match_num = 0;
     while (match_num != max_match_num) {
@@ -252,6 +279,91 @@ class NfaInterpreter {
 
     ConsumedCharacter consumed_since_last_quantifier;
   };
+
+  void FillLookaroundTable() {
+    capture_ = false;
+
+    for (int i = lookaround_pc_.length() - 1; i >= 0; --i) {
+      // Clean up left-over data from last iteration.
+      for (InterpreterThread t : blocked_threads_) {
+        DestroyThread(t);
+      }
+      blocked_threads_.DropAndClear();
+
+      for (InterpreterThread t : active_threads_) {
+        DestroyThread(t);
+      }
+      active_threads_.DropAndClear();
+
+      current_lookaround_ = i;
+      reverse_ = bytecode_.at(lookaround_pc_.at(i)).payload.ahead;
+      input_index_ = reverse_ ? input_.length() - 1 : 0;
+
+      active_threads_.Add(
+          InterpreterThread(lookaround_pc_.at(i), nullptr,
+                            InterpreterThread::ConsumedCharacter::DidConsume),
+          zone_);
+
+      RunActiveThreadsToEnd();
+    }
+
+    reverse_ = false;
+    capture_ = true;
+    current_lookaround_ = -1;
+    input_index_ = 0;
+  }
+
+  int RunActiveThreadsToEnd() {
+    // Run the initial thread, potentially forking new threads, until every
+    // thread is blocked without further input.
+    RunActiveThreads();
+
+    // We stop if one of the following conditions hold:
+    // - We have exhausted the entire input.
+    // - We have found a match at some point, and there are no remaining
+    //   threads with higher priority than the thread that produced the match.
+    //   Threads with low priority have been aborted earlier, and the remaining
+    //   threads are blocked here, so the latter simply means that
+    //   `blocked_threads_` is empty.
+    while ((0 <= input_index_ && input_index_ < input_.length()) &&
+           !(FoundMatch() && blocked_threads_.is_empty())) {
+      DCHECK(active_threads_.is_empty());
+      base::uc16 input_char = input_[input_index_];
+
+      if (reverse_) {
+        --input_index_;
+      } else {
+        ++input_index_;
+      }
+
+      static constexpr int kTicksBetweenInterruptHandling = 64;
+      if (input_index_ % kTicksBetweenInterruptHandling == 0) {
+        int err_code = HandleInterrupts();
+        if (err_code != RegExp::kInternalRegExpSuccess) return err_code;
+      }
+
+      if (current_lookaround_ == debug_lookaround) {
+        std::cout << "Flushing with " << input_char << std::endl;
+        for (auto& t : blocked_threads_) {
+          std::cout << "Thread at " << t.pc << std::endl;
+        }
+      }
+      // We unblock all blocked_threads_ by feeding them the input char.
+      FlushBlockedThreads(input_char);
+
+      if (current_lookaround_ == debug_lookaround) {
+        std::cout << "Active threads:" << std::endl;
+        for (auto& t : active_threads_) {
+          std::cout << "Thread at " << t.pc << std::endl;
+        }
+      }
+
+      // Run all threads until they block or accept.
+      RunActiveThreads();
+    }
+
+    return RegExp::kInternalRegExpSuccess;
+  }
 
   // Handles pending interrupts if there are any.  Returns
   // RegExp::kInternalRegExpSuccess if execution can continue, and an error
@@ -345,7 +457,6 @@ class NfaInterpreter {
     // something about this in `SetInputIndex`.
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
-    std::fill(lookaround_table_.begin(), lookaround_table_.end(), false);
 
     // Clean up left-over data from a previous call to FindNextMatch.
     for (InterpreterThread t : blocked_threads_) {
@@ -373,45 +484,7 @@ class NfaInterpreter {
                           InterpreterThread::ConsumedCharacter::DidConsume),
         zone_);
 
-    for (int i : lookaround_pc_) {
-      active_threads_.Add(
-          InterpreterThread(i, NewRegisterArray(kUndefinedRegisterValue),
-                            InterpreterThread::ConsumedCharacter::DidConsume),
-          zone_);
-    }
-    // Run the initial thread, potentially forking new threads, until every
-    // thread is blocked without further input.
-    RunActiveThreads();
-
-    // We stop if one of the following conditions hold:
-    // - We have exhausted the entire input.
-    // - We have found a match at some point, and there are no remaining
-    //   threads with higher priority than the thread that produced the match.
-    //   Threads with low priority have been aborted earlier, and the remaining
-    //   threads are blocked here, so the latter simply means that
-    //   `blocked_threads_` is empty.
-    while (input_index_ != input_.length() &&
-           !(FoundMatch() && blocked_threads_.is_empty())) {
-      DCHECK(active_threads_.is_empty());
-      base::uc16 input_char = input_[input_index_];
-      ++input_index_;
-
-      std::fill(lookaround_table_.begin(), lookaround_table_.end(), false);
-
-      static constexpr int kTicksBetweenInterruptHandling = 64;
-      if (input_index_ % kTicksBetweenInterruptHandling == 0) {
-        int err_code = HandleInterrupts();
-        if (err_code != RegExp::kInternalRegExpSuccess) return err_code;
-      }
-
-      // We unblock all blocked_threads_ by feeding them the input char.
-      FlushBlockedThreads(input_char);
-
-      // Run all threads until they block or accept.
-      RunActiveThreads();
-    }
-
-    return RegExp::kInternalRegExpSuccess;
+    return RunActiveThreadsToEnd();
   }
 
   // Run an active thread `t` until it executes a CONSUME_RANGE or ACCEPT
@@ -422,10 +495,22 @@ class NfaInterpreter {
   //   the current input index. All remaining `active_threads_` are discarded.
   void RunActiveThread(InterpreterThread t) {
     while (true) {
-      if (IsPcProcessed(t.pc, t.consumed_since_last_quantifier)) return;
+      if (current_lookaround_ == -1 &&
+          IsPcProcessed(t.pc, t.consumed_since_last_quantifier)) {
+        if (current_lookaround_ == debug_lookaround) {
+          std::cout << "Thread at " << t.pc << " discarded" << std::endl;
+        }
+        return;
+      }
       MarkPcProcessed(t.pc, t.consumed_since_last_quantifier);
 
       RegExpInstruction inst = bytecode_[t.pc];
+
+      if (current_lookaround_ == debug_lookaround) {
+        std::cout << "At index " << input_index_ << ": running " << inst
+                  << std::endl;
+      }
+
       switch (inst.opcode) {
         case RegExpInstruction::CONSUME_RANGE: {
           blocked_threads_.Add(t, zone_);
@@ -433,21 +518,24 @@ class NfaInterpreter {
         }
         case RegExpInstruction::ASSERTION:
           if (!SatisfiesAssertion(inst.payload.assertion_type, input_,
-                                  input_index_)) {
+                                  input_index_ + (reverse_ ? 1 : 0))) {
             DestroyThread(t);
             return;
           }
           ++t.pc;
           break;
         case RegExpInstruction::FORK: {
-          InterpreterThread fork(inst.payload.pc,
-                                 NewRegisterArrayUninitialized(),
-                                 t.consumed_since_last_quantifier);
-          base::Vector<int> fork_registers = GetRegisterArray(fork);
-          base::Vector<int> t_registers = GetRegisterArray(t);
-          DCHECK_EQ(fork_registers.length(), t_registers.length());
-          std::copy(t_registers.begin(), t_registers.end(),
-                    fork_registers.begin());
+          InterpreterThread fork(
+              inst.payload.pc,
+              capture_ ? NewRegisterArrayUninitialized() : nullptr,
+              t.consumed_since_last_quantifier);
+          if (capture_) {
+            base::Vector<int> fork_registers = GetRegisterArray(fork);
+            base::Vector<int> t_registers = GetRegisterArray(t);
+            DCHECK_EQ(fork_registers.length(), t_registers.length());
+            std::copy(t_registers.begin(), t_registers.end(),
+                      fork_registers.begin());
+          }
           active_threads_.Add(fork, zone_);
 
           ++t.pc;
@@ -468,13 +556,17 @@ class NfaInterpreter {
           active_threads_.DropAndClear();
           return;
         case RegExpInstruction::SET_REGISTER_TO_CP:
-          GetRegisterArray(t)[inst.payload.register_index] = input_index_;
-          ++t.pc;
+          if (capture_) {
+            GetRegisterArray(t)[inst.payload.register_index] = input_index_;
+            ++t.pc;
+          }
           break;
         case RegExpInstruction::CLEAR_REGISTER:
-          GetRegisterArray(t)[inst.payload.register_index] =
-              kUndefinedRegisterValue;
-          ++t.pc;
+          if (capture_) {
+            GetRegisterArray(t)[inst.payload.register_index] =
+                kUndefinedRegisterValue;
+            ++t.pc;
+          }
           break;
         case RegExpInstruction::BEGIN_LOOP:
           t.consumed_since_last_quantifier =
@@ -492,11 +584,16 @@ class NfaInterpreter {
           }
           ++t.pc;
           break;
+        case RegExpInstruction::START_LOOKAROUND:
+          ++t.pc;
+          break;
         case RegExpInstruction::WRITE_LOOKAROUND_TABLE:
           // Reaching this instruction means that the current lookbehind thread
           // has found a match and needs to be destroyed. Since the lookbehind
           // is verified at this position, we update the `lookbehind_table_`.
-          lookaround_table_[inst.payload.looktable_index] = true;
+          DCHECK_NE(current_lookaround__, -1);
+          lookaround_table_[current_lookaround_]
+                           [input_index_ + (reverse_ ? 1 : 0)] = true;
           DestroyThread(t);
           return;
         case RegExpInstruction::READ_LOOKAROUND_TABLE:
@@ -505,7 +602,8 @@ class NfaInterpreter {
           // not the lookbehind is positive). The thread's priority ensures that
           // all the threads of the lookbehind have already been run at this
           // position.
-          if (lookaround_table_[inst.payload.read_lookaround.lookaround_index()] !=
+          if (lookaround_table_[inst.payload.read_lookaround.lookaround_index()]
+                               [input_index_] !=
               inst.payload.read_lookaround.is_positive()) {
             DestroyThread(t);
             return;
@@ -524,6 +622,7 @@ class NfaInterpreter {
     while (!active_threads_.is_empty()) {
       RunActiveThread(active_threads_.RemoveLast());
     }
+    if (current_lookaround_ == debug_lookaround) std::cout << std::endl;
   }
 
   // Unblock all blocked_threads_ by feeding them an `input_char`.  Should only
@@ -683,9 +782,13 @@ class NfaInterpreter {
   // NFA instantiation (see the constructor).
   ZoneList<int> lookaround_pc_;
 
-  // Truth table for the lookbehinds. lookbehind_table_[k] indicates whether the
-  // lookbehind of index k did complete a match on the current position.
-  ZoneList<bool> lookaround_table_;
+  // Truth table for the lookarounds. lookaround_table_[l][r] indicates whether
+  // the lookaround of index l did complete a match on the position r.
+  ZoneVector<ZoneVector<bool>> lookaround_table_;
+
+  bool reverse_;
+  bool capture_;
+  int current_lookaround_;
 
   Zone* zone_;
 };
