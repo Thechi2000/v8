@@ -329,7 +329,7 @@ class NfaInterpreter {
 
       current_lookaround_ = idx;
       reverse_ = lookarounds_[idx].is_ahead;
-      input_index_ = reverse_ ? input_.length() - 1 : 0;
+      input_index_ = reverse_ ? input_.length() : 0;
 
       // TODO avoid unused allocation ?
       active_threads_.Add(
@@ -373,7 +373,7 @@ class NfaInterpreter {
       active_threads_.DropAndClear();
 
       reverse_ = !lookaround.is_ahead;
-      input_index_ = to_capture.input_index + (reverse_ ? -1 : 0);
+      input_index_ = to_capture.input_index;
 
       // TODO avoid unused allocation ?
       active_threads_.Add(
@@ -400,14 +400,18 @@ class NfaInterpreter {
     //   Threads with low priority have been aborted earlier, and the remaining
     //   threads are blocked here, so the latter simply means that
     //   `blocked_threads_` is empty.
-    while ((0 <= input_index_ && input_index_ < input_.length()) &&
+    while ((reverse_ ? ((0 < input_index_ && input_index_ <= input_.length()))
+                     : (0 <= input_index_ && input_index_ < input_.length())) &&
            !(FoundMatch() && blocked_threads_.is_empty())) {
       DCHECK(active_threads_.is_empty());
-      base::uc16 input_char = input_[input_index_];
 
       if (reverse_) {
         --input_index_;
-      } else {
+      }
+
+      base::uc16 input_char = input_[input_index_];
+
+      if (!reverse_) {
         ++input_index_;
       }
 
@@ -600,7 +604,7 @@ class NfaInterpreter {
         }
         case RegExpInstruction::ASSERTION:
           if (!SatisfiesAssertion(inst.payload.assertion_type, input_,
-                                  GetInputIndex())) {
+                                  input_index_)) {
             DestroyThread(t);
             return;
           }
@@ -635,7 +639,7 @@ class NfaInterpreter {
           active_threads_.DropAndClear();
           return;
         case RegExpInstruction::SET_REGISTER_TO_CP:
-          GetRegisterArray(t)[inst.payload.register_index] = GetInputIndex();
+          GetRegisterArray(t)[inst.payload.register_index] = input_index_;
           ++t.pc;
           break;
         case RegExpInstruction::CLEAR_REGISTER:
@@ -677,7 +681,7 @@ class NfaInterpreter {
           // is verified at this position, we update the `lookbehind_table_`.
           if (!capturing_lookarounds_) {
             DCHECK_NE(current_lookaround_, -1);
-            lookaround_table_[current_lookaround_][GetInputIndex()] = true;
+            lookaround_table_[current_lookaround_][input_index_] = true;
             DestroyThread(t);
           }
           return;
@@ -688,7 +692,7 @@ class NfaInterpreter {
           // all the threads of the lookbehind have already been run at this
           // position.
           if (lookaround_table_[inst.payload.read_lookaround.lookaround_index()]
-                               [GetInputIndex()] !=
+                               [input_index_] !=
               inst.payload.read_lookaround.is_positive()) {
             DestroyThread(t);
             return;
@@ -706,8 +710,6 @@ class NfaInterpreter {
       }
     }
   }
-
-  int GetInputIndex() { return input_index_ + (reverse_ ? 1 : 0); }
 
   // Run each active thread until it can't continue without further input.
   // `active_threads_` is empty afterwards.  `blocked_threads_` are sorted from
@@ -787,10 +789,10 @@ class NfaInterpreter {
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
         return pc_last_input_index_[pc].having_consumed_character ==
-               GetInputIndex();
+               input_index_;
       case InterpreterThread::ConsumedCharacter::DidNotConsume:
         return pc_last_input_index_[pc].not_having_consumed_character ==
-               GetInputIndex();
+               input_index_;
     }
   }
 
@@ -800,11 +802,10 @@ class NfaInterpreter {
                                    consumed_since_last_quantifier) {
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
-        pc_last_input_index_[pc].having_consumed_character = GetInputIndex();
+        pc_last_input_index_[pc].having_consumed_character = input_index_;
         break;
       case InterpreterThread::ConsumedCharacter::DidNotConsume:
-        pc_last_input_index_[pc].not_having_consumed_character =
-            GetInputIndex();
+        pc_last_input_index_[pc].not_having_consumed_character = input_index_;
         break;
     }
   }
