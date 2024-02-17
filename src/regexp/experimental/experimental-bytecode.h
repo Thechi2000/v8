@@ -104,7 +104,9 @@ struct RegExpInstruction {
     SET_REGISTER_TO_CP,
     BEGIN_LOOP,
     END_LOOP,
-    START_LOOKAROUND,
+    START_LOOKBEHIND,
+    START_LOOKAHEAD,
+    END_LOOKAROUND,
     WRITE_LOOKAROUND_TABLE,
     READ_LOOKAROUND_TABLE,
   };
@@ -201,10 +203,23 @@ struct RegExpInstruction {
     return result;
   }
 
-  static RegExpInstruction StartLookaround(bool ahead) {
+  static RegExpInstruction StartLookbehind(int32_t pc) {
     RegExpInstruction result;
-    result.opcode = START_LOOKAROUND;
-    result.payload.ahead = ahead;
+    result.opcode = START_LOOKBEHIND;
+    result.payload.pc = pc;
+    return result;
+  }
+
+  static RegExpInstruction StartLookahead(int32_t pc) {
+    RegExpInstruction result;
+    result.opcode = START_LOOKAHEAD;
+    result.payload.pc = pc;
+    return result;
+  }
+
+  static RegExpInstruction EndLookaround() {
+    RegExpInstruction result;
+    result.opcode = END_LOOKAROUND;
     return result;
   }
 
@@ -228,14 +243,13 @@ struct RegExpInstruction {
   union {
     // Payload of CONSUME_RANGE:
     Uc16Range consume_range;
-    // Payload of FORK and JMP, the next/forked program counter (pc):
+    // Payload of FORK, JMP, START_LOOKBEHIND and START_LOOKAHEAD, the
+    // next/forked program counter (pc):
     int32_t pc;
     // Payload of SET_REGISTER_TO_CP and CLEAR_REGISTER:
     int32_t register_index;
     // Payload of ASSERTION:
     RegExpAssertion::Type assertion_type;
-    // Payload of START_LOOKBEHIND_TABLE:
-    bool ahead;
     // Payload of WRITE_LOOKBEHIND_TABLE:
     int32_t looktable_index;
     // Payload of READ_LOOKBEHIND_TABLE:

@@ -7,6 +7,8 @@
 #include <cstddef>
 
 #include "src/base/strings.h"
+#include "src/objects/oddball.h"
+#include "src/regexp/experimental/experimental-bytecode.h"
 #include "src/regexp/experimental/experimental.h"
 #include "src/regexp/regexp-ast.h"
 #include "src/zone/zone-list-inl.h"
@@ -289,8 +291,16 @@ class BytecodeAssembler {
 
   void EndLoop() { code_.Add(RegExpInstruction::EndLoop(), zone_); }
 
-  void StartLookaround(bool ahead) {
-    code_.Add(RegExpInstruction::StartLookaround(ahead), zone_);
+  void StartLookbehind(Label& target) {
+    LabelledInstrImpl(RegExpInstruction::Opcode::START_LOOKBEHIND, target);
+  }
+
+  void StartLookahead(Label& target) {
+    LabelledInstrImpl(RegExpInstruction::Opcode::START_LOOKAHEAD, target);
+  }
+
+  void EndLookaround() {
+    code_.Add(RegExpInstruction::EndLookaround(), zone_);
   }
 
   void WriteLookaroundTable(int index) {
@@ -309,7 +319,9 @@ class BytecodeAssembler {
     while (target.unbound_patch_list_begin_ != -1) {
       RegExpInstruction& inst = code_[target.unbound_patch_list_begin_];
       DCHECK(inst.opcode == RegExpInstruction::FORK ||
-             inst.opcode == RegExpInstruction::JMP);
+             inst.opcode == RegExpInstruction::JMP ||
+             inst.opcode == RegExpInstruction::START_LOOKBEHIND ||
+             inst.opcode == RegExpInstruction::START_LOOKAHEAD);
 
       target.unbound_patch_list_begin_ = inst.payload.pc;
       inst.payload.pc = index;
@@ -377,7 +389,6 @@ class CompileVisitor : private RegExpVisitor {
     // implementation for the global flag may store the active lookbehind
     // threads in the regexp to resume the execution of the lookbehinds
     // automata.
-    compiler.inside_lookaround_ = true;
     while (!compiler.lookarounds_.empty()) {
       auto node = compiler.lookarounds_.front();
       compiler.CompileLookaround(node);
@@ -389,16 +400,17 @@ class CompileVisitor : private RegExpVisitor {
 
  private:
   explicit CompileVisitor(Zone* zone)
-      : zone_(zone),
-        lookarounds_(zone),
-        assembler_(zone),
-        inside_lookaround_(false),
-        reverse_(false) {}
+      : zone_(zone), lookarounds_(zone), assembler_(zone), reverse_(false) {}
 
   void CompileLookaround(RegExpLookaround* lookaround) {
+    Label reversed;
+
     // TODO handle anchored lookarounds
-    assembler_.StartLookaround(lookaround->type() ==
-                               RegExpLookaround::LOOKAHEAD);
+    if (lookaround->type() == RegExpLookaround::LOOKAHEAD) {
+      assembler_.StartLookahead(reversed);
+    } else {
+      assembler_.StartLookbehind(reversed);
+    }
 
     // Lookbehinds are never anchored, i.e. may start at any input position,
     // so we emit a preamble corresponding to /.*?/.  This skips an arbitrary
@@ -414,6 +426,11 @@ class CompileVisitor : private RegExpVisitor {
 
     lookaround->body()->Accept(this, nullptr);
     assembler_.WriteLookaroundTable(lookaround->index());
+
+    assembler_.Bind(reversed);
+    reverse_ = !reverse_;
+    lookaround->body()->Accept(this, nullptr);
+    assembler_.EndLookaround();
   }
 
   // Generate a disjunction of code fragments compiled by a function `alt_gen`.
@@ -844,16 +861,12 @@ class CompileVisitor : private RegExpVisitor {
     // Only negative lookbehinds contain captures (enforced by the
     // `CanBeHandled` visitor). Capture groups inside negative lookarounds
     // always yield undefined, so we can avoid the SetRegister instructions.
-    if (inside_lookaround_) {
-      node->body()->Accept(this, nullptr);
-    } else {
-      int index = node->index();
-      int start_register = RegExpCapture::StartRegister(index);
-      int end_register = RegExpCapture::EndRegister(index);
-      assembler_.SetRegisterToCp(start_register);
-      node->body()->Accept(this, nullptr);
-      assembler_.SetRegisterToCp(end_register);
-    }
+    int index = node->index();
+    int start_register = RegExpCapture::StartRegister(index);
+    int end_register = RegExpCapture::EndRegister(index);
+    assembler_.SetRegisterToCp(reverse_ ? end_register : start_register);
+    node->body()->Accept(this, nullptr);
+    assembler_.SetRegisterToCp(reverse_ ? start_register : end_register);
 
     return nullptr;
   }
@@ -899,7 +912,6 @@ class CompileVisitor : private RegExpVisitor {
   ZoneLinkedList<RegExpLookaround*> lookarounds_;
 
   BytecodeAssembler assembler_;
-  bool inside_lookaround_;
   bool reverse_;
 };
 

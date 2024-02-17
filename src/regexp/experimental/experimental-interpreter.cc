@@ -14,6 +14,7 @@
 #include "src/common/assert-scope.h"
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/string-inl.h"
+#include "src/regexp/experimental/experimental-bytecode.h"
 #include "src/regexp/experimental/experimental.h"
 #include "src/strings/char-predicates-inl.h"
 #include "src/zone/zone-allocator.h"
@@ -163,8 +164,10 @@ class NfaInterpreter {
         register_array_allocator_(zone),
         best_match_registers_(base::nullopt),
         lookaround_pc_(0, zone),
+        lookarounds_to_capture_(0, zone),
         lookaround_table_(zone),
         reverse_(false),
+        capturing_lookarounds_(false),
         current_lookaround_(-1),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
@@ -174,10 +177,10 @@ class NfaInterpreter {
     // Finds the starting PC of every lookaround by location all the
     // `START_LOOKAROUND` instructions.
     for (int i = 0; i < bytecode_.length() - 1; ++i) {
-      if ((bytecode_[i].opcode ==
-           RegExpInstruction::Opcode::START_LOOKAROUND)) {
+      if (bytecode_[i].opcode == RegExpInstruction::START_LOOKAHEAD ||
+          bytecode_[i].opcode == RegExpInstruction::START_LOOKBEHIND) {
         lookaround_pc_.Add(i, zone_);
-        lookaround_table_.emplace_back(input_.length(), zone);
+        lookaround_table_.emplace_back(input_.length() + 1, zone);
       }
     }
 
@@ -208,7 +211,7 @@ class NfaInterpreter {
     std::cout << std::endl;
     for (size_t i = 0; i < lookaround_table_.size(); ++i) {
       std::cout << i << ": ";
-      for (size_t j = 0; j <= lookaround_table_[i].size(); ++j) {
+      for (size_t j = 0; j < lookaround_table_[i].size(); ++j) {
         std::cout << lookaround_table_[i][j] << ", ";
       }
       std::cout << std::endl;
@@ -294,13 +297,14 @@ class NfaInterpreter {
       active_threads_.DropAndClear();
 
       current_lookaround_ = i;
-      reverse_ = bytecode_.at(lookaround_pc_.at(i)).payload.ahead;
+      reverse_ = bytecode_.at(lookaround_pc_.at(i)).opcode ==
+                 RegExpInstruction::START_LOOKAHEAD;
       input_index_ = reverse_ ? input_.length() - 1 : 0;
 
       // TODO avoid unused allocation ?
       active_threads_.Add(
           InterpreterThread(lookaround_pc_.at(i),
-                            NewRegisterArrayUninitialized(),
+                            NewRegisterArray(kUndefinedRegisterValue),
                             InterpreterThread::ConsumedCharacter::DidConsume),
           zone_);
 
@@ -310,6 +314,44 @@ class NfaInterpreter {
     reverse_ = false;
     current_lookaround_ = -1;
     input_index_ = 0;
+  }
+
+  void FillLookaroundCaptures() {
+    if (!best_match_registers_.has_value()) {
+      return;
+    }
+
+    capturing_lookarounds_ = true;
+
+    for (LookaroundToCapture& to_capture : lookarounds_to_capture_) {
+      auto& inst = bytecode_[lookaround_pc_[to_capture.lookaround_index]];
+      DCHECK(inst.opcode == RegExpInstruction::START_LOOKBEHIND ||
+             inst.opcode == RegExpInstruction::START_LOOKAHEAD);
+
+      // Clean up left-over data from last iteration.
+      for (InterpreterThread t : blocked_threads_) {
+        DestroyThread(t);
+      }
+      blocked_threads_.DropAndClear();
+
+      for (InterpreterThread t : active_threads_) {
+        DestroyThread(t);
+      }
+      active_threads_.DropAndClear();
+
+      reverse_ = inst.opcode == RegExpInstruction::START_LOOKBEHIND;
+      input_index_ = to_capture.input_index + (reverse_ ? -1 : 0);
+
+      // TODO avoid unused allocation ?
+      active_threads_.Add(
+          InterpreterThread(inst.payload.pc, NewRegisterArray(kUndefinedRegisterValue),
+                            InterpreterThread::ConsumedCharacter::DidConsume),
+          zone_);
+
+      RunActiveThreadsToEnd();
+    }
+
+    capturing_lookarounds_ = false;
   }
 
   int RunActiveThreadsToEnd() {
@@ -479,11 +521,18 @@ class NfaInterpreter {
     // to first (as of their position in the bytecode). The main expression
     // bytecode is located at PC 0, and is executed with the lowest priority.
     active_threads_.Add(
-        InterpreterThread(0, NewRegisterArray(kUndefinedRegisterValue),
+        InterpreterThread(0, NewRegisterArrayUninitialized(),
                           InterpreterThread::ConsumedCharacter::DidConsume),
         zone_);
 
-    return RunActiveThreadsToEnd();
+    int err_code = RunActiveThreadsToEnd();
+    if (err_code != RegExp::kInternalRegExpSuccess) {
+      return err_code;
+    }
+
+    FillLookaroundCaptures();
+
+    return RegExp::kInternalRegExpSuccess;
   }
 
   // Run an active thread `t` until it executes a CONSUME_RANGE or ACCEPT
@@ -552,7 +601,7 @@ class NfaInterpreter {
           active_threads_.DropAndClear();
           return;
         case RegExpInstruction::SET_REGISTER_TO_CP:
-          GetRegisterArray(t)[inst.payload.register_index] = input_index_;
+          GetRegisterArray(t)[inst.payload.register_index] = input_index_ + (reverse_ ? 1 : 0);
           ++t.pc;
           break;
         case RegExpInstruction::CLEAR_REGISTER:
@@ -576,17 +625,29 @@ class NfaInterpreter {
           }
           ++t.pc;
           break;
-        case RegExpInstruction::START_LOOKAROUND:
+        case RegExpInstruction::START_LOOKBEHIND:
+        case RegExpInstruction::START_LOOKAHEAD:
           ++t.pc;
+          break;
+
+        case RegExpInstruction::END_LOOKAROUND:
+          DCHECK(capturing_lookarounds_ && best_match_registers_.has_value());
+          for (int i = 0; i < register_count_per_match_; ++i) {
+            if (GetRegisterArray(t)[i] != kUndefinedRegisterValue) {
+              (*best_match_registers_)[i] = GetRegisterArray(t)[i];
+            }
+          }
           break;
         case RegExpInstruction::WRITE_LOOKAROUND_TABLE:
           // Reaching this instruction means that the current lookbehind thread
           // has found a match and needs to be destroyed. Since the lookbehind
           // is verified at this position, we update the `lookbehind_table_`.
-          DCHECK_NE(current_lookaround_, -1);
-          lookaround_table_[current_lookaround_]
-                           [input_index_ + (reverse_ ? 1 : 0)] = true;
-          DestroyThread(t);
+          if (!capturing_lookarounds_) {
+            DCHECK_NE(current_lookaround_, -1);
+            lookaround_table_[current_lookaround_]
+                             [input_index_ + (reverse_ ? 1 : 0)] = true;
+            DestroyThread(t);
+          }
           return;
         case RegExpInstruction::READ_LOOKAROUND_TABLE:
           // Destroy the thread if the corresponding lookbehind did or did not
@@ -599,6 +660,13 @@ class NfaInterpreter {
               inst.payload.read_lookaround.is_positive()) {
             DestroyThread(t);
             return;
+          }
+
+          if (!capturing_lookarounds_ &&
+              inst.payload.read_lookaround.is_positive()) {
+            lookarounds_to_capture_.Add(
+                {inst.payload.read_lookaround.lookaround_index(), input_index_},
+                zone_);
           }
 
           ++t.pc;
@@ -684,13 +752,9 @@ class NfaInterpreter {
                                  consumed_since_last_quantifier) {
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
-        DCHECK_LE(pc_last_input_index_[pc].having_consumed_character,
-                  input_index_);
         return pc_last_input_index_[pc].having_consumed_character ==
                input_index_;
       case InterpreterThread::ConsumedCharacter::DidNotConsume:
-        DCHECK_LE(pc_last_input_index_[pc].not_having_consumed_character,
-                  input_index_);
         return pc_last_input_index_[pc].not_having_consumed_character ==
                input_index_;
     }
@@ -702,13 +766,9 @@ class NfaInterpreter {
                                    consumed_since_last_quantifier) {
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
-        DCHECK_LE(pc_last_input_index_[pc].having_consumed_character,
-                  input_index_);
         pc_last_input_index_[pc].having_consumed_character = input_index_;
         break;
       case InterpreterThread::ConsumedCharacter::DidNotConsume:
-        DCHECK_LE(pc_last_input_index_[pc].not_having_consumed_character,
-                  input_index_);
         pc_last_input_index_[pc].not_having_consumed_character = input_index_;
         break;
     }
@@ -774,11 +834,18 @@ class NfaInterpreter {
   // NFA instantiation (see the constructor).
   ZoneList<int> lookaround_pc_;
 
+  struct LookaroundToCapture {
+    int lookaround_index;
+    int input_index;
+  };
+  ZoneList<LookaroundToCapture> lookarounds_to_capture_;
+
   // Truth table for the lookarounds. lookaround_table_[l][r] indicates whether
   // the lookaround of index l did complete a match on the position r.
   ZoneVector<ZoneVector<bool>> lookaround_table_;
 
   bool reverse_;
+  bool capturing_lookarounds_;
   int current_lookaround_;
 
   Zone* zone_;
