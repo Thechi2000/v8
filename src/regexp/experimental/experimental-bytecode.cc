@@ -77,11 +77,10 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
     case RegExpInstruction::END_LOOP:
       os << "END_LOOP";
       break;
-    case RegExpInstruction::START_LOOKBEHIND:
-      os << "START_LOOKBEHIND " << inst.payload.pc;
-      break;
-    case RegExpInstruction::START_LOOKAHEAD:
-      os << "START_LOOKAHEAD " << inst.payload.pc;
+    case RegExpInstruction::START_LOOKAROUND:
+      os << "START_LOOKBEHIND "
+         << inst.payload.start_lookaround.lookaround_index()
+         << (inst.payload.start_lookaround.is_ahead() ? "(ahead)" : "(behind)");
       break;
     case RegExpInstruction::END_LOOKAROUND:
       os << "END_LOOKAROUND";

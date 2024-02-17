@@ -104,8 +104,7 @@ struct RegExpInstruction {
     SET_REGISTER_TO_CP,
     BEGIN_LOOP,
     END_LOOP,
-    START_LOOKBEHIND,
-    START_LOOKAHEAD,
+    START_LOOKAROUND,
     END_LOOKAROUND,
     WRITE_LOOKAROUND_TABLE,
     READ_LOOKAROUND_TABLE,
@@ -129,6 +128,23 @@ struct RegExpInstruction {
 
    private:
     using IsPositive = base::BitField<bool, 0, 1>;
+    using LookaroundIndex = base::BitField<int32_t, 1, 31>;
+    uint32_t payload_;
+  };
+  class StartLookaroundPayload {
+   public:
+    StartLookaroundPayload() = default;
+    StartLookaroundPayload(int32_t lookbehind_index, bool is_positive)
+        : payload_(IsAhead::update(LookaroundIndex::encode(lookbehind_index),
+                                   is_positive)) {}
+
+    int32_t lookaround_index() const {
+      return LookaroundIndex::decode(payload_);
+    }
+    bool is_ahead() const { return IsAhead::decode(payload_); }
+
+   private:
+    using IsAhead = base::BitField<bool, 0, 1>;
     using LookaroundIndex = base::BitField<int32_t, 1, 31>;
     uint32_t payload_;
   };
@@ -203,17 +219,12 @@ struct RegExpInstruction {
     return result;
   }
 
-  static RegExpInstruction StartLookbehind(int32_t pc) {
+  static RegExpInstruction StartLookaround(int lookaround_index,
+                                           bool is_ahead) {
     RegExpInstruction result;
-    result.opcode = START_LOOKBEHIND;
-    result.payload.pc = pc;
-    return result;
-  }
-
-  static RegExpInstruction StartLookahead(int32_t pc) {
-    RegExpInstruction result;
-    result.opcode = START_LOOKAHEAD;
-    result.payload.pc = pc;
+    result.opcode = START_LOOKAROUND;
+    result.payload.start_lookaround =
+        StartLookaroundPayload(lookaround_index, is_ahead);
     return result;
   }
 
@@ -243,8 +254,7 @@ struct RegExpInstruction {
   union {
     // Payload of CONSUME_RANGE:
     Uc16Range consume_range;
-    // Payload of FORK, JMP, START_LOOKBEHIND and START_LOOKAHEAD, the
-    // next/forked program counter (pc):
+    // Payload of FORK and JMP the next/forked program counter (pc):
     int32_t pc;
     // Payload of SET_REGISTER_TO_CP and CLEAR_REGISTER:
     int32_t register_index;
@@ -254,6 +264,8 @@ struct RegExpInstruction {
     int32_t looktable_index;
     // Payload of READ_LOOKBEHIND_TABLE:
     ReadLookaroundTablePayload read_lookaround;
+    // Payload of START_LOOKAROUND:
+    StartLookaroundPayload start_lookaround;
   } payload;
   static_assert(sizeof(payload) == 4);
 };

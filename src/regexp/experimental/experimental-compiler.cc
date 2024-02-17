@@ -291,17 +291,12 @@ class BytecodeAssembler {
 
   void EndLoop() { code_.Add(RegExpInstruction::EndLoop(), zone_); }
 
-  void StartLookbehind(Label& target) {
-    LabelledInstrImpl(RegExpInstruction::Opcode::START_LOOKBEHIND, target);
+  void StartLookaround(int lookaround_index, bool is_ahead) {
+    code_.Add(RegExpInstruction::StartLookaround(lookaround_index, is_ahead),
+              zone_);
   }
 
-  void StartLookahead(Label& target) {
-    LabelledInstrImpl(RegExpInstruction::Opcode::START_LOOKAHEAD, target);
-  }
-
-  void EndLookaround() {
-    code_.Add(RegExpInstruction::EndLookaround(), zone_);
-  }
+  void EndLookaround() { code_.Add(RegExpInstruction::EndLookaround(), zone_); }
 
   void WriteLookaroundTable(int index) {
     code_.Add(RegExpInstruction::WriteLookTable(index), zone_);
@@ -319,9 +314,7 @@ class BytecodeAssembler {
     while (target.unbound_patch_list_begin_ != -1) {
       RegExpInstruction& inst = code_[target.unbound_patch_list_begin_];
       DCHECK(inst.opcode == RegExpInstruction::FORK ||
-             inst.opcode == RegExpInstruction::JMP ||
-             inst.opcode == RegExpInstruction::START_LOOKBEHIND ||
-             inst.opcode == RegExpInstruction::START_LOOKAHEAD);
+             inst.opcode == RegExpInstruction::JMP);
 
       target.unbound_patch_list_begin_ = inst.payload.pc;
       inst.payload.pc = index;
@@ -405,12 +398,8 @@ class CompileVisitor : private RegExpVisitor {
   void CompileLookaround(RegExpLookaround* lookaround) {
     Label reversed;
 
-    // TODO handle anchored lookarounds
-    if (lookaround->type() == RegExpLookaround::LOOKAHEAD) {
-      assembler_.StartLookahead(reversed);
-    } else {
-      assembler_.StartLookbehind(reversed);
-    }
+    assembler_.StartLookaround(
+        lookaround->index(), lookaround->type() == RegExpLookaround::LOOKAHEAD);
 
     // Lookbehinds are never anchored, i.e. may start at any input position,
     // so we emit a preamble corresponding to /.*?/.  This skips an arbitrary
@@ -429,7 +418,11 @@ class CompileVisitor : private RegExpVisitor {
 
     assembler_.Bind(reversed);
     reverse_ = !reverse_;
+
+    ignore_lookarounds_ = true;
     lookaround->body()->Accept(this, nullptr);
+    ignore_lookarounds_ = false;
+
     assembler_.EndLookaround();
   }
 
@@ -880,7 +873,9 @@ class CompileVisitor : private RegExpVisitor {
     assembler_.ReadLookaroundTable(node->index(), node->is_positive());
 
     // Add the lookbehind to the queue of lookbehinds to be compiled.
-    lookarounds_.push_back(node);
+    if (!ignore_lookarounds_) {
+      lookarounds_.push_back(node);
+    }
 
     return nullptr;
   }
@@ -913,6 +908,7 @@ class CompileVisitor : private RegExpVisitor {
 
   BytecodeAssembler assembler_;
   bool reverse_;
+  bool ignore_lookarounds_;
 };
 
 }  // namespace

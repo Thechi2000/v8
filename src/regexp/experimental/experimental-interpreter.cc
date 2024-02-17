@@ -16,6 +16,7 @@
 #include "src/objects/string-inl.h"
 #include "src/regexp/experimental/experimental-bytecode.h"
 #include "src/regexp/experimental/experimental.h"
+#include "src/regexp/regexp-ast.h"
 #include "src/strings/char-predicates-inl.h"
 #include "src/zone/zone-allocator.h"
 #include "src/zone/zone-containers.h"
@@ -163,7 +164,8 @@ class NfaInterpreter {
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
         best_match_registers_(base::nullopt),
-        lookaround_pc_(0, zone),
+        lookarounds_(0, zone),
+        lookarounds_priority_(0, zone),
         lookarounds_to_capture_(0, zone),
         lookaround_table_(zone),
         reverse_(false),
@@ -176,11 +178,27 @@ class NfaInterpreter {
 
     // Finds the starting PC of every lookaround by location all the
     // `START_LOOKAROUND` instructions.
+    struct Lookaround lookaround;
+    int lookaround_index;
     for (int i = 0; i < bytecode_.length() - 1; ++i) {
-      if (bytecode_[i].opcode == RegExpInstruction::START_LOOKAHEAD ||
-          bytecode_[i].opcode == RegExpInstruction::START_LOOKBEHIND) {
-        lookaround_pc_.Add(i, zone_);
-        lookaround_table_.emplace_back(input_.length() + 1, zone);
+      auto& inst = bytecode_[i];
+
+      if (inst.opcode == RegExpInstruction::START_LOOKAROUND) {
+        lookaround_index = inst.payload.start_lookaround.lookaround_index();
+        lookaround.match_pc_ = i;
+        lookaround.is_ahead = inst.payload.start_lookaround.is_ahead();
+      }
+
+      if (inst.opcode == RegExpInstruction::WRITE_LOOKAROUND_TABLE) {
+        lookaround.capture_pc_ = i + 1;
+
+        while (lookarounds_.length() <= lookaround_index) {
+          lookarounds_.Add({-1, -1, false}, zone_);
+        }
+        lookarounds_.Set(lookaround_index, lookaround);
+
+        lookarounds_priority_.Add(lookaround_index, zone_);
+        lookaround_table_.emplace_back(input_.length() + 1, zone_);
       }
     }
 
@@ -198,7 +216,7 @@ class NfaInterpreter {
 
     std::cout << "Bytecode:" << std::endl;
     for (int i = 0; i < bytecode_.length(); ++i) {
-      std::cout << i << ": " << bytecode_.at(i) << std::endl;
+      std::cout << std::dec << i << ". " << bytecode_.at(i) << std::endl;
     }
 
     FillLookaroundTable();
@@ -284,7 +302,7 @@ class NfaInterpreter {
   };
 
   void FillLookaroundTable() {
-    for (int i = lookaround_pc_.length() - 1; i >= 0; --i) {
+    for (int i = lookarounds_priority_.length() - 1; i >= 0; --i) {
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
         DestroyThread(t);
@@ -296,14 +314,16 @@ class NfaInterpreter {
       }
       active_threads_.DropAndClear();
 
-      current_lookaround_ = i;
-      reverse_ = bytecode_.at(lookaround_pc_.at(i)).opcode ==
-                 RegExpInstruction::START_LOOKAHEAD;
+      int idx = lookarounds_priority_[i];
+      std::cout << "Running lookaround " << idx << std::endl;
+      
+      current_lookaround_ = idx;
+      reverse_ = lookarounds_[idx].is_ahead;
       input_index_ = reverse_ ? input_.length() - 1 : 0;
 
       // TODO avoid unused allocation ?
       active_threads_.Add(
-          InterpreterThread(lookaround_pc_.at(i),
+          InterpreterThread(lookarounds_[idx].match_pc_,
                             NewRegisterArray(kUndefinedRegisterValue),
                             InterpreterThread::ConsumedCharacter::DidConsume),
           zone_);
@@ -324,9 +344,7 @@ class NfaInterpreter {
     capturing_lookarounds_ = true;
 
     for (LookaroundToCapture& to_capture : lookarounds_to_capture_) {
-      auto& inst = bytecode_[lookaround_pc_[to_capture.lookaround_index]];
-      DCHECK(inst.opcode == RegExpInstruction::START_LOOKBEHIND ||
-             inst.opcode == RegExpInstruction::START_LOOKAHEAD);
+      Lookaround& lookaround = lookarounds_[to_capture.lookaround_index];
 
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
@@ -339,12 +357,13 @@ class NfaInterpreter {
       }
       active_threads_.DropAndClear();
 
-      reverse_ = inst.opcode == RegExpInstruction::START_LOOKBEHIND;
+      reverse_ = !lookaround.is_ahead;
       input_index_ = to_capture.input_index + (reverse_ ? -1 : 0);
 
       // TODO avoid unused allocation ?
       active_threads_.Add(
-          InterpreterThread(inst.payload.pc, NewRegisterArray(kUndefinedRegisterValue),
+          InterpreterThread(lookaround.capture_pc_,
+                            NewRegisterArray(kUndefinedRegisterValue),
                             InterpreterThread::ConsumedCharacter::DidConsume),
           zone_);
 
@@ -566,7 +585,7 @@ class NfaInterpreter {
         }
         case RegExpInstruction::ASSERTION:
           if (!SatisfiesAssertion(inst.payload.assertion_type, input_,
-                                  input_index_ + (reverse_ ? 1 : 0))) {
+                                  GetInputIndex())) {
             DestroyThread(t);
             return;
           }
@@ -601,7 +620,7 @@ class NfaInterpreter {
           active_threads_.DropAndClear();
           return;
         case RegExpInstruction::SET_REGISTER_TO_CP:
-          GetRegisterArray(t)[inst.payload.register_index] = input_index_ + (reverse_ ? 1 : 0);
+          GetRegisterArray(t)[inst.payload.register_index] = GetInputIndex();
           ++t.pc;
           break;
         case RegExpInstruction::CLEAR_REGISTER:
@@ -625,8 +644,7 @@ class NfaInterpreter {
           }
           ++t.pc;
           break;
-        case RegExpInstruction::START_LOOKBEHIND:
-        case RegExpInstruction::START_LOOKAHEAD:
+        case RegExpInstruction::START_LOOKAROUND:
           ++t.pc;
           break;
 
@@ -644,8 +662,7 @@ class NfaInterpreter {
           // is verified at this position, we update the `lookbehind_table_`.
           if (!capturing_lookarounds_) {
             DCHECK_NE(current_lookaround_, -1);
-            lookaround_table_[current_lookaround_]
-                             [input_index_ + (reverse_ ? 1 : 0)] = true;
+            lookaround_table_[current_lookaround_][GetInputIndex()] = true;
             DestroyThread(t);
           }
           return;
@@ -656,7 +673,7 @@ class NfaInterpreter {
           // all the threads of the lookbehind have already been run at this
           // position.
           if (lookaround_table_[inst.payload.read_lookaround.lookaround_index()]
-                               [input_index_] !=
+                               [GetInputIndex()] !=
               inst.payload.read_lookaround.is_positive()) {
             DestroyThread(t);
             return;
@@ -674,6 +691,8 @@ class NfaInterpreter {
       }
     }
   }
+
+  int GetInputIndex() { return input_index_ + (reverse_ ? 1 : 0); }
 
   // Run each active thread until it can't continue without further input.
   // `active_threads_` is empty afterwards.  `blocked_threads_` are sorted from
@@ -832,7 +851,13 @@ class NfaInterpreter {
 
   // Starting PC of each of the lookbehinds in the bytecode. Computed during the
   // NFA instantiation (see the constructor).
-  ZoneList<int> lookaround_pc_;
+  struct Lookaround {
+    int match_pc_;
+    int capture_pc_;
+    bool is_ahead;
+  };
+  ZoneList<Lookaround> lookarounds_;
+  ZoneList<int> lookarounds_priority_;
 
   struct LookaroundToCapture {
     int lookaround_index;
