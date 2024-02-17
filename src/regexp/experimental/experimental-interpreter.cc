@@ -216,6 +216,13 @@ class NfaInterpreter {
 
     std::cout << "Bytecode:" << std::endl;
     for (int i = 0; i < bytecode_.length(); ++i) {
+      if (bytecode_[i].opcode == RegExpInstruction::START_LOOKAROUND) {
+        std::cout << std::endl
+                  << "#### Lookaround "
+                  << bytecode_[i].payload.start_lookaround.lookaround_index()
+                  << std::endl
+                  << std::endl;
+      }
       std::cout << std::dec << i << ". " << bytecode_.at(i) << std::endl;
     }
 
@@ -302,6 +309,9 @@ class NfaInterpreter {
   };
 
   void FillLookaroundTable() {
+    std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
+              LastInputIndex());
+
     for (int i = lookarounds_priority_.length() - 1; i >= 0; --i) {
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
@@ -316,7 +326,7 @@ class NfaInterpreter {
 
       int idx = lookarounds_priority_[i];
       std::cout << "Running lookaround " << idx << std::endl;
-      
+
       current_lookaround_ = idx;
       reverse_ = lookarounds_[idx].is_ahead;
       input_index_ = reverse_ ? input_.length() - 1 : 0;
@@ -343,8 +353,13 @@ class NfaInterpreter {
 
     capturing_lookarounds_ = true;
 
-    for (LookaroundToCapture& to_capture : lookarounds_to_capture_) {
+    while (!lookarounds_to_capture_.is_empty()) {
+      LookaroundToCapture to_capture = lookarounds_to_capture_.last();
+      lookarounds_to_capture_.RemoveLast();
       Lookaround& lookaround = lookarounds_[to_capture.lookaround_index];
+
+      std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
+                LastInputIndex());
 
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
@@ -490,8 +505,8 @@ class NfaInterpreter {
 
   // Change the current input index for future calls to `FindNextMatch`.
   void SetInputIndex(int new_input_index) {
-    DCHECK_GE(input_index_, 0);
-    DCHECK_LE(input_index_, input_.length());
+    DCHECK_GE(new_input_index, 0);
+    DCHECK_LE(new_input_index, input_.length());
 
     input_index_ = new_input_index;
   }
@@ -679,7 +694,7 @@ class NfaInterpreter {
             return;
           }
 
-          if (!capturing_lookarounds_ &&
+          if ((current_lookaround_ == -1) &&
               inst.payload.read_lookaround.is_positive()) {
             lookarounds_to_capture_.Add(
                 {inst.payload.read_lookaround.lookaround_index(), input_index_},
@@ -772,10 +787,10 @@ class NfaInterpreter {
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
         return pc_last_input_index_[pc].having_consumed_character ==
-               input_index_;
+               GetInputIndex();
       case InterpreterThread::ConsumedCharacter::DidNotConsume:
         return pc_last_input_index_[pc].not_having_consumed_character ==
-               input_index_;
+               GetInputIndex();
     }
   }
 
@@ -785,10 +800,11 @@ class NfaInterpreter {
                                    consumed_since_last_quantifier) {
     switch (consumed_since_last_quantifier) {
       case InterpreterThread::ConsumedCharacter::DidConsume:
-        pc_last_input_index_[pc].having_consumed_character = input_index_;
+        pc_last_input_index_[pc].having_consumed_character = GetInputIndex();
         break;
       case InterpreterThread::ConsumedCharacter::DidNotConsume:
-        pc_last_input_index_[pc].not_having_consumed_character = input_index_;
+        pc_last_input_index_[pc].not_having_consumed_character =
+            GetInputIndex();
         break;
     }
   }
