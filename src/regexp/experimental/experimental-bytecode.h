@@ -258,7 +258,7 @@ struct RegExpInstruction {
     int32_t register_index;
     // Payload of ASSERTION:
     RegExpAssertion::Type assertion_type;
-    // Payload of SET_QUANT_TO_CLOCK and FILTER_QUANTIFIER:
+    // Payload of SET_QUANTIFIER_TO_CLOCK and FILTER_QUANTIFIER:
     int32_t quantifier_id;
     // Payload of FILTER_GROUP:
     int32_t group_id;

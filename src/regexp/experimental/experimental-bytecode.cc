@@ -69,7 +69,7 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
       os << "SET_REGISTER_TO_CP " << inst.payload.register_index;
       break;
     case RegExpInstruction::SET_QUANTIFIER_TO_CLOCK:
-      os << "SET_QUANT_TO_CLOCK " << inst.payload.quantifier_id;
+      os << "SET_QUANTIFIER_TO_CLOCK " << inst.payload.quantifier_id;
       break;
     case RegExpInstruction::FILTER_QUANTIFIER:
       os << "FILTER_QUANTIFIER " << inst.payload.quantifier_id;
