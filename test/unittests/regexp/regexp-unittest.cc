@@ -649,7 +649,7 @@ static Handle<JSRegExp> CreateJSRegExp(Handle<String> source, Handle<Code> code,
   Handle<JSRegExp> regexp =
       Handle<JSRegExp>::cast(factory->NewJSObject(constructor));
 
-  factory->SetRegExpIrregexpData(regexp, source, {}, 0,
+  factory->SetRegExpIrregexpData(regexp, source, {}, 0, 0,
                                  JSRegExp::kNoBacktrackLimit);
   const bool is_latin1 = !is_unicode;
   regexp->set_code(is_latin1, code);
