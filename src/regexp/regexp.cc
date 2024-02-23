@@ -651,12 +651,12 @@ Tagged<Code> RegExpImpl::IrregexpNativeCode(IsolateForSandbox isolate,
 
 void RegExpImpl::IrregexpInitialize(Isolate* isolate, Handle<JSRegExp> re,
                                     Handle<String> pattern, RegExpFlags flags,
-                                    int capture_count, int quantifier_count,
+                                    int capture_count,
                                     uint32_t backtrack_limit) {
   // Initialize compiled code entries to null.
-  isolate->factory()->SetRegExpIrregexpData(
-      re, pattern, JSRegExp::AsJSRegExpFlags(flags), capture_count,
-      quantifier_count, backtrack_limit);
+  isolate->factory()->SetRegExpIrregexpData(re, pattern,
+                                            JSRegExp::AsJSRegExpFlags(flags),
+                                            capture_count, backtrack_limit);
 }
 
 // static
