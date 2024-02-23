@@ -537,7 +537,6 @@ class RegExpParserImpl final {
   bool contains_anchor() const { return contains_anchor_; }
   void set_contains_anchor() { contains_anchor_ = true; }
   int captures_started() const { return captures_started_; }
-  int quantifiers() const { return quantifier_count_; }
   int position() const { return next_pos_ - 1; }
   bool failed() const { return failed_; }
   RegExpFlags flags() const { return flags_; }
@@ -3094,7 +3093,6 @@ bool RegExpParserImpl<CharT>::Parse(RegExpCompileData* result) {
   result->contains_anchor = contains_anchor();
   result->capture_count = capture_count;
   result->named_captures = GetNamedCaptures();
-  result->quantifier_count = quantifier_count_;
   return true;
 }
 

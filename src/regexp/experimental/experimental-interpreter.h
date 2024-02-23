@@ -25,9 +25,9 @@ class ExperimentalRegExpInterpreter final : public AllStatic {
   // two-byte strings.
   static int FindMatches(Isolate* isolate, RegExp::CallOrigin call_origin,
                          Tagged<ByteArray> bytecode, int capture_count,
-                         int quantifier_count, Tagged<String> input,
-                         int start_index, int32_t* output_registers,
-                         int output_register_count, Zone* zone);
+                         Tagged<String> input, int start_index,
+                         int32_t* output_registers, int output_register_count,
+                         Zone* zone);
 };
 
 }  // namespace internal

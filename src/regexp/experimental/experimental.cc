@@ -29,7 +29,7 @@ bool ExperimentalRegExp::CanBeHandled(RegExpTree* tree, Handle<String> pattern,
 
 void ExperimentalRegExp::Initialize(Isolate* isolate, Handle<JSRegExp> re,
                                     Handle<String> source, RegExpFlags flags,
-                                    int capture_count, int quantifier_count) {
+                                    int capture_count) {
   DCHECK(v8_flags.enable_experimental_regexp_engine);
   if (v8_flags.trace_experimental_regexp_engine) {
     StdoutStream{} << "Initializing experimental regexp " << *source
@@ -37,8 +37,7 @@ void ExperimentalRegExp::Initialize(Isolate* isolate, Handle<JSRegExp> re,
   }
 
   isolate->factory()->SetRegExpExperimentalData(
-      re, source, JSRegExp::AsJSRegExpFlags(flags), capture_count,
-      quantifier_count);
+      re, source, JSRegExp::AsJSRegExpFlags(flags), capture_count);
 }
 
 bool ExperimentalRegExp::IsCompiled(Handle<JSRegExp> re, Isolate* isolate) {
@@ -143,9 +142,8 @@ namespace {
 
 int32_t ExecRawImpl(Isolate* isolate, RegExp::CallOrigin call_origin,
                     Tagged<ByteArray> bytecode, Tagged<String> subject,
-                    int capture_count, int quantifier_count,
-                    int32_t* output_registers, int32_t output_register_count,
-                    int32_t subject_index) {
+                    int capture_count, int32_t* output_registers,
+                    int32_t output_register_count, int32_t subject_index) {
   DisallowGarbageCollection no_gc;
   // TODO(cbruni): remove once gcmole is fixed.
   DisableGCMole no_gc_mole;
@@ -157,9 +155,8 @@ int32_t ExecRawImpl(Isolate* isolate, RegExp::CallOrigin call_origin,
   DCHECK(subject->IsFlat());
   Zone zone(isolate->allocator(), ZONE_NAME);
   result = ExperimentalRegExpInterpreter::FindMatches(
-      isolate, call_origin, bytecode, register_count_per_match,
-      quantifier_count, subject, subject_index, output_registers,
-      output_register_count, &zone);
+      isolate, call_origin, bytecode, register_count_per_match, subject,
+      subject_index, output_registers, output_register_count, &zone);
   return result;
 }
 
@@ -182,8 +179,8 @@ int32_t ExperimentalRegExp::ExecRaw(
   Tagged<ByteArray> bytecode = ByteArray::cast(regexp->bytecode(kIsLatin1));
 
   return ExecRawImpl(isolate, call_origin, bytecode, subject,
-                     regexp->capture_count(), regexp->quantifier_count(),
-                     output_registers, output_register_count, subject_index);
+                     regexp->capture_count(), output_registers,
+                     output_register_count, subject_index);
 }
 
 int32_t ExperimentalRegExp::MatchForCallFromJs(
@@ -288,8 +285,8 @@ int32_t ExperimentalRegExp::OneshotExecRaw(Isolate* isolate,
   DisallowGarbageCollection no_gc;
   return ExecRawImpl(isolate, RegExp::kFromRuntime,
                      *compilation_result->bytecode, *subject,
-                     regexp->capture_count(), regexp->quantifier_count(),
-                     output_registers, output_register_count, subject_index);
+                     regexp->capture_count(), output_registers,
+                     output_register_count, subject_index);
 }
 
 MaybeHandle<Object> ExperimentalRegExp::OneshotExec(

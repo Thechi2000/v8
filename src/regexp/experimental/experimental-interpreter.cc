@@ -263,8 +263,7 @@ class NfaInterpreter {
  public:
   NfaInterpreter(Isolate* isolate, RegExp::CallOrigin call_origin,
                  Tagged<ByteArray> bytecode, int register_count_per_match,
-                 int quantifier_count, Tagged<String> input,
-                 int32_t input_index, Zone* zone)
+                 Tagged<String> input, int32_t input_index, Zone* zone)
       : isolate_(isolate),
         call_origin_(call_origin),
         bytecode_object_(bytecode),
@@ -320,9 +319,9 @@ class NfaInterpreter {
         lookbehind_table_.Add(false, zone_);
       }
 
-      if (bytecode_[i].opcode == RegExpInstruction::FILTER_QUANTIFIER) {
+      if (bytecode_[i].opcode == RegExpInstruction::SET_QUANTIFIER_TO_CLOCK) {
         quantifier_count_ =
-            std::max(quantifier_count_, bytecode_[i].payload.quantifier_id);
+            std::max(quantifier_count_, bytecode_[i].payload.quantifier_id + 1);
       }
     }
 
@@ -969,21 +968,21 @@ class NfaInterpreter {
 int ExperimentalRegExpInterpreter::FindMatches(
     Isolate* isolate, RegExp::CallOrigin call_origin,
     Tagged<ByteArray> bytecode, int register_count_per_match,
-    int quantifier_count, Tagged<String> input, int start_index,
-    int32_t* output_registers, int output_register_count, Zone* zone) {
+    Tagged<String> input, int start_index, int32_t* output_registers,
+    int output_register_count, Zone* zone) {
   DCHECK(input->IsFlat());
   DisallowGarbageCollection no_gc;
 
   if (input->GetFlatContent(no_gc).IsOneByte()) {
-    NfaInterpreter<uint8_t> interpreter(
-        isolate, call_origin, bytecode, register_count_per_match,
-        quantifier_count, input, start_index, zone);
+    NfaInterpreter<uint8_t> interpreter(isolate, call_origin, bytecode,
+                                        register_count_per_match, input,
+                                        start_index, zone);
     return interpreter.FindMatches(output_registers, output_register_count);
   } else {
     DCHECK(input->GetFlatContent(no_gc).IsTwoByte());
-    NfaInterpreter<base::uc16> interpreter(
-        isolate, call_origin, bytecode, register_count_per_match,
-        quantifier_count, input, start_index, zone);
+    NfaInterpreter<base::uc16> interpreter(isolate, call_origin, bytecode,
+                                           register_count_per_match, input,
+                                           start_index, zone);
     return interpreter.FindMatches(output_registers, output_register_count);
   }
 }
