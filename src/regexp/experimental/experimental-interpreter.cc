@@ -270,7 +270,7 @@ class NfaInterpreter {
         bytecode_object_(bytecode),
         bytecode_(ToInstructionVector(bytecode, no_gc_)),
         register_count_per_match_(register_count_per_match),
-        quantifier_count_(quantifier_count),
+        quantifier_count_(0),
         input_object_(input),
         input_(ToCharacterVector<Character>(input, no_gc_)),
         input_index_(input_index),
@@ -307,11 +307,10 @@ class NfaInterpreter {
 
       // The first instruction to follow the `FILTER_*` section or the `ACCEPT`
       // instruction is the start of the lookbehind of index 0.
-      if (i > 0 &&
-          (RegExpInstruction::IsFilter(bytecode_[i - 1]) ||
-           bytecode_[i - 1].opcode == RegExpInstruction::ACCEPT) &&
-          !RegExpInstruction::IsFilter(bytecode_[i])) {
-        lookbehind_pc_.Add(i, zone_);
+      if ((RegExpInstruction::IsFilter(bytecode_[i]) ||
+           bytecode_[i].opcode == RegExpInstruction::ACCEPT) &&
+          !RegExpInstruction::IsFilter(bytecode_[i + 1])) {
+        lookbehind_pc_.Add(i + 1, zone_);
         lookbehind_table_.Add(false, zone_);
       }
 
@@ -319,6 +318,11 @@ class NfaInterpreter {
           RegExpInstruction::Opcode::WRITE_LOOKBEHIND_TABLE) {
         lookbehind_pc_.Add(i + 1, zone_);
         lookbehind_table_.Add(false, zone_);
+      }
+
+      if (bytecode_[i].opcode == RegExpInstruction::FILTER_QUANTIFIER) {
+        quantifier_count_ =
+            std::max(quantifier_count_, bytecode_[i].payload.quantifier_id);
       }
     }
 
@@ -893,7 +897,7 @@ class NfaInterpreter {
   const int register_count_per_match_;
 
   // Number of quantifiers in the regexp.
-  const int quantifier_count_;
+  int quantifier_count_;
 
   Tagged<String> input_object_;
   base::Vector<const Character> input_;
