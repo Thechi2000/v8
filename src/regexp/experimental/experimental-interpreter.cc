@@ -281,7 +281,7 @@ class NfaInterpreter {
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
         quantifier_array_allocator_(zone),
-        register_clock_array_allocator_(zone),
+        capture_clock_array_allocator_(zone),
         best_match_thread_(base::nullopt),
         lookbehind_pc_(0, zone),
         filter_groups_pc_(base::nullopt),
@@ -383,13 +383,13 @@ class NfaInterpreter {
     enum class ConsumedCharacter { DidConsume, DidNotConsume };
 
     InterpreterThread(int pc, int* register_array_begin,
-                      uint64_t* quantifiers_clock_array_begin,
-                      uint64_t* captures_clock_array_begin,
+                      uint64_t* quantifier_clock_array_begin,
+                      uint64_t* capture_clock_array_begin,
                       ConsumedCharacter consumed_since_last_quantifier)
         : pc(pc),
           register_array_begin(register_array_begin),
-          quantifiers_clock_array_begin(quantifiers_clock_array_begin),
-          captures_clock_array_begin(captures_clock_array_begin),
+          quantifier_clock_array_begin(quantifier_clock_array_begin),
+          captures_clock_array_begin(capture_clock_array_begin),
           consumed_since_last_quantifier(consumed_since_last_quantifier) {}
 
     // This thread's program counter, i.e. the index within `bytecode_` of the
@@ -403,8 +403,8 @@ class NfaInterpreter {
     // Pointer to an array containing the clock when the register was last
     // saved, which is always size `register_count_per_match_`.  Should be
     // deallocated with, respectively, `quantifier_array_allocator_` and
-    // `register_array_allocator_`.
-    uint64_t* quantifiers_clock_array_begin;
+    // `capture_clock_array_allocator_`.
+    uint64_t* quantifier_clock_array_begin;
     uint64_t* captures_clock_array_begin;
 
     // Describe whether the thread consumed a character since it last entered a
@@ -756,7 +756,7 @@ class NfaInterpreter {
   }
 
   base::Vector<uint64_t> GetQuantifierClockArray(InterpreterThread t) {
-    return base::Vector<uint64_t>(t.quantifiers_clock_array_begin,
+    return base::Vector<uint64_t>(t.quantifier_clock_array_begin,
                                   quantifier_count_);
   }
   base::Vector<uint64_t> GetCaptureClockArray(InterpreterThread t) {
@@ -797,7 +797,7 @@ class NfaInterpreter {
   }
 
   uint64_t* NewCaptureClockArrayUninitialized() {
-    return register_clock_array_allocator_.allocate(register_count_per_match_);
+    return capture_clock_array_allocator_.allocate(register_count_per_match_);
   }
 
   uint64_t* NewCaptureClockArray(int fill_value) {
@@ -808,7 +808,7 @@ class NfaInterpreter {
   }
 
   void FreeCaptureClockArray(uint64_t* register_array_begin) {
-    register_clock_array_allocator_.deallocate(register_array_begin,
+    capture_clock_array_allocator_.deallocate(register_array_begin,
                                                register_count_per_match_);
   }
 
@@ -832,7 +832,7 @@ class NfaInterpreter {
 
   void DestroyThread(InterpreterThread t) {
     FreeRegisterArray(t.register_array_begin);
-    FreeQuantifierClockArray(t.quantifiers_clock_array_begin);
+    FreeQuantifierClockArray(t.quantifier_clock_array_begin);
     FreeCaptureClockArray(t.captures_clock_array_begin);
   }
 
@@ -939,7 +939,7 @@ class NfaInterpreter {
   // for reuse if possible.
   RecyclingZoneAllocator<int> register_array_allocator_;
   RecyclingZoneAllocator<uint64_t> quantifier_array_allocator_;
-  RecyclingZoneAllocator<uint64_t> register_clock_array_allocator_;
+  RecyclingZoneAllocator<uint64_t> capture_clock_array_allocator_;
 
   // The register array of the best match found so far during the current
   // search.  If several threads ACCEPTed, then this will be the register array
@@ -953,7 +953,7 @@ class NfaInterpreter {
 
   // PC of the first FILTER_* instruction. Computed during the NFA instantiation
   // (see the constructor). May be empty if their are no such instructions (in
-  // the case where there are no capture groups).
+  // the case where there are no capture groups or quantifiers).
   base::Optional<int> filter_groups_pc_;
 
   // Truth table for the lookbehinds. lookbehind_table_[k] indicates whether the
