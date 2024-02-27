@@ -316,7 +316,7 @@ void WasmTableObject::Set(Isolate* isolate, Handle<WasmTableObject> table,
   // The FixedArray is addressed with int's.
   int entry_index = static_cast<int>(index);
 
-  switch (table->type().heap_representation()) {
+  switch (table->type().heap_representation_non_shared()) {
     case wasm::HeapType::kExtern:
     case wasm::HeapType::kString:
     case wasm::HeapType::kStringViewWtf8:
@@ -368,7 +368,7 @@ Handle<Object> WasmTableObject::Get(Isolate* isolate,
     return entry;
   }
 
-  switch (table->type().heap_representation()) {
+  switch (table->type().heap_representation_non_shared()) {
     case wasm::HeapType::kStringViewWtf8:
     case wasm::HeapType::kStringViewWtf16:
     case wasm::HeapType::kStringViewIter:
@@ -764,8 +764,8 @@ void WasmMemoryObject::SetNewBuffer(Tagged<JSArrayBuffer> new_buffer) {
   Tagged<WeakArrayList> instances = this->instances();
   Isolate* isolate = GetIsolate();
   for (int i = 0, len = instances->length(); i < len; ++i) {
-    MaybeObject elem = instances->Get(i);
-    if (elem->IsCleared()) continue;
+    Tagged<MaybeObject> elem = instances->Get(i);
+    if (elem.IsCleared()) continue;
     Tagged<WasmInstanceObject> instance_object =
         WasmInstanceObject::cast(elem.GetHeapObjectAssumeWeak());
     Tagged<WasmTrustedInstanceData> trusted_data =
@@ -1083,6 +1083,12 @@ constexpr std::array<uint16_t, 19> WasmTrustedInstanceData::kTaggedFieldOffsets;
 // static
 constexpr std::array<const char*, 19>
     WasmTrustedInstanceData::kTaggedFieldNames;
+// static
+constexpr std::array<uint16_t, 2>
+    WasmTrustedInstanceData::kProtectedFieldOffsets;
+// static
+constexpr std::array<const char*, 2>
+    WasmTrustedInstanceData::kProtectedFieldNames;
 
 // static
 void WasmTrustedInstanceData::EnsureMinimumDispatchTableSize(
@@ -1399,7 +1405,10 @@ WasmTrustedInstanceData::GetOrCreateWasmInternalFunction(
                            function_index)),
                    isolate);
 
-  if (v8_flags.wasm_to_js_generic_wrapper && IsWasmApiFunctionRef(*ref)) {
+  bool setup_new_ref_with_generic_wrapper =
+      v8_flags.wasm_to_js_generic_wrapper && IsWasmApiFunctionRef(*ref);
+
+  if (setup_new_ref_with_generic_wrapper) {
     Handle<WasmApiFunctionRef> wafr = Handle<WasmApiFunctionRef>::cast(ref);
     ref = isolate->factory()->NewWasmApiFunctionRef(
         handle(wafr->callable(), isolate),
@@ -1413,18 +1422,27 @@ WasmTrustedInstanceData::GetOrCreateWasmInternalFunction(
       Map::cast(trusted_instance_data->managed_object_maps()->get(sig_index)),
       isolate);
 
-  // Only set the call target if the function is not an imported function. The
-  // reason is that after wrapper tier-up the call target cannot be set anymore
-  // for imported functions, because the slot in the imported function table
-  // cannot be found anymore. Avoiding setting the call target makes the wrapper
-  // tiers behave more consistently, which can prevent surprising bugs.
+  // Only set the call target if we do not use the generic wasm-to-js wrapper.
+  // The reason is that after wrapper tier-up the call target cannot be set
+  // anymore for imported functions, because the slot in the imported function
+  // table cannot be found anymore. Avoiding setting the call target makes the
+  // wrapper tiers behave more consistently, which can prevent surprising bugs.
+  // Background: the WasmInternalFunction has two fields to store a reference to
+  // wrapper code: 1) the `call_target` field, and 2) the `code` field. In
+  // generated code, we use the `call_target` if it is set, and if it is not
+  // set, the `code` field is used. During wrapper tier-up, only the `code`
+  // field can be updated, not the `call_target` field, because the slot in the
+  // imported function table cannot be found anymore. For the newly created
+  // WasmInternalFunction, this would mean that calls with the generic wrapper
+  // would be done with the `call_target`, but after tier-up, the call with the
+  // optimized wrapper would be done with the 'code' field.
   auto result = isolate->factory()->NewWasmInternalFunction(
-      IsWasmApiFunctionRef(*ref)
+      setup_new_ref_with_generic_wrapper
           ? 0
           : trusted_instance_data->GetCallTarget(function_index),
       ref, rtt, function_index);
 
-  if (IsWasmApiFunctionRef(*ref)) {
+  if (setup_new_ref_with_generic_wrapper) {
     Handle<WasmApiFunctionRef> wafr = Handle<WasmApiFunctionRef>::cast(ref);
     const wasm::FunctionSig* sig =
         module->signature(module->functions[function_index].sig_index);
@@ -1477,7 +1495,7 @@ Handle<JSFunction> WasmInternalFunction::GetOrCreateExternal(
   int wrapper_index =
       wasm::GetExportWrapperIndex(canonical_sig_index, function.imported);
 
-  MaybeObject entry =
+  Tagged<MaybeObject> entry =
       isolate->heap()->js_to_wasm_wrappers()->Get(wrapper_index);
 
   Handle<Code> wrapper_code;
@@ -1502,7 +1520,7 @@ Handle<JSFunction> WasmInternalFunction::GetOrCreateExternal(
     // Store the wrapper in the isolate, or make its reference weak now that we
     // have a function referencing it.
     isolate->heap()->js_to_wasm_wrappers()->Set(
-        wrapper_index, HeapObjectReference::Weak(wrapper_code->wrapper()));
+        wrapper_index, MakeWeak(wrapper_code->wrapper()));
   }
   auto result = WasmExportedFunction::New(
       isolate, instance_object, internal, internal->function_index(),
@@ -2311,11 +2329,18 @@ Handle<WasmJSFunction> WasmJSFunction::New(Isolate* isolate,
       wasm::SerializedSignatureHelper::SerializeSignature(isolate, sig);
   // TODO(wasm): Think about caching and sharing the JS-to-JS wrappers per
   // signature instead of compiling a new one for every instantiation.
-  Handle<Code> wrapper_code =
-      v8_flags.wasm_js_js_generic_wrapper
-          ? isolate->builtins()->code_handle(Builtin::kJSToJSWrapper)
-          : compiler::CompileJSToJSWrapper(isolate, sig, nullptr)
-                .ToHandleChecked();
+  Handle<Code> wrapper_code;
+  if (!v8_flags.wasm_js_js_generic_wrapper) {
+    wrapper_code =
+        compiler::CompileJSToJSWrapper(isolate, sig, nullptr).ToHandleChecked();
+  } else {
+    if (wasm::IsJSCompatibleSignature(sig)) {
+      wrapper_code = isolate->builtins()->code_handle(Builtin::kJSToJSWrapper);
+    } else {
+      wrapper_code =
+          isolate->builtins()->code_handle(Builtin::kJSToJSWrapperInvalidSig);
+    }
+  }
 
   // WasmJSFunctions use on-heap Code objects as call targets, so we can't
   // cache the target address, unless the WasmJSFunction wraps a
@@ -2338,14 +2363,15 @@ Handle<WasmJSFunction> WasmJSFunction::New(Isolate* isolate,
   Handle<WeakArrayList> canonical_rtts =
       handle(isolate->heap()->wasm_canonical_rtts(), isolate);
 
-  MaybeObject maybe_canonical_map = canonical_rtts->Get(canonical_type_index);
+  Tagged<MaybeObject> maybe_canonical_map =
+      canonical_rtts->Get(canonical_type_index);
 
   if (maybe_canonical_map.IsStrongOrWeak() &&
       IsMap(maybe_canonical_map.GetHeapObject())) {
     rtt = handle(Map::cast(maybe_canonical_map.GetHeapObject()), isolate);
   } else {
     rtt = CreateFuncRefMap(isolate, Handle<Map>());
-    canonical_rtts->Set(canonical_type_index, HeapObjectReference::Weak(*rtt));
+    canonical_rtts->Set(canonical_type_index, MakeWeak(*rtt));
   }
 
   Handle<WasmJSFunctionData> function_data = factory->NewWasmJSFunctionData(
@@ -2353,18 +2379,22 @@ Handle<WasmJSFunction> WasmJSFunction::New(Isolate* isolate,
       wasm::kNoPromise);
 
   Handle<Code> wasm_to_js_wrapper_code;
-  if (UseGenericWasmToJSWrapper(wasm::kDefaultImportCallKind, sig, suspend)) {
+  if (!wasm::IsJSCompatibleSignature(sig)) {
+    wasm_to_js_wrapper_code =
+        isolate->builtins()->code_handle(Builtin::kWasmToJsWrapperInvalidSig);
+  } else if (UseGenericWasmToJSWrapper(wasm::kDefaultImportCallKind, sig,
+                                       suspend)) {
     wasm_to_js_wrapper_code =
         isolate->builtins()->code_handle(Builtin::kWasmToJsWrapperAsm);
   } else {
-    int expected_arity = parameter_count;
+    int expected_arity = parameter_count - suspend;
     wasm::ImportCallKind kind = wasm::kDefaultImportCallKind;
     if (IsJSFunction(*callable)) {
       Tagged<SharedFunctionInfo> shared =
           Handle<JSFunction>::cast(callable)->shared();
       expected_arity =
           shared->internal_formal_parameter_count_without_receiver();
-      if (expected_arity != parameter_count) {
+      if (expected_arity != parameter_count - suspend) {
         kind = wasm::ImportCallKind::kJSFunctionArityMismatch;
       }
     }
@@ -2530,17 +2560,18 @@ MaybeHandle<Object> JSToWasmObject(Isolate* isolate, Handle<Object> value,
       case HeapType::kStringViewIter:
         *error_message = "stringview_iter has no JS representation";
         return {};
-      default:
+      default: {
+        HeapType::Representation repr =
+            expected_canonical.heap_representation_non_shared();
         bool is_extern_subtype =
-            expected_canonical.heap_representation() == HeapType::kExtern ||
-            expected_canonical.heap_representation() == HeapType::kNoExtern ||
-            expected_canonical.heap_representation() == HeapType::kExn ||
-            expected_canonical.heap_representation() == HeapType::kNoExn;
+            repr == HeapType::kExtern || repr == HeapType::kNoExtern ||
+            repr == HeapType::kExn || repr == HeapType::kNoExn;
         return is_extern_subtype ? value : isolate->factory()->wasm_null();
+      }
     }
   }
 
-  switch (expected_canonical.heap_representation()) {
+  switch (expected_canonical.heap_representation_non_shared()) {
     case HeapType::kFunc: {
       if (!(WasmExternalFunction::IsWasmExternalFunction(*value) ||
             WasmCapiFunction::IsWasmCapiFunction(*value))) {

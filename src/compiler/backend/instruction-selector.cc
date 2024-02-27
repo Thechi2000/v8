@@ -5384,6 +5384,25 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
       }
     }
 
+    // SIMD256
+#if V8_ENABLE_WASM_SIMD256_REVEC
+    case Opcode::kSimd256Extract128Lane: {
+      MarkAsSimd128(node);
+      return VisitExtractF128(node);
+    }
+    case Opcode::kSimd256Unary: {
+      const Simd256UnaryOp& unary = op.Cast<Simd256UnaryOp>();
+      MarkAsSimd256(node);
+      switch (unary.kind) {
+#define VISIT_SIMD_256_UNARY(kind)    \
+  case Simd256UnaryOp::Kind::k##kind: \
+    return Visit##kind(node);
+        FOREACH_SIMD_256_UNARY_OPCODE(VISIT_SIMD_256_UNARY)
+#undef VISIT_SIMD_256_UNARY
+      }
+    }
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
+
     case Opcode::kLoadStackPointer:
       return VisitLoadStackPointer(node);
 

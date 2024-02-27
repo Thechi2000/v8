@@ -671,6 +671,9 @@ class ContextRef : public HeapObjectRef {
   OptionalObjectRef get(JSHeapBroker* broker, int index) const;
 
   ScopeInfoRef scope_info(JSHeapBroker* broker) const;
+
+  // Only returns a value if the index is valid for this ContextRef.
+  OptionalObjectRef TryGetSideData(JSHeapBroker* broker, int index) const;
 };
 
 #define BROKER_NATIVE_CONTEXT_FIELDS(V)          \
@@ -977,7 +980,7 @@ class BytecodeArrayRef : public HeapObjectRef {
   int parameter_count() const;
   interpreter::Register incoming_new_target_or_generator_register() const;
 
-  Handle<ByteArray> SourcePositionTable(JSHeapBroker* broker) const;
+  Handle<TrustedByteArray> SourcePositionTable(JSHeapBroker* broker) const;
 
   // Exception handler table.
   Address handler_table_address() const;
@@ -1036,6 +1039,7 @@ class ScopeInfoRef : public HeapObjectRef {
   bool HasOuterScopeInfo() const;
   bool HasContextExtensionSlot() const;
   bool ClassScopeHasPrivateBrand() const;
+  ScopeType scope_type() const;
 
   ScopeInfoRef OuterScopeInfo(JSHeapBroker* broker) const;
 };

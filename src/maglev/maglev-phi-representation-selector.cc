@@ -57,17 +57,13 @@ void MaglevPhiRepresentationSelector::PreProcessBasicBlock(BasicBlock* block) {
   }
 }
 
-namespace {
-
-bool CanHoistUntaggingTo(BasicBlock* block) {
+bool MaglevPhiRepresentationSelector::CanHoistUntaggingTo(BasicBlock* block) {
   if (block->successors().size() != 1) return false;
-  if (!block->successors()[0]->is_loop()) return true;
+  BasicBlock* next = block->successors()[0];
   // To be able to hoist above resumable loops we would have to be able to
   // convert during resumption.
-  return !block->successors()[0]->state()->is_resumable_loop();
+  return !next->state()->is_resumable_loop();
 }
-
-}  // namespace
 
 MaglevPhiRepresentationSelector::ProcessPhiResult
 MaglevPhiRepresentationSelector::ProcessPhi(Phi* node) {
@@ -585,7 +581,6 @@ void MaglevPhiRepresentationSelector::ConvertTaggedPhiTo(
       }
       ValueNode* untagged;
       switch (repr) {
-        case ValueRepresentation::kUint32:
         case ValueRepresentation::kInt32:
           if (!deopt_frame) {
             DCHECK(
@@ -606,8 +601,6 @@ void MaglevPhiRepresentationSelector::ConvertTaggedPhiTo(
                                block, NewNodePosition::kEnd, deopt_frame);
           }
           break;
-        case ValueRepresentation::kTagged:
-          UNREACHABLE();
         case ValueRepresentation::kFloat64:
         case ValueRepresentation::kHoleyFloat64:
           if (!deopt_frame) {
@@ -624,8 +617,15 @@ void MaglevPhiRepresentationSelector::ConvertTaggedPhiTo(
                                    builder_->zone(), {input},
                                    TaggedToFloat64ConversionType::kOnlyNumber),
                                block, NewNodePosition::kEnd, deopt_frame);
+            if (repr != ValueRepresentation::kHoleyFloat64) {
+              untagged = AddNode(NodeBase::New<CheckedHoleyFloat64ToFloat64>(
+                                     builder_->zone(), {untagged}),
+                                 block, NewNodePosition::kEnd, deopt_frame);
+            }
           }
           break;
+        case ValueRepresentation::kTagged:
+        case ValueRepresentation::kUint32:
         case ValueRepresentation::kIntPtr:
           UNREACHABLE();
       }

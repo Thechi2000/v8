@@ -807,9 +807,9 @@ void PrintFixedArrayWithHeader(std::ostream& os, Tagged<T> array,
 template <typename T>
 void PrintWeakArrayElements(std::ostream& os, T* array) {
   // Print in array notation for non-sparse arrays.
-  MaybeObject previous_value =
-      array->length() > 0 ? array->get(0) : MaybeObject(kNullAddress);
-  MaybeObject value;
+  Tagged<MaybeObject> previous_value =
+      array->length() > 0 ? array->get(0) : Tagged<MaybeObject>(kNullAddress);
+  Tagged<MaybeObject> value;
   int previous_index = 0;
   int i;
   for (i = 1; i <= array->length(); i++) {
@@ -2025,6 +2025,13 @@ void PropertyCell::PropertyCellPrint(std::ostream& os) {
   PropertyDetails details = property_details(kAcquireLoad);
   details.PrintAsSlowTo(os, true);
   os << "\n - cell_type: " << details.cell_type();
+  os << "\n - dependent code: " << dependent_code();
+  os << "\n";
+}
+
+void ConstTrackingLetCell::ConstTrackingLetCellPrint(std::ostream& os) {
+  PrintHeader(os, "ConstTrackingLetCell");
+  os << "\n - dependent code: " << dependent_code();
   os << "\n";
 }
 
@@ -2042,7 +2049,7 @@ void Code::CodePrint(std::ostream& os, const char* name, Address current_pc) {
     os << "\n - builtin_id: " << Builtins::name(builtin_id());
   }
   os << "\n - deoptimization_data_or_interpreter_data: "
-     << Brief(raw_deoptimization_data_or_interpreter_data(Isolate::Current()));
+     << Brief(raw_deoptimization_data_or_interpreter_data());
   os << "\n - position_table: " << Brief(raw_position_table());
   os << "\n - instruction_stream: " << Brief(raw_instruction_stream());
   os << "\n - instruction_start: "
@@ -2339,6 +2346,16 @@ void WasmSuspenderObject::WasmSuspenderObjectPrint(std::ostream& os) {
   os << "\n";
 }
 
+void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
+  Isolate* isolate = GetIsolateForSandbox(*this);
+  JSObjectPrintHeader(os, *this, "WasmInstanceObject");
+  os << "\n - trusted_data: " << Brief(trusted_data(isolate));
+  os << "\n - module_object: " << Brief(module_object());
+  os << "\n - exports_object: " << Brief(exports_object());
+  JSObjectPrintBody(os, *this);
+  os << "\n";
+}
+
 void WasmTrustedInstanceData::WasmTrustedInstanceDataPrint(std::ostream& os) {
 #define PRINT_WASM_INSTANCE_FIELD(name, convert) \
   os << "\n - " #name ": " << convert(name());
@@ -2413,7 +2430,7 @@ void WasmFunctionData::WasmFunctionDataPrint(std::ostream& os) {
   os << "\n - internal: " << Brief(internal());
   os << "\n - wrapper_code: " << Brief(wrapper_code(isolate));
   os << "\n - js_promise_flags: " << js_promise_flags();
-  os << "\n";
+  // No newline here; the caller prints it after printing additional fields.
 }
 
 void WasmExportedFunctionData::WasmExportedFunctionDataPrint(std::ostream& os) {
@@ -3233,6 +3250,10 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       os << '>';
       break;
     }
+    case CONST_TRACKING_LET_CELL_TYPE: {
+      os << "<ConstTrackingLetCell>";
+      break;
+    }
     case ACCESSOR_INFO_TYPE: {
       Tagged<AccessorInfo> info = AccessorInfo::cast(*this);
       os << "<AccessorInfo ";
@@ -3415,7 +3436,7 @@ void Map::MapPrint(std::ostream& os) {
       os << "\n - transitions #" << nof_transitions << ": ";
       Tagged<HeapObject> heap_object;
       Tagged<Smi> smi;
-      if (raw_transitions()->ToSmi(&smi)) {
+      if (raw_transitions().ToSmi(&smi)) {
         os << Brief(smi);
       } else if (raw_transitions().GetHeapObject(&heap_object)) {
         os << Brief(heap_object);

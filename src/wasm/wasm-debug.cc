@@ -225,11 +225,13 @@ class DebugInfoImpl {
     // Recompile the function with Liftoff, setting the new breakpoints.
     // Not thread-safe. The caller is responsible for locking {mutex_}.
     CompilationEnv env = CompilationEnv::ForModule(native_module_);
-    auto* function = &env.module->functions[func_index];
+    const WasmFunction* function = &env.module->functions[func_index];
     base::Vector<const uint8_t> wire_bytes = native_module_->wire_bytes();
+    bool is_shared = env.module->types[function->sig_index].is_shared;
     FunctionBody body{function->sig, function->code.offset(),
                       wire_bytes.begin() + function->code.offset(),
-                      wire_bytes.begin() + function->code.end_offset()};
+                      wire_bytes.begin() + function->code.end_offset(),
+                      is_shared};
     std::unique_ptr<DebugSideTable> debug_sidetable;
 
     // Debug side tables for stepping are generated lazily.
@@ -882,7 +884,7 @@ void SetBreakOnEntryFlag(Tagged<Script> script, bool enabled) {
       script->wasm_weak_instance_list();
   i::Isolate* isolate = script->GetIsolate();
   for (int i = 0; i < weak_instance_list->length(); ++i) {
-    if (weak_instance_list->Get(i)->IsCleared()) continue;
+    if (weak_instance_list->Get(i).IsCleared()) continue;
     i::Tagged<i::WasmInstanceObject> instance =
         i::WasmInstanceObject::cast(weak_instance_list->Get(i).GetHeapObject());
     instance->trusted_data(isolate)->set_break_on_entry(enabled);

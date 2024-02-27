@@ -341,7 +341,11 @@ RUNTIME_FUNCTION(Runtime_WasmThrowTypeError) {
   DCHECK_EQ(2, args.length());
   MessageTemplate message_id = MessageTemplateFromInt(args.smi_value_at(0));
   Handle<Object> arg(args[1], isolate);
-  THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewTypeError(message_id, arg));
+  if (IsSmi(*arg)) {
+    THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewTypeError(message_id));
+  } else {
+    THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewTypeError(message_id, arg));
+  }
 }
 
 RUNTIME_FUNCTION(Runtime_WasmThrow) {
@@ -561,14 +565,14 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
 
   if (IsWasmInternalFunction(*origin)) {
     // The tierup for `WasmInternalFunction is special, as there is no instance.
-    size_t expected_arity = sig.parameter_count();
+    size_t expected_arity = sig.parameter_count() - ref->suspend();
     wasm::ImportCallKind kind = wasm::kDefaultImportCallKind;
     if (IsJSFunction(ref->callable())) {
       Tagged<SharedFunctionInfo> shared =
           JSFunction::cast(ref->callable())->shared();
       expected_arity =
           shared->internal_formal_parameter_count_without_receiver();
-      if (expected_arity != sig.parameter_count()) {
+      if (expected_arity != sig.parameter_count() - ref->suspend()) {
         kind = wasm::ImportCallKind::kJSFunctionArityMismatch;
       }
     }
@@ -597,10 +601,31 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
   }
   Handle<WasmTrustedInstanceData> trusted_data(
       instance_object->trusted_data(isolate), isolate);
-  // Get the function's canonical signature index. Note that the function's
-  // signature may not be present in the importing module.
-  uint32_t canonical_sig_index =
-      wasm::GetTypeCanonicalizer()->AddRecursiveGroup(&sig);
+
+  // Get the function's canonical signature index.
+  uint32_t canonical_sig_index = std::numeric_limits<uint32_t>::max();
+  const wasm::WasmModule* module = trusted_data->module();
+  if (WasmApiFunctionRef::CallOriginIsImportIndex(origin)) {
+    int func_index = WasmApiFunctionRef::CallOriginAsIndex(origin);
+    canonical_sig_index =
+        module->isorecursive_canonical_type_ids[module->functions[func_index]
+                                                    .sig_index];
+  } else {
+    // Indirect function table index.
+    int entry_index = WasmApiFunctionRef::CallOriginAsIndex(origin);
+    int table_count = trusted_data->dispatch_tables()->length();
+    // We have to find the table which contains the correct entry.
+    for (int table_index = 0; table_index < table_count; ++table_index) {
+      if (!trusted_data->has_dispatch_table(table_index)) continue;
+      Tagged<WasmDispatchTable> table =
+          trusted_data->dispatch_table(table_index);
+      if (entry_index < table->length() && table->ref(entry_index) == *ref) {
+        canonical_sig_index = table->sig(entry_index);
+        break;
+      }
+    }
+  }
+  DCHECK_NE(canonical_sig_index, std::numeric_limits<uint32_t>::max());
 
   // Compile a wrapper for the target callable.
   Handle<JSReceiver> callable(JSReceiver::cast(ref->callable()), isolate);
@@ -617,7 +642,8 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
   DCHECK_NE(wasm::ImportCallKind::kLinkError, kind);
   wasm::CompilationEnv env = wasm::CompilationEnv::ForModule(native_module);
   // {expected_arity} should only be used if kind != kJSFunctionArityMismatch.
-  int expected_arity = -1;
+  int expected_arity =
+      static_cast<int>(sig.parameter_count()) - resolved.suspend();
   if (kind == wasm::ImportCallKind ::kJSFunctionArityMismatch) {
     expected_arity = Handle<JSFunction>::cast(callable)
                          ->shared()
@@ -663,9 +689,10 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
     int table_count = trusted_data->dispatch_tables()->length();
     // We have to find the table which contains the correct entry.
     for (int table_index = 0; table_index < table_count; ++table_index) {
+      if (!trusted_data->has_dispatch_table(table_index)) continue;
       Tagged<WasmDispatchTable> table =
           trusted_data->dispatch_table(table_index);
-      if (table->ref(entry_index) == *ref) {
+      if (entry_index < table->length() && table->ref(entry_index) == *ref) {
         table->SetTarget(entry_index, wasm_code->instruction_start());
         // {ref} is used in at most one table.
         break;
@@ -690,7 +717,11 @@ RUNTIME_FUNCTION(Runtime_WasmTriggerTierUp) {
     int func_index = frame_finder.frame()->function_index();
     DCHECK_EQ(trusted_data, frame_finder.frame()->trusted_instance_data());
 
-    wasm::TriggerTierUp(trusted_data, func_index);
+    if (V8_UNLIKELY(v8_flags.wasm_sync_tier_up)) {
+      wasm::TierUpNowForTesting(isolate, trusted_data, func_index);
+    } else {
+      wasm::TriggerTierUp(trusted_data, func_index);
+    }
   }
 
   // We're reusing this interrupt mechanism to interrupt long-running loops.
@@ -984,7 +1015,7 @@ bool ExecuteWasmDebugBreaks(
     i::Tagged<i::WeakArrayList> weak_instance_list =
         script->wasm_weak_instance_list();
     for (int i = 0; i < weak_instance_list->length(); ++i) {
-      if (weak_instance_list->Get(i)->IsCleared()) continue;
+      if (weak_instance_list->Get(i).IsCleared()) continue;
       i::WasmInstanceObject::cast(weak_instance_list->Get(i).GetHeapObject())
           ->trusted_data(isolate)
           ->set_break_on_entry(false);

@@ -199,13 +199,18 @@
   'test-wasm-serialization/*': [SKIP],
   'test-streaming-compilation/SingleThreadedTestDeserializationBypassesCompilation': [SKIP],
   'test-streaming-compilation/SingleThreadedTestDeserializationFails': [SKIP],
+  'test-streaming-compilation/SingleThreadedTestIncrementalCaching': [SKIP],
   'test-streaming-compilation/AsyncTestDeserializationFails': [SKIP],
   'test-streaming-compilation/AsyncTestDeserializationBypassesCompilation': [SKIP],
+  'test-streaming-compilation/AsyncTestIncrementalCaching': [SKIP],
 
   # %ObserveNode tests rely on TurboFan.
   'test-calls-with-arraylike-or-spread/*': [SKIP],
   'test-js-to-wasm/*': [SKIP],
   'test-verify-type/*': [SKIP],
+
+  # Field representation tracking is disabled in nooptimization mode.
+  'test-field-type-tracking/*': [SKIP],
 }],  # variant == nooptimization
 
 ##############################################################################
@@ -1097,19 +1102,7 @@
   'test-run-wasm-simd/WasmTurbofan_I16x16GeS': [SKIP],
   'test-run-wasm-simd/WasmTurbofan_I16x16GtU': [SKIP],
   'test-run-wasm-simd/WasmTurbofan_I16x16Ne': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_F32x8Abs': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_F32x8Sqrt': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_F32x8SConvertI32x8': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_F32x8UConvertI32x8': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_F32x8Neg': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_I16x16Abs': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_F64x4Sqrt': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_I16x16Neg': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_I32x8Neg': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_I32x8UConvertF32x8': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_I32x8Abs': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_I8x32Neg': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_I8x32Abs': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_I16x16AddSatS': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_I16x16AddSatU': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_I16x16SubSatS': [SKIP],
@@ -1119,7 +1112,6 @@
   'test-run-wasm-simd/RunWasmTurbofan_I8x32SubSatS': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_I8x32SubSatU': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_S256Const': [SKIP],
-  'test-run-wasm-simd/RunWasmTurbofan_S256Not': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_S256And': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_S256Or': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_S256Xor': [SKIP],
@@ -1185,6 +1177,7 @@
   'test-verify-type/TestVerifyType': [FAIL],
   # Maglev doesn't support FastApi calls.
   'test-api/FastApiCalls': [FAIL],
+  'test-api/FastApiCallWithAllocationAndGC': [FAIL],
   'test-api/FastApiSequenceOverloads': [FAIL],
   # Maglev doesn't produce optimized enough code to match heap tests
   # expectations.

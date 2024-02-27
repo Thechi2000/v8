@@ -77,6 +77,8 @@ class ObjectPreProcessor final {
   }
   void PreProcessCode(Tagged<Code> o) {
     o->ClearInstructionStartForSerialization(isolate_);
+    DCHECK(!o->has_source_position_table_or_bytecode_offset_table());
+    DCHECK(!o->has_deoptimization_data_or_interpreter_data());
   }
 
   Isolate* const isolate_;
@@ -225,7 +227,7 @@ class EncodeRelocationsVisitor final : public ObjectVisitor {
 
  private:
   void ProcessSlot(MaybeObjectSlot slot) {
-    MaybeObject o = *slot;
+    Tagged<MaybeObject> o = *slot;
     if (!o.IsStrongOrWeak()) return;  // Smis don't need relocation.
     DCHECK(o.IsStrong());
 

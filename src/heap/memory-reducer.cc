@@ -78,9 +78,9 @@ void MemoryReducer::NotifyTimer(const Event& event) {
       heap()->isolate()->PrintWithTimestamp("Memory reducer: started GC #%d\n",
                                             state_.started_gcs());
     }
-    heap()->StartIncrementalMarking(GCFlag::kReduceMemoryFootprint,
-                                    GarbageCollectionReason::kMemoryReducer,
-                                    kGCCallbackFlagCollectAllExternalMemory);
+    heap()->TryStartIncrementalMarking(GCFlag::kReduceMemoryFootprint,
+                                       GarbageCollectionReason::kMemoryReducer,
+                                       kGCCallbackFlagCollectAllExternalMemory);
   } else if (state_.id() == kWait) {
     // Re-schedule the timer.
     ScheduleTimer(state_.next_gc_start_ms() - event.time_ms);
@@ -228,7 +228,6 @@ void MemoryReducer::TearDown() { state_ = State::CreateUninitialized(); }
 
 // static
 int MemoryReducer::MaxNumberOfGCs() {
-  if (v8_flags.memory_reducer_single_gc) return 1;
   DCHECK_GT(v8_flags.memory_reducer_gc_count, 0);
   return v8_flags.memory_reducer_gc_count;
 }

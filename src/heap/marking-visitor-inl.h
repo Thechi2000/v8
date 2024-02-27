@@ -209,27 +209,7 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitIndirectPointer(
 template <typename ConcreteVisitor>
 void MarkingVisitorBase<ConcreteVisitor>::VisitTrustedPointerTableEntry(
     Tagged<HeapObject> host, IndirectPointerSlot slot) {
-#ifdef V8_ENABLE_SANDBOX
-  DCHECK_NE(slot.tag(), kUnknownIndirectPointerTag);
-
-  IndirectPointerHandle handle = slot.Relaxed_LoadHandle();
-
-  // We must not see an uninitialized 'self' indirect pointer as we might
-  // otherwise fail to mark the table entry as alive.
-  DCHECK_NE(handle, kNullIndirectPointerHandle);
-
-  if (slot.tag() == kCodeIndirectPointerTag) {
-    CodePointerTable* table = GetProcessWideCodePointerTable();
-    CodePointerTable::Space* space = heap_->code_pointer_space();
-    table->Mark(space, handle);
-  } else {
-    TrustedPointerTable* table = trusted_pointer_table_;
-    TrustedPointerTable::Space* space = heap_->trusted_pointer_space();
-    table->Mark(space, handle);
-  }
-#else
-  UNREACHABLE();
-#endif
+  concrete_visitor()->MarkPointerTableEntry(host, slot);
 }
 
 // ===========================================================================
@@ -336,7 +316,7 @@ bool MarkingVisitorBase<ConcreteVisitor>::HasBytecodeArrayForFlushing(
     // If baseline code flushing isn't enabled and we have baseline data on SFI
     // we cannot flush baseline / bytecode.
     if (!IsBaselineCodeFlushingEnabled(code_flush_mode_)) return false;
-    data = baseline_code->bytecode_or_interpreter_data(heap_->isolate());
+    data = baseline_code->bytecode_or_interpreter_data();
   } else if (!IsByteCodeFlushingEnabled(code_flush_mode_)) {
     // If bytecode flushing isn't enabled and there is no baseline code there is
     // nothing to flush.
@@ -781,6 +761,32 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitTransitionArray(
   TransitionArray::BodyDescriptor::IterateBody(map, array, size, this);
   local_weak_objects_->transition_arrays_local.Push(array);
   return size;
+}
+
+template <typename ConcreteVisitor>
+void FullMarkingVisitorBase<ConcreteVisitor>::MarkPointerTableEntry(
+    Tagged<HeapObject> host, IndirectPointerSlot slot) {
+#ifdef V8_ENABLE_SANDBOX
+  DCHECK_NE(slot.tag(), kUnknownIndirectPointerTag);
+
+  IndirectPointerHandle handle = slot.Relaxed_LoadHandle();
+
+  // We must not see an uninitialized 'self' indirect pointer as we might
+  // otherwise fail to mark the table entry as alive.
+  DCHECK_NE(handle, kNullIndirectPointerHandle);
+
+  if (slot.tag() == kCodeIndirectPointerTag) {
+    CodePointerTable* table = GetProcessWideCodePointerTable();
+    CodePointerTable::Space* space = this->heap_->code_pointer_space();
+    table->Mark(space, handle);
+  } else {
+    TrustedPointerTable* table = this->trusted_pointer_table_;
+    TrustedPointerTable::Space* space = this->heap_->trusted_pointer_space();
+    table->Mark(space, handle);
+  }
+#else
+  UNREACHABLE();
+#endif
 }
 
 }  // namespace internal

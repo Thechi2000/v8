@@ -667,6 +667,9 @@ DEFINE_BOOL_READONLY(dict_property_const_tracking,
                      V8_DICT_PROPERTY_CONST_TRACKING_BOOL,
                      "Use const tracking on dictionary properties")
 
+DEFINE_BOOL(const_tracking_let, true,
+            "Use const tracking on top-level `let` variables")
+
 DEFINE_UINT(max_opt, 999,
             "Set the maximal optimisation tier: "
             "> 3 == any, 0 == ignition/interpreter, 1 == sparkplug/baseline, "
@@ -733,6 +736,25 @@ DEFINE_NEG_IMPLICATION(jitless, maglev)
 #endif  // V8_ENABLE_MAGLEV
 // Doesn't work without an executable code space.
 DEFINE_NEG_IMPLICATION(jitless, interpreted_frames_native_stack)
+
+DEFINE_BOOL(
+    disable_optimizing_compilers, false,
+    "Disable all optimizing compilers while leaving baseline compilers enabled")
+// Disable all optimizing JavaScript compilers.
+// JavaScript code can execute either in Ignition or Sparkplug.
+DEFINE_NEG_IMPLICATION(disable_optimizing_compilers, turbofan)
+DEFINE_NEG_IMPLICATION(disable_optimizing_compilers, turboshaft)
+DEFINE_NEG_IMPLICATION(disable_optimizing_compilers, maglev)
+#if V8_ENABLE_WEBASSEMBLY
+// Disable optimizing Wasm compilers. Wasm code must execute with Liftoff.
+DEFINE_IMPLICATION(disable_optimizing_compilers, liftoff)
+DEFINE_NEG_IMPLICATION(disable_optimizing_compilers, wasm_tier_up)
+DEFINE_NEG_IMPLICATION(disable_optimizing_compilers, wasm_dynamic_tiering)
+// Disable translation of asm.js to Wasm
+DEFINE_NEG_IMPLICATION(disable_optimizing_compilers, validate_asm)
+#endif  // V8_ENABLE_WEBASSEMBLY
+// Field type tracking is only used by TurboFan, so can be disabled.
+DEFINE_NEG_IMPLICATION(disable_optimizing_compilers, track_field_types)
 
 DEFINE_BOOL(memory_protection_keys, true,
             "protect code memory with PKU if available")
@@ -866,9 +888,17 @@ DEFINE_VALUE_IMPLICATION(jit_fuzzing, invocation_count_for_osr, 5)
 DEFINE_VALUE_IMPLICATION(jit_fuzzing, invocation_count_for_maglev_osr, 1)
 DEFINE_VALUE_IMPLICATION(jit_fuzzing, minimum_invocations_after_ic_update, 5)
 
+#if V8_ENABLE_WEBASSEMBLY
+// Wasm tiering thresholds.
+DEFINE_VALUE_IMPLICATION(jit_fuzzing, wasm_wrapper_tiering_budget, 1)
+DEFINE_VALUE_IMPLICATION(jit_fuzzing, wasm_tiering_budget, 1)
+DEFINE_IMPLICATION(jit_fuzzing, wasm_inlining_ignore_call_counts)
+#endif  // V8_ENABLE_WEBASSEMBLY
+
 // Flags for inline caching and feedback vectors.
 DEFINE_BOOL(use_ic, true, "use inline caching")
 DEFINE_BOOL(lazy_feedback_allocation, true, "Allocate feedback vectors lazily")
+DEFINE_BOOL(stress_ic, false, "exercise interesting paths in ICs more often")
 
 // Flags for Ignition.
 DEFINE_BOOL(ignition_elide_noneffectful_bytecodes, true,
@@ -1333,13 +1363,19 @@ DEFINE_BOOL(turboshaft_trace_typing, false,
             "print typing steps of turboshaft type inference")
 DEFINE_BOOL(turboshaft_trace_reduction, false,
             "trace individual Turboshaft reduction steps")
+DEFINE_BOOL(turboshaft_trace_intermediate_reductions, false,
+            "trace intermediate Turboshaft reduction steps")
 DEFINE_BOOL(turboshaft_trace_emitted, false,
             "trace emitted Turboshaft instructions")
+DEFINE_WEAK_IMPLICATION(turboshaft_trace_intermediate_reductions,
+                        turboshaft_trace_reduction)
 #else
 DEFINE_BOOL_READONLY(turboshaft_trace_reduction, false,
                      "trace individual Turboshaft reduction steps")
 DEFINE_BOOL_READONLY(turboshaft_trace_emitted, false,
                      "trace emitted Turboshaft instructions")
+DEFINE_BOOL_READONLY(turboshaft_trace_intermediate_reductions, false,
+                     "trace intermediate Turboshaft reduction steps")
 #endif  // DEBUG
 
 DEFINE_BOOL(profile_guided_optimization, false, "profile guided optimization")
@@ -1384,6 +1420,8 @@ DEFINE_BOOL(wasm_test_streaming, false,
             "use streaming compilation instead of async compilation for tests")
 DEFINE_BOOL(wasm_native_module_cache_enabled, true,
             "enable the native module cache")
+DEFINE_BOOL(turboshaft_wasm_wrappers, false,
+            "compile the wasm wrappers with Turboshaft (instead of TurboFan)")
 // The actual value used at runtime is clamped to kV8MaxWasmMemory{32,64}Pages.
 DEFINE_UINT(wasm_max_mem_pages, kMaxUInt32,
             "maximum number of 64KiB memory pages per wasm memory")
@@ -1399,6 +1437,8 @@ DEFINE_BOOL(wasm_tier_up, true,
 DEFINE_BOOL(wasm_dynamic_tiering, true,
             "enable dynamic tier up to the optimizing compiler")
 DEFINE_NEG_NEG_IMPLICATION(liftoff, wasm_dynamic_tiering)
+DEFINE_BOOL(wasm_sync_tier_up, false,
+            "run tier up jobs synchronously for testing")
 DEFINE_INT(wasm_tiering_budget, 13'000'000,
            "budget for dynamic tiering (rough approximation of bytes executed")
 DEFINE_INT(wasm_wrapper_tiering_budget, wasm::kGenericWrapperBudget,
@@ -1452,13 +1492,14 @@ DEFINE_BOOL(trace_wasm_memory, false,
 // {no_wasm_tier_up} to force some functions to be compiled with TurboFan or for
 // debug.
 DEFINE_INT(wasm_tier_mask_for_testing, 0,
-           "bitmask of functions to compile with TurboFan instead of Liftoff")
+           "bitmask of declared(!) function indices to compile with TurboFan "
+           "instead of Liftoff")
 DEFINE_INT(wasm_debug_mask_for_testing, 0,
-           "bitmask of functions to compile for debugging, only applies if the "
-           "tier is Liftoff")
-DEFINE_INT(
-    wasm_turboshaft_mask_for_testing, 0,
-    "bitmask of functions to compile with Turboshaft instead of TurboFan")
+           "bitmask of declared(!) function indices to compile for debugging, "
+           "only applies if the tier is Liftoff")
+DEFINE_INT(wasm_turboshaft_mask_for_testing, 0,
+           "bitmask of declared(!) function indices to compile with Turboshaft "
+           "instead of TurboFan")
 // TODO(clemensb): Introduce experimental_wasm_pgo to read from a custom section
 // instead of from a local file.
 DEFINE_BOOL(
@@ -1485,6 +1526,10 @@ DEFINE_BOOL(stress_validate_asm, false, "try to validate everything as asm.js")
 DEFINE_DEBUG_BOOL(dump_wasm_module, false, "dump wasm module bytes")
 DEFINE_STRING(dump_wasm_module_path, nullptr,
               "directory to dump wasm modules to")
+DEFINE_EXPERIMENTAL_FEATURE(
+    wasm_fast_api,
+    "Enable direct calls from wasm to fast API functions with bound "
+    "call function to pass the the receiver as first parameter")
 
 // Declare command-line flags for Wasm features. Warning: avoid using these
 // flags directly in the implementation. Instead accept wasm::WasmFeatures
@@ -1540,6 +1585,9 @@ DEFINE_SIZE_T(
 DEFINE_SIZE_T(wasm_inlining_min_budget, 50,
               "minimum graph size budget (in TF nodes) for which the "
               "wasm_inlinining_factor does not apply")
+DEFINE_BOOL(wasm_inlining_ignore_call_counts, false,
+            "Ignore call counts when considering inlining candidates. The flag "
+            "is supposed to be used for fuzzing")
 DEFINE_BOOL(trace_wasm_inlining, false, "trace wasm inlining")
 DEFINE_BOOL(trace_wasm_typer, false, "trace wasm typer")
 
@@ -1820,10 +1868,7 @@ DEFINE_BOOL(move_object_start, true, "enable moving of object starts")
 DEFINE_BOOL(memory_reducer, true, "use memory reducer")
 DEFINE_BOOL(memory_reducer_for_small_heaps, true,
             "use memory reducer for small heaps")
-DEFINE_BOOL(memory_reducer_single_gc, false,
-            "only schedule a single GC from memory reducer")
-DEFINE_WEAK_IMPLICATION(future, memory_reducer_single_gc)
-DEFINE_INT(memory_reducer_gc_count, 3,
+DEFINE_INT(memory_reducer_gc_count, 2,
            "Maximum number of memory reducer GCs scheduled")
 DEFINE_INT(heap_growing_percent, 0,
            "specifies heap growing factor as (1 + heap_growing_percent/100)")
@@ -1840,6 +1885,9 @@ DEFINE_BOOL(compact_with_stack, true,
 DEFINE_BOOL(
     compact_code_space_with_stack, true,
     "Perform code space compaction when finalizing a full GC with stack")
+// Disabling compaction with stack implies also disabling code space compaction
+// with stack.
+DEFINE_NEG_NEG_IMPLICATION(compact_with_stack, compact_code_space_with_stack)
 DEFINE_BOOL(shortcut_strings_with_stack, true,
             "Shortcut Strings during GC with stack")
 DEFINE_BOOL(stress_compaction, false,
@@ -1972,8 +2020,9 @@ DEFINE_BOOL(partial_constant_pool, true,
 DEFINE_STRING(sim_arm64_optional_features, "none",
               "enable optional features on the simulator for testing: none or "
               "all")
-DEFINE_BOOL(intel_jcc_erratum_mitigation, true,
+DEFINE_BOOL(intel_jcc_erratum_mitigation, false,
             "enable mitigation for Intel JCC erratum on affected CPUs")
+DEFINE_WEAK_IMPLICATION(future, intel_jcc_erratum_mitigation)
 
 #if defined(V8_TARGET_ARCH_RISCV32) || defined(V8_TARGET_ARCH_RISCV64)
 DEFINE_BOOL(riscv_trap_to_simulator_debugger, false,
@@ -2153,7 +2202,6 @@ DEFINE_BOOL(soft_abort, false,
             "exit cleanly on fatal errors and ignore DCHECK failures entirely. "
             "Useful when \"safe\" crashes should be ignored, for example for "
             "fuzzing the sandbox.")
-// TODO(saelo): introduce a --sandbox-fuzzing mode as well here
 DEFINE_IMPLICATION(hole_fuzzing, soft_abort)
 
 // disassembler
@@ -2315,6 +2363,8 @@ DEFINE_BOOL(adjust_os_scheduling_parameters, true,
             "adjust OS specific scheduling params for the isolate")
 DEFINE_BOOL(experimental_flush_embedded_blob_icache, true,
             "Used in an experiment to evaluate icache flushing on certain CPUs")
+DEFINE_BOOL(allow_allocation_in_fast_api_call, true,
+            "Allow allocations in fast API calls.")
 
 // Flags for short builtin calls feature
 #if V8_SHORT_BUILTIN_CALLS
@@ -2455,6 +2505,26 @@ DEFINE_BOOL(
     "silent exits. This is useful if we want to find memory corruption "
     "primitives with a leaked hole, where the engine is already in a weird "
     "state")
+
+//
+// Sandbox-related flags.
+//
+#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
+// Sandbox fuzzing mode requires the memory corruption API to be enabled at
+// compile-time.
+DEFINE_BOOL(sandbox_fuzzing, false,
+            "Enable sandbox fuzzing mode. This exposes the memory corruption "
+            "API and enables the sandbox crash filter.")
+#else
+DEFINE_BOOL_READONLY(sandbox_fuzzing, false,
+                     "Enable sandbox fuzzing mode. This exposes the memory "
+                     "corruption API and enables the sandbox crash filter.")
+#endif
+
+// Sandbox testing mode requires soft abort so that DCHECKs are skipped over
+// and other fatal errors lead to normal process termination as they do not
+// represent sandbox violations.
+DEFINE_IMPLICATION(sandbox_fuzzing, soft_abort)
 
 #if defined(V8_OS_AIX) && defined(COMPONENT_BUILD)
 // FreezeFlags relies on mprotect() method, which does not work by default on

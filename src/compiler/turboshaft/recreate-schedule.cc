@@ -176,7 +176,7 @@ void ScheduleBuilder::ProcessOperation(const Operation& op) {
   OpIndex index = input_graph.Index(op);
   DCHECK_LT(index.id(), nodes.size());
   nodes[index.id()] = node;
-  if (source_positions->IsEnabled() && node) {
+  if (source_positions && source_positions->IsEnabled() && node) {
     source_positions->SetSourcePosition(node,
                                         input_graph.source_positions()[index]);
   }
@@ -925,6 +925,7 @@ Node* ScheduleBuilder::ProcessOperation(const SelectOp& op) {
     case RegisterRepresentation::Enum::kTagged:
     case RegisterRepresentation::Enum::kCompressed:
     case RegisterRepresentation::Enum::kSimd128:
+    case RegisterRepresentation::Enum::kSimd256:
       UNREACHABLE();
   }
 
@@ -1233,7 +1234,7 @@ Node* ScheduleBuilder::ProcessOperation(const StackPointerGreaterThanOp& op) {
                  {GetNode(op.stack_limit())});
 }
 Node* ScheduleBuilder::ProcessOperation(const StackSlotOp& op) {
-  return AddNode(machine.StackSlot(op.size, op.alignment), {});
+  return AddNode(machine.StackSlot(op.size, op.alignment, op.is_tagged), {});
 }
 Node* ScheduleBuilder::ProcessOperation(const FrameConstantOp& op) {
   switch (op.kind) {
@@ -1814,6 +1815,23 @@ Node* ScheduleBuilder::ProcessOperation(const Simd128ShuffleOp& op) {
   return AddNode(machine.I8x16Shuffle(op.shuffle),
                  {GetNode(op.left()), GetNode(op.right())});
 }
+
+#if V8_ENABLE_WASM_SIMD256_REVEC
+Node* ScheduleBuilder::ProcessOperation(const Simd256Extract128LaneOp& op) {
+  const Operator* o = machine.ExtractF128(op.lane);
+  return AddNode(o, {GetNode(op.input())});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd256UnaryOp& op) {
+  switch (op.kind) {
+#define HANDLE_KIND(kind)             \
+  case Simd256UnaryOp::Kind::k##kind: \
+    return AddNode(machine.kind(), {GetNode(op.input())});
+    FOREACH_SIMD_256_UNARY_OPCODE(HANDLE_KIND);
+#undef HANDLE_KIND
+  }
+}
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 Node* ScheduleBuilder::ProcessOperation(const LoadStackPointerOp& op) {
   return AddNode(machine.LoadStackPointer(), {});

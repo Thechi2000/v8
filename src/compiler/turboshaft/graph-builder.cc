@@ -726,7 +726,7 @@ OpIndex GraphBuilder::Process(
 #define CHECK_OBJECT_IS_CASE(code, kind, input_assumptions, reason, feedback) \
   case IrOpcode::k##code: {                                                   \
     DCHECK(dominating_frame_state.valid());                                   \
-    V<Tagged> input = Map(node->InputAt(0));                                  \
+    V<Object> input = Map(node->InputAt(0));                                  \
     V<Word32> check =                                                         \
         __ ObjectIs(input, ObjectIsOp::Kind::k##kind,                         \
                     ObjectIsOp::InputAssumptions::k##input_assumptions);      \
@@ -1165,10 +1165,10 @@ OpIndex GraphBuilder::Process(
     case IrOpcode::kLoadParentFramePointer:
       return __ ParentFramePointer();
 
-    case IrOpcode::kStackSlot:
-      return __ StackSlot(StackSlotRepresentationOf(op).size(),
-                          StackSlotRepresentationOf(op).alignment());
-
+    case IrOpcode::kStackSlot: {
+      StackSlotRepresentation rep = StackSlotRepresentationOf(op);
+      return __ StackSlot(rep.size(), rep.alignment(), rep.is_tagged());
+    }
     case IrOpcode::kBranch:
       DCHECK_EQ(block->SuccessorCount(), 2);
       __ Branch(Map(node->InputAt(0)), Map(block->SuccessorAt(0)),
@@ -1405,7 +1405,7 @@ OpIndex GraphBuilder::Process(
 #ifdef V8_ENABLE_SANDBOX
       if (access.is_bounded_size_access) {
         value = __ ShiftLeft(value, kBoundedSizeShift,
-                             WordRepresentation::PointerSized());
+                             WordRepresentation::WordPtr());
       }
 #endif  // V8_ENABLE_SANDBOX
 
@@ -1474,7 +1474,7 @@ OpIndex GraphBuilder::Process(
       if (access.is_bounded_size_access) {
         DCHECK(!is_sandboxed_external);
         value = __ ShiftRightLogical(value, kBoundedSizeShift,
-                                     WordRepresentation::PointerSized());
+                                     WordRepresentation::WordPtr());
       }
 #endif  // V8_ENABLE_SANDBOX
       return value;
@@ -1786,7 +1786,7 @@ OpIndex GraphBuilder::Process(
       V<Word32> check = __ UintLessThan(index, limit, rep);
       if ((params.flags() & CheckBoundsFlag::kAbortOnOutOfBounds) != 0) {
         IF_NOT(LIKELY(check)) { __ Unreachable(); }
-        END_IF
+
       } else {
         DCHECK(dominating_frame_state.valid());
         __ DeoptimizeIfNot(check, dominating_frame_state,
@@ -1911,10 +1911,9 @@ OpIndex GraphBuilder::Process(
       V<Word32> result_state =
           __ template Projection<Word32>(fast_call_result, 0);
 
-      IF(LIKELY(__ Word32Equal(result_state, FastApiCallOp::kSuccessValue))) {
+      IF (LIKELY(__ Word32Equal(result_state, FastApiCallOp::kSuccessValue))) {
         GOTO(done, __ template Projection<Object>(fast_call_result, 1));
-      }
-      ELSE {
+      } ELSE {
         // We need to generate a fallback (both fast and slow call) in case:
         // 1) the generated code might fail, in case e.g. a Smi was passed where
         // a JSObject was expected and an error must be thrown or
@@ -1928,7 +1927,6 @@ OpIndex GraphBuilder::Process(
                                              CanThrow::kYes, __ graph_zone()));
         GOTO(done, slow_call_result);
       }
-      END_IF
 
       BIND(done, result);
       return result;
@@ -2038,7 +2036,7 @@ OpIndex GraphBuilder::Process(
       OpIndex offset = Map(node->InputAt(1));
       const AtomicLoadParameters& p = AtomicLoadParametersOf(node->op());
       DCHECK_EQ(__ output_graph().Get(base).outputs_rep()[0],
-                RegisterRepresentation::PointerSized());
+                RegisterRepresentation::WordPtr());
       LoadOp::Kind kind;
       switch (p.kind()) {
         case MemoryAccessKind::kNormal:
@@ -2065,7 +2063,7 @@ OpIndex GraphBuilder::Process(
       OpIndex value = Map(node->InputAt(2));
       const AtomicStoreParameters& p = AtomicStoreParametersOf(node->op());
       DCHECK_EQ(__ output_graph().Get(base).outputs_rep()[0],
-                RegisterRepresentation::PointerSized());
+                RegisterRepresentation::WordPtr());
       StoreOp::Kind kind;
       switch (p.kind()) {
         case MemoryAccessKind::kNormal:

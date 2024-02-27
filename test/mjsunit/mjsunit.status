@@ -596,12 +596,6 @@
 
   # Needs 64-bit number register support
   'compiler/fast-api-calls-64-bit-integer-values': [SKIP],
-
-  # Temporary disabling Turboshaft's from-Maglev graph building on IA32 until
-  # functions calls are handled (required as fallback for some Float64
-  # instructions)
-  # TODO(dmercadier): re-enable.
-  'turboshaft/turboshaft-maglev-frontend': [SKIP],
 }],  # 'arch in (ia32, arm, riscv32)'
 
 ##############################################################################
@@ -746,6 +740,9 @@
 
 ##############################################################################
 ['tsan == True', {
+
+  # TODO(ahaas): Flaky.
+  'wasm/fast-api-calls-with-wellknown-imports': [SKIP],
 
   # https://bugs.chromium.org/p/v8/issues/detail?id=7102
   # Flaky due to huge string allocation.
@@ -1431,17 +1428,30 @@
   'regress/regress-crbug-319860': [SKIP],
 
   # Other slow tests:
+  'compiler/regress-crbug-1520697': [SKIP],
   'regress/regress-1449567': [SKIP],
+  'regress/regress-708247': [SKIP],
 }],  # variant in (nooptimization, jitless) and (arch == arm or arch == arm64) and simulator_run
 
 ##############################################################################
 ['variant == nooptimization', {
+  # nooptimization disables asm.js -> wasm translation, so disable these tests.
+  'regress/asm/*': [SKIP],
+  'asm/*': [SKIP],
+
   # Tests that depend on optimization (beyond doing assertOptimized).
   'regress/regress-1049982-1': [SKIP],
   'regress/regress-1049982-2': [SKIP],
+
   # Wasm serialization relies on TurboFan to be available, hence does not work
   # in the 'nooptimization' variant.
+  'wasm/serialization-with-compilation-hints': [SKIP],
   'regress/wasm/regress-7785': [SKIP],
+
+  # Tests that require wasm tier up.
+  'wasm/wasm-dynamic-tiering': [SKIP],
+  'wasm/speculative-inlining': [SKIP],
+  'regress/wasm/regress-1179065': [SKIP],
 }],  # variant == nooptimization
 
 ##############################################################################
@@ -1661,9 +1671,12 @@
 ##############################################################################
 ['no_simd_hardware == True', {
   'wasm/exceptions-simd': [SKIP],
+  'wasm/generate-random-module': [SKIP],
+  'wasm/js-to-js': [SKIP],
   'wasm/large-struct': [SKIP],
   'wasm/liftoff-simd-params': [SKIP],
   'wasm/multi-value-simd': [SKIP],
+  'wasm/js-to-wasm-invalid-sig': [SKIP],
   'wasm/simd-*': [SKIP],
   'wasm/turboshaft/array-new-unreachable': [SKIP],
   'regress/wasm/regress-9447': [SKIP],
@@ -1702,6 +1715,9 @@
   'regress/wasm/regress-1487077': [SKIP],
   'regress/wasm/regress-1500812': [SKIP],
   'regress/wasm/regress-323694592': [SKIP],
+  'regress/wasm/regress-325756545': [SKIP],
+  'regress/wasm/regress-326156493': [SKIP],
+  'regress/wasm/regress-326894018': [SKIP],
   'regress/wasm/regress-crbug-1338980': [SKIP],
   'regress/wasm/regress-crbug-1355070': [SKIP],
   'regress/wasm/regress-crbug-1356718': [SKIP],
@@ -1734,7 +1750,9 @@
   # Flaky under this variant, skipping per https://crbug.com/v8/12267#c4
   'compiler/inlined-call-polymorphic': [SKIP],
   # Flaky under this variant, skipping per https://crbug.com/v8/14560#c2
-  'turboshaft/turboshaft-frontend-test': [SKIP]
+  'turboshaft/turboshaft-frontend-test': [SKIP],
+  # Flaky under this variant, skipping per https://crbug.com/v8/14630#c3
+  'turboshaft/turboshaft-maglev-frontend': [SKIP]
 }],  # variant == stress_concurrent_inlining
 
 ##############################################################################
@@ -1945,7 +1963,8 @@
   'compiler/regress-1125145': [SKIP],
   'compiler/regress-crbug-1399627': [SKIP],
   'json2': [SKIP],
-  'es6/typedarray-of': [PASS, SLOW],
+  'es6/typedarray-of': [SKIP],
+  'compiler/osr-block-scope': [SKIP],
 
   # TODO(victorgomes):
   'es6/unicode-regexp-ignore-case-noi18n': [SKIP],

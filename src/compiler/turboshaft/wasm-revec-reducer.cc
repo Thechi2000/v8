@@ -122,6 +122,14 @@ bool LoadStrideEqualTo(const Graph& graph, const NodeGroup& node_group,
   return load_infos[1] - load_infos[0] == stride;
 }
 
+// Returns true if all of the nodes in node_group are identical.
+// Splat opcode in WASM SIMD is used to create vector with identical lanes.
+template <typename T>
+bool IsSplat(const T& node_group) {
+  DCHECK_EQ(node_group.size(), 2);
+  return node_group[1] == node_group[0];
+}
+
 void PackNode::Print(Graph* graph) const {
   Operation& op = graph->Get(nodes_[0]);
   TRACE("%s(#%d, #%d)\n", GetSimdOpcodeName(op).c_str(), nodes_[0].id(),
@@ -136,20 +144,12 @@ PackNode* SLPTree::GetPackNode(OpIndex node) {
   return nullptr;
 }
 
-void SLPTree::Print(const char* info) {
-  TRACE("%s, %zu Packed node:\n", info, node_to_packnode_.size());
-  if (!v8_flags.trace_wasm_revectorize) {
-    return;
-  }
-
-  ForEach([this](PackNode const* pnode) { pnode->Print(&graph_); });
-}
-
 template <typename FunctionType>
-void SLPTree::ForEach(FunctionType callback) {
+void ForEach(FunctionType callback,
+             ZoneUnorderedMap<OpIndex, PackNode*>& node_map) {
   std::unordered_set<PackNode const*> visited;
 
-  for (auto& entry : node_to_packnode_) {
+  for (auto& entry : node_map) {
     PackNode const* pnode = entry.second;
     if (!pnode || visited.find(pnode) != visited.end()) {
       continue;
@@ -158,6 +158,16 @@ void SLPTree::ForEach(FunctionType callback) {
 
     callback(pnode);
   }
+}
+
+void SLPTree::Print(const char* info) {
+  TRACE("%s, %zu Packed node:\n", info, node_to_packnode_.size());
+  if (!v8_flags.trace_wasm_revectorize) {
+    return;
+  }
+
+  ForEach([this](PackNode const* pnode) { pnode->Print(&graph_); },
+          node_to_packnode_);
 }
 
 PackNode* SLPTree::NewPackNode(const NodeGroup& node_group) {
@@ -226,6 +236,21 @@ bool SLPTree::IsSideEffectFree(OpIndex first, OpIndex second) {
   return true;
 }
 
+// Returns true if op in node_group have same kind.
+bool IsSameOpAndKind(const Operation& op0, const Operation& op1) {
+#define CASE(operation)                                           \
+  case Opcode::k##operation: {                                    \
+    using Op = opcode_to_operation_map<Opcode::k##operation>::Op; \
+    return op0.Cast<Op>().kind == op1.Cast<Op>().kind;            \
+  }
+  switch (op0.opcode) {
+    CASE(Simd128Unary)
+    default:
+      return true;
+  }
+#undef CASE
+}
+
 bool SLPTree::CanBePacked(const NodeGroup& node_group) {
   OpIndex node0 = node_group[0];
   OpIndex node1 = node_group[1];
@@ -246,6 +271,12 @@ bool SLPTree::CanBePacked(const NodeGroup& node_group) {
   // mapping now, if node A is already packed with B into PackNode (A,B), can't
   // pack it with C into PackNode (A,C) anymore.
   if (GetPackNode(node0) != GetPackNode(node1)) {
+    return false;
+  }
+
+  if (!IsSameOpAndKind(op0, op1)) {
+    TRACE("(%s, %s) have different op\n", GetSimdOpcodeName(op0).c_str(),
+          GetSimdOpcodeName(op1).c_str());
     return false;
   }
 
@@ -297,6 +328,8 @@ PackNode* SLPTree::BuildTreeRec(const NodeGroup& node_group,
     }
   }
 
+  int value_in_count = op0.input_count;
+
   switch (op0.opcode) {
     case Opcode::kLoad: {
       TRACE("Load leaf node\n");
@@ -319,6 +352,23 @@ PackNode* SLPTree::BuildTreeRec(const NodeGroup& node_group,
       // input: base, value, [index]
       PackNode* pnode = NewPackNodeAndRecurs(node_group, 1, 1, recursion_depth);
       return pnode;
+    }
+    case Opcode::kSimd128Unary: {
+#define UNARY_CASE(op_128, not_used) case Simd128UnaryOp::Kind::k##op_128:
+      switch (op0.Cast<Simd128UnaryOp>().kind) {
+        SIMD256_UNARY_OP(UNARY_CASE) {
+          TRACE("Added a vector of Unary\n");
+          PackNode* pnode = NewPackNodeAndRecurs(node_group, 0, value_in_count,
+                                                 recursion_depth);
+          return pnode;
+        }
+        default: {
+          TRACE("Unsupported Simd128Unary: %s\n",
+                GetSimdOpcodeName(op0).c_str());
+          return nullptr;
+        }
+      }
+#undef UNARY_CASE
     }
 
     default:
@@ -418,6 +468,51 @@ void WasmRevecAnalyzer::Run() {
       revectorizable_node_.merge(slp_tree_->GetNodeMapping());
     }
   }
+
+  // Early exist when no revectorizable node found.
+  if (revectorizable_node_.empty()) return;
+
+  // Build SIMD usemap
+  use_map_ = phase_zone_->New<SimdUseMap>(graph_, phase_zone_);
+  if (!DecideVectorize()) {
+    revectorizable_node_.clear();
+  } else {
+    should_reduce_ = true;
+    TRACE("Decide to revectorize!\n");
+  }
+}
+
+bool WasmRevecAnalyzer::DecideVectorize() {
+  TRACE("Enter %s\n", __func__);
+  int save = 0, cost = 0;
+  ForEach(
+      [&](PackNode const* pnode) {
+        const NodeGroup& nodes = pnode->Nodes();
+        // Splat nodes will not cause a saving as it simply extends itself.
+        if (!IsSplat(nodes)) {
+          save++;
+        }
+
+        for (int i = 0; i < static_cast<int>(nodes.size()); i++) {
+          if (i > 0 && nodes[i] == nodes[0]) continue;
+
+          for (auto use : use_map_->uses(nodes[i])) {
+            if (!GetPackNode(use)) {
+              TRACE("External use edge: (%d:%s) -> (%d:%s)\n", use.id(),
+                    OpcodeName(graph_.Get(use).opcode), nodes[i].id(),
+                    OpcodeName(graph_.Get(nodes[i]).opcode));
+              cost++;
+
+              // We only need one Extract node and all other uses can share.
+              break;
+            }
+          }
+        }
+      },
+      revectorizable_node_);
+
+  TRACE("Save: %d, cost: %d\n", save, cost);
+  return save > cost;
 }
 
 }  // namespace v8::internal::compiler::turboshaft

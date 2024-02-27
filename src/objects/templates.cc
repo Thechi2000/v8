@@ -252,10 +252,12 @@ Handle<JSObject> DictionaryTemplateInfo::NewInstance(
       for (int i = 0; i < static_cast<int>(property_values.size()); ++i) {
         Handle<Object> value =
             Utils::OpenHandle(*property_values[i].ToLocalChecked());
-        const auto details =
-            descriptors->GetDetails(InternalIndex{static_cast<size_t>(i)});
+        InternalIndex descriptor{static_cast<size_t>(i)};
+        const auto details = descriptors->GetDetails(descriptor);
 
-        if (!Object::FitsRepresentation(*value, details.representation())) {
+        if (!Object::FitsRepresentation(*value, details.representation()) ||
+            !FieldType::NowContains(descriptors->GetFieldType(descriptor),
+                                    value)) {
           can_use_cached_map = false;
           break;
         }
@@ -276,8 +278,7 @@ Handle<JSObject> DictionaryTemplateInfo::NewInstance(
           cached_map =
               Map::Copy(isolate, cached_map, "dictionary in new context");
           Map::SetPrototype(isolate, cached_map, prototype);
-          self->set_fully_populated_map(
-              MaybeObject::MakeWeak(MaybeObject::FromObject(*cached_map)));
+          self->set_fully_populated_map(MakeWeak(*cached_map));
         }
         auto object = isolate->factory()->NewJSObjectFromMap(
             cached_map, AllocationType::kYoung);
@@ -296,7 +297,7 @@ Handle<JSObject> DictionaryTemplateInfo::NewInstance(
     // A cached map was either deprecated or the descriptors changed in
     // incompatible ways. We clear the cached map and continue with the generic
     // path.
-    self->set_fully_populated_map(HeapObjectReference::ClearedValue(isolate));
+    self->set_fully_populated_map(ClearedValue(isolate));
   }
 
   // General case: We either don't have a cached map, or it is unusuable for the
@@ -329,8 +330,7 @@ Handle<JSObject> DictionaryTemplateInfo::NewInstance(
     current_property_index++;
   }
   if (can_use_map_cache) {
-    self->set_fully_populated_map(
-        MaybeObject::MakeWeak(MaybeObject::FromObject(object->map())));
+    self->set_fully_populated_map(MakeWeak(object->map()));
   }
   return object;
 }

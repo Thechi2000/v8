@@ -1067,8 +1067,13 @@ class MaglevGraphBuilder {
                                 ValueNode* value);
   void BuildLoadContextSlot(ValueNode* context, size_t depth, int slot_index,
                             ContextSlotMutability slot_mutability);
+  void BuildStoreContextSlotHelper(ValueNode* context, size_t depth,
+                                   int slot_index, ValueNode* value,
+                                   bool update_side_data);
   void BuildStoreContextSlot(ValueNode* context, size_t depth, int slot_index,
                              ValueNode* value);
+  void BuildStoreScriptContextSlot(ValueNode* context, size_t depth,
+                                   int slot_index, ValueNode* value);
 
   void BuildStoreReceiverMap(ValueNode* receiver, compiler::MapRef map);
 
@@ -1579,6 +1584,22 @@ class MaglevGraphBuilder {
         std::is_same_v<NodeT, StoreFixedArrayElementNoWriteBarrier> ||
         std::is_same_v<NodeT, StoreFixedDoubleArrayElement>;
 
+    static constexpr bool is_elements_array_write =
+        std::is_same_v<NodeT, MaybeGrowAndEnsureWritableFastElements> ||
+        std::is_same_v<NodeT, EnsureWritableFastElements>;
+
+    if constexpr (is_elements_array_write) {
+      // Clear Elements cache.
+      auto elements_properties = known_node_aspects().loaded_properties.find(
+          KnownNodeAspects::LoadedPropertyMapKey::Elements());
+      if (elements_properties != known_node_aspects().loaded_properties.end()) {
+        elements_properties->second.clear();
+        if (v8_flags.trace_maglev_graph_building) {
+          std::cout << "  * Removing non-constant cached [Elements]";
+        }
+      }
+    }
+
     // Don't change known node aspects for:
     //
     //   * Simple field stores -- the only relevant side effect on these is
@@ -1588,7 +1609,7 @@ class MaglevGraphBuilder {
     //   * CheckMapsWithMigration -- this only migrates representations of
     //     values, not the values themselves, so cached values are still valid.
     static constexpr bool should_clear_unstable_node_aspects =
-        !is_simple_field_store &&
+        !is_simple_field_store && !is_elements_array_write &&
         !std::is_same_v<NodeT, CheckMapsWithMigration>;
 
     // Simple field stores can't possibly change or migrate the map.
@@ -1923,17 +1944,24 @@ class MaglevGraphBuilder {
       ValueNode* object, const ZoneVector<compiler::MapRef>& transition_sources,
       compiler::MapRef transition_target);
   ReduceResult BuildCompareMaps(
-      ValueNode* object, base::Vector<const compiler::MapRef> maps,
+      ValueNode* heap_object, base::Optional<ValueNode*> object_map,
+      base::Vector<const compiler::MapRef> maps,
       MaglevSubGraphBuilder* sub_graph,
       base::Optional<MaglevSubGraphBuilder::Label>& if_not_matched);
   ReduceResult BuildTransitionElementsKindAndCompareMaps(
-      ValueNode* object, const ZoneVector<compiler::MapRef>& transition_sources,
+      ValueNode* heap_object,
+      const ZoneVector<compiler::MapRef>& transition_sources,
       compiler::MapRef transition_target, MaglevSubGraphBuilder* sub_graph,
       base::Optional<MaglevSubGraphBuilder::Label>& if_not_matched);
   // Emits an unconditional deopt and returns false if the node is a constant
   // that doesn't match the ref.
   ReduceResult BuildCheckValue(ValueNode* node, compiler::ObjectRef ref);
   ReduceResult BuildCheckValue(ValueNode* node, compiler::HeapObjectRef ref);
+
+  // Checks whether we're invalidating the constness of a const tracking let
+  // variable, and if yes, deopts.
+  void BuildCheckConstTrackingLetCell(ValueNode* context, ValueNode* value,
+                                      int index);
 
   bool CanElideWriteBarrier(ValueNode* object, ValueNode* value);
   void BuildStoreTaggedField(ValueNode* object, ValueNode* value, int offset);
@@ -1983,6 +2011,7 @@ class MaglevGraphBuilder {
       ValueNode* value);
 
   ValueNode* BuildLoadJSArrayLength(ValueNode* js_array);
+  ValueNode* BuildLoadElements(ValueNode* object);
 
   ReduceResult TryBuildPropertyLoad(
       ValueNode* receiver, ValueNode* lookup_start_object,

@@ -451,6 +451,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       DirectHandle<Name> name, PropertyDetails details,
       DirectHandle<Object> value,
       AllocationType allocation = AllocationType::kOld);
+  Handle<ConstTrackingLetCell> NewConstTrackingLetCell(
+      AllocationType allocation = AllocationType::kOld);
   Handle<PropertyCell> NewProtector();
 
   Handle<FeedbackCell> NewNoClosuresCell(DirectHandle<HeapObject> value);
@@ -707,6 +709,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       DirectHandle<PodArray<wasm::ValueType>> serialized_sig);
   Handle<WasmApiFunctionRef> NewWasmApiFunctionRef(
       DirectHandle<WasmApiFunctionRef> ref);
+
+  Handle<WasmFastApiCallData> NewWasmFastApiCallData(
+      DirectHandle<HeapObject> signature);
+
   // {opt_call_target} is kNullAddress for JavaScript functions, and
   // non-null for exported Wasm functions.
   Handle<WasmJSFunctionData> NewWasmJSFunctionData(
@@ -989,6 +995,12 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   Handle<JSAtomicsCondition> NewJSAtomicsCondition();
 
+  Handle<FunctionTemplateInfo> NewFunctionTemplateInfo(int length,
+                                                       bool do_not_cache);
+
+  Handle<ObjectTemplateInfo> NewObjectTemplateInfo(
+      DirectHandle<FunctionTemplateInfo> constructor, bool do_not_cache);
+
   Handle<DictionaryTemplateInfo> NewDictionaryTemplateInfo(
       Handle<FixedArray> property_names);
 
@@ -1075,17 +1087,19 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       return *this;
     }
 
-    CodeBuilder& set_source_position_table(Handle<ByteArray> table) {
+    CodeBuilder& set_source_position_table(Handle<TrustedByteArray> table) {
       DCHECK_NE(kind_, CodeKind::BASELINE);
       DCHECK(!table.is_null());
-      position_table_ = table;
+      source_position_table_ = table;
       return *this;
     }
 
-    CodeBuilder& set_bytecode_offset_table(Handle<ByteArray> table) {
+    inline CodeBuilder& set_empty_source_position_table();
+
+    CodeBuilder& set_bytecode_offset_table(Handle<TrustedByteArray> table) {
       DCHECK_EQ(kind_, CodeKind::BASELINE);
       DCHECK(!table.is_null());
-      position_table_ = table;
+      bytecode_offset_table_ = table;
       return *this;
     }
 
@@ -1098,7 +1112,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     }
 
     inline CodeBuilder& set_interpreter_data(
-        Handle<HeapObject> interpreter_data);
+        Handle<TrustedObject> interpreter_data);
 
     CodeBuilder& set_is_turbofanned() {
       DCHECK(!CodeKindIsUnoptimizedJSFunction(kind_));
@@ -1135,11 +1149,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     Builtin builtin_ = Builtin::kNoBuiltinId;
     uint32_t inlined_bytecode_size_ = 0;
     BytecodeOffset osr_offset_ = BytecodeOffset::None();
-    // Either source_position_table for non-baseline code or
-    // bytecode_offset_table for baseline code.
-    Handle<ByteArray> position_table_;
+    MaybeHandle<TrustedByteArray> bytecode_offset_table_;
+    MaybeHandle<TrustedByteArray> source_position_table_;
     MaybeHandle<DeoptimizationData> deoptimization_data_;
-    MaybeHandle<HeapObject> interpreter_data_;
+    MaybeHandle<TrustedObject> interpreter_data_;
     BasicBlockProfilerData* profiler_data_ = nullptr;
     bool is_turbofanned_ = false;
     int stack_slots_ = 0;

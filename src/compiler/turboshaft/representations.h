@@ -29,6 +29,7 @@ class MaybeRegisterRepresentation {
     kTagged,
     kCompressed,
     kSimd128,
+    kSimd256,
     kNone,  // No register representation.
   };
 
@@ -52,6 +53,15 @@ class MaybeRegisterRepresentation {
     return MaybeRegisterRepresentation(Enum::kWord64);
   }
 
+  static constexpr MaybeRegisterRepresentation WordPtr() {
+    if constexpr (kSystemPointerSize == 4) {
+      return Word32();
+    } else {
+      DCHECK_EQ(kSystemPointerSize, 8);
+      return Word64();
+    }
+  }
+
   static constexpr MaybeRegisterRepresentation Float32() {
     return MaybeRegisterRepresentation(Enum::kFloat32);
   }
@@ -72,17 +82,12 @@ class MaybeRegisterRepresentation {
     return MaybeRegisterRepresentation(Enum::kSimd128);
   }
 
-  static constexpr MaybeRegisterRepresentation None() {
-    return MaybeRegisterRepresentation(Enum::kNone);
+  static constexpr MaybeRegisterRepresentation Simd256() {
+    return MaybeRegisterRepresentation(Enum::kSimd256);
   }
 
-  static constexpr MaybeRegisterRepresentation PointerSized() {
-    if constexpr (kSystemPointerSize == 4) {
-      return Word32();
-    } else {
-      DCHECK_EQ(kSystemPointerSize, 8);
-      return Word64();
-    }
+  static constexpr MaybeRegisterRepresentation None() {
+    return MaybeRegisterRepresentation(Enum::kNone);
   }
 
   constexpr bool IsWord() const {
@@ -95,6 +100,7 @@ class MaybeRegisterRepresentation {
       case Enum::kTagged:
       case Enum::kCompressed:
       case Enum::kSimd128:
+      case Enum::kSimd256:
       case Enum::kNone:
         return false;
     }
@@ -110,6 +116,7 @@ class MaybeRegisterRepresentation {
       case Enum::kTagged:
       case Enum::kCompressed:
       case Enum::kSimd128:
+      case Enum::kSimd256:
       case Enum::kNone:
         return false;
     }
@@ -125,6 +132,7 @@ class MaybeRegisterRepresentation {
       case Enum::kFloat32:
       case Enum::kFloat64:
       case Enum::kSimd128:
+      case Enum::kSimd256:
       case Enum::kNone:
         return false;
     }
@@ -141,6 +149,7 @@ class MaybeRegisterRepresentation {
       case Enum::kTagged:
       case Enum::kCompressed:
       case Enum::kSimd128:
+      case Enum::kSimd256:
       case Enum::kNone:
         UNREACHABLE();
     }
@@ -162,6 +171,8 @@ class MaybeRegisterRepresentation {
         return MachineRepresentation::kCompressed;
       case Simd128():
         return MachineRepresentation::kSimd128;
+      case Simd256():
+        return MachineRepresentation::kSimd256;
       case None():
         UNREACHABLE();
     }
@@ -183,6 +194,8 @@ class MaybeRegisterRepresentation {
         return kSystemPointerSize;
       case Simd128():
         return 128;
+      case Simd256():
+        return 256;
       case None():
         UNREACHABLE();
     }
@@ -205,6 +218,7 @@ class RegisterRepresentation : public MaybeRegisterRepresentation {
     kCompressed =
         static_cast<int>(MaybeRegisterRepresentation::Enum::kCompressed),
     kSimd128 = static_cast<int>(MaybeRegisterRepresentation::Enum::kSimd128),
+    kSimd256 = static_cast<int>(MaybeRegisterRepresentation::Enum::kSimd256),
   };
 
   explicit constexpr RegisterRepresentation(Enum value)
@@ -227,12 +241,10 @@ class RegisterRepresentation : public MaybeRegisterRepresentation {
   static constexpr RegisterRepresentation Word64() {
     return RegisterRepresentation(Enum::kWord64);
   }
+  // The equivalent of intptr_t/uintptr_t: An integral type with the same size
+  // as machine pointers.
   static constexpr RegisterRepresentation WordPtr() {
-    if constexpr (Is64()) {
-      return Word64();
-    } else {
-      return Word32();
-    }
+    return RegisterRepresentation(MaybeRegisterRepresentation::WordPtr());
   }
   static constexpr RegisterRepresentation Float32() {
     return RegisterRepresentation(Enum::kFloat32);
@@ -250,13 +262,11 @@ class RegisterRepresentation : public MaybeRegisterRepresentation {
   static constexpr RegisterRepresentation Compressed() {
     return RegisterRepresentation(Enum::kCompressed);
   }
-  // The equivalent of intptr_t/uintptr_t: An integral type with the same size
-  // as machine pointers.
-  static constexpr RegisterRepresentation PointerSized() {
-    return RegisterRepresentation(MaybeRegisterRepresentation::PointerSized());
-  }
   static constexpr RegisterRepresentation Simd128() {
     return RegisterRepresentation(Enum::kSimd128);
+  }
+  static constexpr RegisterRepresentation Simd256() {
+    return RegisterRepresentation(Enum::kSimd256);
   }
 
   static RegisterRepresentation FromMachineRepresentation(
@@ -282,11 +292,12 @@ class RegisterRepresentation : public MaybeRegisterRepresentation {
         return Float64();
       case MachineRepresentation::kSimd128:
         return Simd128();
+      case MachineRepresentation::kSimd256:
+        return Simd256();
       case MachineRepresentation::kMapWord:
       case MachineRepresentation::kIndirectPointer:
       case MachineRepresentation::kSandboxedPointer:
       case MachineRepresentation::kNone:
-      case MachineRepresentation::kSimd256:
         UNREACHABLE();
     }
   }
@@ -297,7 +308,7 @@ class RegisterRepresentation : public MaybeRegisterRepresentation {
   constexpr RegisterRepresentation MapTaggedToWord() const {
     if (this->value() == RegisterRepresentation::Tagged()) {
       return COMPRESS_POINTERS_BOOL ? RegisterRepresentation::Word32()
-                                    : RegisterRepresentation::PointerSized();
+                                    : RegisterRepresentation::WordPtr();
     }
     return *this;
   }
@@ -347,14 +358,14 @@ constexpr bool RegisterRepresentation::AllowImplicitRepresentationChangeTo(
     case RegisterRepresentation::Tagged():
       // We allow implicit untagged -> tagged conversions. This is only safe for
       // Smi values.
-      if (*this == RegisterRepresentation::PointerSized()) {
+      if (*this == RegisterRepresentation::WordPtr()) {
         return true;
       }
       break;
     case RegisterRepresentation::Compressed():
       // Compression is a no-op.
       if (*this == any_of(RegisterRepresentation::Tagged(),
-                          RegisterRepresentation::PointerSized(),
+                          RegisterRepresentation::WordPtr(),
                           RegisterRepresentation::Word32())) {
         return true;
       }
@@ -401,8 +412,8 @@ class WordRepresentation : public RegisterRepresentation {
     return WordRepresentation(Enum::kWord64);
   }
 
-  static constexpr WordRepresentation PointerSized() {
-    return WordRepresentation(RegisterRepresentation::PointerSized());
+  static constexpr WordRepresentation WordPtr() {
+    return WordRepresentation(RegisterRepresentation::WordPtr());
   }
 
   constexpr Enum value() const {
@@ -484,6 +495,7 @@ class MemoryRepresentation {
     kIndirectPointer,
     kSandboxedPointer,
     kSimd128,
+    kSimd256
   };
 
   explicit constexpr MemoryRepresentation(Enum value) : value_(value) {}
@@ -521,6 +533,13 @@ class MemoryRepresentation {
   static constexpr MemoryRepresentation Uint64() {
     return MemoryRepresentation(Enum::kUint64);
   }
+  static constexpr MemoryRepresentation UintPtr() {
+    if constexpr (Is64()) {
+      return Uint64();
+    } else {
+      return Uint32();
+    }
+  }
   static constexpr MemoryRepresentation Float32() {
     return MemoryRepresentation(Enum::kFloat32);
   }
@@ -542,16 +561,11 @@ class MemoryRepresentation {
   static constexpr MemoryRepresentation SandboxedPointer() {
     return MemoryRepresentation(Enum::kSandboxedPointer);
   }
-  static constexpr MemoryRepresentation PointerSized() {
-    if constexpr (kSystemPointerSize == 4) {
-      return Uint32();
-    } else {
-      DCHECK_EQ(kSystemPointerSize, 8);
-      return Uint64();
-    }
-  }
   static constexpr MemoryRepresentation Simd128() {
     return MemoryRepresentation(Enum::kSimd128);
+  }
+  static constexpr MemoryRepresentation Simd256() {
+    return MemoryRepresentation(Enum::kSimd256);
   }
 
   bool IsWord() const {
@@ -573,6 +587,7 @@ class MemoryRepresentation {
       case IndirectPointer():
       case SandboxedPointer():
       case Simd128():
+      case Simd256():
         return false;
     }
   }
@@ -597,6 +612,7 @@ class MemoryRepresentation {
       case IndirectPointer():
       case SandboxedPointer():
       case Simd128():
+      case Simd256():
         UNREACHABLE();
     }
   }
@@ -620,6 +636,7 @@ class MemoryRepresentation {
       case IndirectPointer():
       case SandboxedPointer():
       case Simd128():
+      case Simd256():
         return false;
     }
   }
@@ -643,6 +660,7 @@ class MemoryRepresentation {
       case IndirectPointer():
       case SandboxedPointer():
       case Simd128():
+      case Simd256():
         return false;
     }
   }
@@ -673,6 +691,8 @@ class MemoryRepresentation {
         return RegisterRepresentation::Word64();
       case Simd128():
         return RegisterRepresentation::Simd128();
+      case Simd256():
+        return RegisterRepresentation::Simd256();
     }
   }
 
@@ -691,6 +711,8 @@ class MemoryRepresentation {
         return AnyTagged();
       case RegisterRepresentation::Simd128():
         return Simd128();
+      case RegisterRepresentation::Simd256():
+        return Simd256();
       case RegisterRepresentation::Compressed():
         UNREACHABLE();
     }
@@ -743,6 +765,8 @@ class MemoryRepresentation {
         return MachineType::SandboxedPointer();
       case Simd128():
         return MachineType::Simd128();
+      case Simd256():
+        return MachineType::Simd256();
     }
   }
 
@@ -776,9 +800,10 @@ class MemoryRepresentation {
         return SandboxedPointer();
       case MachineRepresentation::kSimd128:
         return Simd128();
+      case MachineRepresentation::kSimd256:
+        return Simd256();
       case MachineRepresentation::kNone:
       case MachineRepresentation::kBit:
-      case MachineRepresentation::kSimd256:
       case MachineRepresentation::kCompressedPointer:
       case MachineRepresentation::kCompressed:
         UNREACHABLE();
@@ -810,10 +835,11 @@ class MemoryRepresentation {
         return SandboxedPointer();
       case MachineRepresentation::kSimd128:
         return Simd128();
+      case MachineRepresentation::kSimd256:
+        return Simd256();
       case MachineRepresentation::kNone:
       case MachineRepresentation::kMapWord:
       case MachineRepresentation::kBit:
-      case MachineRepresentation::kSimd256:
       case MachineRepresentation::kCompressedPointer:
       case MachineRepresentation::kCompressed:
       case MachineRepresentation::kIndirectPointer:
@@ -849,6 +875,8 @@ class MemoryRepresentation {
         return kTaggedSizeLog2;
       case Simd128():
         return 4;
+      case Simd256():
+        return 5;
     }
   }
 

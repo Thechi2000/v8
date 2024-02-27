@@ -16806,7 +16806,7 @@ TEST(TestIdleNotification) {
   bool finished = false;
   for (int i = 0; i < 200 && !finished; i++) {
     if (i < 10 && CcTest::heap()->incremental_marking()->IsStopped()) {
-      CcTest::heap()->StartIncrementalMarking(
+      CcTest::heap()->TryStartIncrementalMarking(
           i::GCFlag::kReduceMemoryFootprint,
           i::GarbageCollectionReason::kTesting);
     }
@@ -19624,7 +19624,7 @@ static int CountLiveMapsInMapCache(i::Tagged<i::Context> context) {
   int length = map_cache->length();
   int count = 0;
   for (int i = 0; i < length; i++) {
-    if (map_cache->get(i)->IsWeak()) count++;
+    if (map_cache->get(i).IsWeak()) count++;
   }
   return count;
 }
@@ -24591,6 +24591,8 @@ TEST(StringConcatOverflow) {
 
 TEST(TurboAsmDisablesDetach) {
 #if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+  if (i::v8_flags.disable_optimizing_compilers) return;
+
   i::v8_flags.turbofan = true;
   i::v8_flags.allow_natives_syntax = true;
   v8::HandleScope scope(CcTest::isolate());
@@ -28046,6 +28048,40 @@ struct ReturnValueChecker : BasicApiChecker<T, ReturnValueChecker<T>, T> {
   }
 };
 
+struct AllocationChecker : BasicApiChecker<int32_t, AllocationChecker, void> {
+  explicit AllocationChecker(i::Isolate* isolate, int32_t expected_argument)
+      : isolate_(isolate), expected_argument_(expected_argument) {}
+
+  static void FastCallback(v8::Local<v8::Object> receiver, int32_t argument,
+                           v8::FastApiCallbackOptions& options) {
+    AllocationChecker* receiver_ptr =
+        GetInternalField<AllocationChecker>(*receiver);
+    CHECK_EQ(receiver_ptr->expected_argument_, argument);
+    receiver_ptr->SetCallFast();
+    i::Isolate* isolate = receiver_ptr->isolate_;
+    i::HandleScope handle_scope(isolate);
+    i::Handle<i::HeapNumber> number =
+        isolate->factory()->NewHeapNumber(argument);
+    isolate->heap()->CollectGarbage(i::OLD_SPACE,
+                                    i::GarbageCollectionReason::kTesting);
+    CHECK_EQ(receiver_ptr, GetInternalField<AllocationChecker>(*receiver));
+    CHECK_EQ(receiver_ptr->expected_argument_, number->value());
+  }
+
+  static void SlowCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
+    CHECK(i::ValidateCallbackInfo(info));
+    v8::Object* receiver_obj = v8::Object::Cast(*info.Holder());
+    AllocationChecker* receiver_ptr =
+        GetInternalField<AllocationChecker>(receiver_obj);
+    receiver_ptr->SetCallSlow();
+    info.GetReturnValue().Set(info[0]);
+  }
+
+ private:
+  i::Isolate* isolate_;
+  int32_t expected_argument_;
+};
+
 template <typename T>
 void CheckFastReturnValue(v8::Local<v8::Value> expected_value,
                           ApiCheckerResultFlags expected_path) {
@@ -28162,6 +28198,43 @@ void CallWithMoreArguments() {
   CHECK(checker.DidCallFast());
 }
 
+TEST(FastApiCallWithAllocationAndGC) {
+  if (i::v8_flags.jitless) return;
+  if (i::v8_flags.disable_optimizing_compilers) return;
+
+  i::v8_flags.turbofan = true;
+  i::v8_flags.turbo_fast_api_calls = true;
+  i::v8_flags.allow_natives_syntax = true;
+  // Disable --always_turbofan, otherwise we haven't generated the necessary
+  // feedback to go down the "best optimization" path for the fast call.
+  i::v8_flags.always_turbofan = false;
+  i::v8_flags.allow_allocation_in_fast_api_call = true;
+  i::FlagList::EnforceFlagImplications();
+
+  CcTest::InitializeVM();
+  v8::Isolate* isolate = CcTest::isolate();
+
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  i_isolate->set_embedder_wrapper_type_index(kV8WrapperTypeIndex);
+  i_isolate->set_embedder_wrapper_object_index(kV8WrapperObjectIndex);
+
+  v8::HandleScope scope(isolate);
+
+  LocalContext env;
+  v8::Local<v8::Value> initial_value(v8_num(42));
+  AllocationChecker checker(i_isolate, 42);
+  SetupTest(initial_value, &env, &checker,
+            "function func(arg) { receiver.api_func(arg); }"
+            "function wrapper(){"
+            "%PrepareFunctionForOptimization(func);"
+            "func(value);"
+            "%OptimizeFunctionOnNextCall(func);"
+            "func(value);"
+            "}wrapper(value);");
+
+  CHECK(checker.DidCallFast());
+}
+
 void CallWithUnexpectedReceiverType(v8::Local<v8::Value> receiver) {
   LocalContext env;
   ApiNumberChecker<int32_t> checker(42);
@@ -28225,6 +28298,7 @@ void CheckDynamicTypeInfo() {
 TEST(FastApiStackSlot) {
 #if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
   if (i::v8_flags.jitless) return;
+  if (i::v8_flags.disable_optimizing_compilers) return;
 
   i::v8_flags.turbofan = true;
   i::v8_flags.turbo_fast_api_calls = true;
@@ -28279,6 +28353,7 @@ TEST(FastApiStackSlot) {
 TEST(FastApiCalls) {
 #if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
   if (i::v8_flags.jitless) return;
+  if (i::v8_flags.disable_optimizing_compilers) return;
 
   i::v8_flags.turbofan = true;
   i::v8_flags.turbo_fast_api_calls = true;
@@ -28830,6 +28905,7 @@ void SequenceSlowCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
 TEST(FastApiSequenceOverloads) {
 #if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
   if (i::v8_flags.jitless) return;
+  if (i::v8_flags.disable_optimizing_compilers) return;
 
   i::v8_flags.turbofan = true;
   i::v8_flags.turbo_fast_api_calls = true;
@@ -28888,6 +28964,7 @@ TEST(FastApiSequenceOverloads) {
 TEST(FastApiOverloadResolution) {
 #if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
   if (i::v8_flags.jitless) return;
+  if (i::v8_flags.disable_optimizing_compilers) return;
 
   i::v8_flags.turbofan = true;
   i::v8_flags.turbo_fast_api_calls = true;
@@ -29360,32 +29437,38 @@ TEST(EmbedderInstanceTypes) {
   i::v8_flags.embedder_instance_types = true;
   Local<FunctionTemplate> node = FunctionTemplate::New(isolate);
   Local<ObjectTemplate> proto_template = node->PrototypeTemplate();
+
+  enum JSApiInstanceType : uint16_t {
+    kGenericApiObject = 0,  // FunctionTemplateInfo::kNoJSApiObjectType.
+    kElement,
+    kHTMLElement,
+    kHTMLDivElement,
+  };
+
   Local<FunctionTemplate> nodeType = v8::FunctionTemplate::New(
       isolate, NodeTypeCallback, Local<Value>(),
       v8::Signature::New(isolate, node), 0, v8::ConstructorBehavior::kThrow,
-      v8::SideEffectType::kHasSideEffect, nullptr,
-      i::Internals::kFirstJSApiObjectType,
-      i::Internals::kFirstJSApiObjectType + 1,
-      i::Internals::kFirstJSApiObjectType + 3);
+      v8::SideEffectType::kHasSideEffect, nullptr, kGenericApiObject, kElement,
+      kHTMLDivElement);
   proto_template->SetAccessorProperty(
       String::NewFromUtf8Literal(isolate, "nodeType"), nodeType);
 
   Local<FunctionTemplate> element = FunctionTemplate::New(
       isolate, nullptr, Local<Value>(), Local<v8::Signature>(), 0,
       v8::ConstructorBehavior::kAllow, v8::SideEffectType::kHasSideEffect,
-      nullptr, i::Internals::kFirstJSApiObjectType + 1);
+      nullptr, kElement);
   element->Inherit(node);
 
   Local<FunctionTemplate> html_element = FunctionTemplate::New(
       isolate, nullptr, Local<Value>(), Local<v8::Signature>(), 0,
       v8::ConstructorBehavior::kAllow, v8::SideEffectType::kHasSideEffect,
-      nullptr, i::Internals::kFirstJSApiObjectType + 2);
+      nullptr, kHTMLElement);
   html_element->Inherit(element);
 
   Local<FunctionTemplate> div_element = FunctionTemplate::New(
       isolate, nullptr, Local<Value>(), Local<v8::Signature>(), 0,
       v8::ConstructorBehavior::kAllow, v8::SideEffectType::kHasSideEffect,
-      nullptr, i::Internals::kFirstJSApiObjectType + 3);
+      nullptr, kHTMLDivElement);
   div_element->Inherit(html_element);
 
   CHECK(env->Global()

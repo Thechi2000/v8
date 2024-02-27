@@ -18,6 +18,7 @@
 #include "src/objects/arguments.h"
 #include "src/objects/bigint.h"
 #include "src/objects/cell.h"
+#include "src/objects/dictionary.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/heap-number.h"
 #include "src/objects/hole.h"
@@ -1641,7 +1642,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void DispatchMaybeObject(TNode<MaybeObject> maybe_object, Label* if_smi,
                            Label* if_cleared, Label* if_weak, Label* if_strong,
                            TVariable<Object>* extracted);
-  // See MaybeObject for semantics of these functions.
+  // See Tagged<MaybeObject> for semantics of these functions.
   TNode<BoolT> IsStrong(TNode<MaybeObject> value);
   TNode<BoolT> IsStrong(TNode<HeapObjectReference> value);
   TNode<HeapObject> GetHeapObjectIfStrong(TNode<MaybeObject> value,
@@ -2206,6 +2207,14 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       AllocationFlags = AllocationFlag::kNone);
   TNode<NameDictionary> AllocateNameDictionaryWithCapacity(
       TNode<IntPtrT> capacity, AllocationFlags = AllocationFlag::kNone);
+
+  TNode<PropertyDictionary> AllocatePropertyDictionary(int at_least_space_for);
+  TNode<PropertyDictionary> AllocatePropertyDictionary(
+      TNode<IntPtrT> at_least_space_for,
+      AllocationFlags = AllocationFlag::kNone);
+  TNode<PropertyDictionary> AllocatePropertyDictionaryWithCapacity(
+      TNode<IntPtrT> capacity, AllocationFlags = AllocationFlag::kNone);
+
   TNode<NameDictionary> CopyNameDictionary(TNode<NameDictionary> dictionary,
                                            Label* large_object_fallback);
 
@@ -2879,7 +2888,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsConstructorMap(TNode<Map> map);
   TNode<BoolT> IsConstructor(TNode<HeapObject> object);
   TNode<BoolT> IsDeprecatedMap(TNode<Map> map);
-  TNode<BoolT> IsNameDictionary(TNode<HeapObject> object);
+  TNode<BoolT> IsPropertyDictionary(TNode<HeapObject> object);
   TNode<BoolT> IsOrderedNameDictionary(TNode<HeapObject> object);
   TNode<BoolT> IsGlobalDictionary(TNode<HeapObject> object);
   TNode<BoolT> IsExtensibleMap(TNode<Map> map);
@@ -2992,7 +3001,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsStringInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsString(TNode<HeapObject> object);
   TNode<BoolT> IsSeqOneByteString(TNode<HeapObject> object);
-  TNode<BoolT> IsSwissNameDictionary(TNode<HeapObject> object);
 
   TNode<BoolT> IsSymbolInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsInternalizedStringInstanceType(TNode<Int32T> instance_type);
@@ -3525,33 +3533,37 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <class Dictionary>
   void SetNameDictionaryFlags(TNode<Dictionary>, TNode<Smi> flags);
 
-  enum LookupMode { kFindExisting, kFindInsertionIndex };
+  enum LookupMode {
+    kFindExisting,
+    kFindInsertionIndex,
+    kFindExistingOrInsertionIndex
+  };
 
   template <typename Dictionary>
   TNode<HeapObject> LoadName(TNode<HeapObject> key);
 
   // Looks up an entry in a NameDictionaryBase successor.
-  // For {mode} == kFindExisting:
-  //   If the entry is found control goes to {if_found} and {var_name_index}
-  //   contains an index of the key field of the entry found.
-  //   If the key is not found and {if_not_found_with_insertion_index} is
-  //   provided, control goes to {if_not_found_with_insertion_index} and
-  //   {var_name_index} contains the index of the key field to insert the given
-  //   name at.
-  //   Otherwise control goes to {if_not_found_no_insertion_index}.
-  // For {mode} == kFindInsertionIndex:
-  //   {if_not_found_no_insertion_index} and {if_not_found_with_insertion_index}
-  //   are treated equally. If {if_not_found_with_insertion_index} is provided,
-  //   control goes to {if_not_found_with_insertion_index}, otherwise control
-  //   goes to {if_not_found_no_insertion_index}. In both cases {var_name_index}
-  //   contains the index of the key field to insert the given name at.
+  // If the entry is found control goes to {if_found} and {var_name_index}
+  // contains an index of the key field of the entry found.
+  // If the key is not found control goes to {if_not_found}. If mode is
+  // {kFindExisting}, {var_name_index} might contain garbage, otherwise
+  // {var_name_index} contains the index of the key field to insert the given
+  // name at.
   template <typename Dictionary>
   void NameDictionaryLookup(TNode<Dictionary> dictionary,
                             TNode<Name> unique_name, Label* if_found,
                             TVariable<IntPtrT>* var_name_index,
-                            Label* if_not_found_no_insertion_index,
-                            LookupMode mode = kFindExisting,
-                            Label* if_not_found_with_insertion_index = nullptr);
+                            Label* if_not_found,
+                            LookupMode mode = kFindExisting);
+  // Slow lookup for unique_names with forwarding index.
+  // Both resolving the actual hash and the lookup are handled via runtime.
+  template <typename Dictionary>
+  void NameDictionaryLookupWithForwardIndex(TNode<Dictionary> dictionary,
+                                            TNode<Name> unique_name,
+                                            Label* if_found,
+                                            TVariable<IntPtrT>* var_name_index,
+                                            Label* if_not_found,
+                                            LookupMode mode = kFindExisting);
 
   TNode<Word32T> ComputeSeededHash(TNode<IntPtrT> key);
 

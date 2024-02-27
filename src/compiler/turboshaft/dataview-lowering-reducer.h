@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef V8_COMPILER_TURBOSHAFT_DATAVIEW_REDUCER_H_
-#define V8_COMPILER_TURBOSHAFT_DATAVIEW_REDUCER_H_
+#ifndef V8_COMPILER_TURBOSHAFT_DATAVIEW_LOWERING_REDUCER_H_
+#define V8_COMPILER_TURBOSHAFT_DATAVIEW_LOWERING_REDUCER_H_
 
 #include "src/compiler/turboshaft/assembler.h"
 
@@ -12,9 +12,9 @@ namespace v8::internal::compiler::turboshaft {
 #include "src/compiler/turboshaft/define-assembler-macros.inc"
 
 template <typename Next>
-class DataViewReducer : public Next {
+class DataViewLoweringReducer : public Next {
  public:
-  TURBOSHAFT_REDUCER_BOILERPLATE()
+  TURBOSHAFT_REDUCER_BOILERPLATE(DataViewLowering)
 
   OpIndex BuildReverseBytes(ExternalArrayType type, OpIndex value) {
     switch (type) {
@@ -75,15 +75,13 @@ class DataViewReducer : public Next {
 #else
       Asm().SetVariable(result, BuildReverseBytes(element_type, value));
 #endif  // V8_TARGET_LITTLE_ENDIAN
-    }
-    ELSE {
+    } ELSE {
 #if V8_TARGET_LITTLE_ENDIAN
       Asm().SetVariable(result, BuildReverseBytes(element_type, value));
 #else
       Asm().SetVariable(result, value);
 #endif  // V8_TARGET_LITTLE_ENDIAN
     }
-    END_IF
 
     // We need to keep the {object} (either the JSArrayBuffer or the JSDataView)
     // alive so that the GC will not release the JSArrayBuffer (if there's any)
@@ -107,15 +105,14 @@ class DataViewReducer : public Next {
 #else
       Asm().SetVariable(value_to_store, BuildReverseBytes(element_type, value));
 #endif  // V8_TARGET_LITTLE_ENDIAN
-    }
-    ELSE {
+    } ELSE {
 #if V8_TARGET_LITTLE_ENDIAN
       Asm().SetVariable(value_to_store, BuildReverseBytes(element_type, value));
 #else
       Asm().SetVariable(value_to_store, value);
 #endif  // V8_TARGET_LITTLE_ENDIAN
     }
-    END_IF
+
     const MemoryRepresentation memory_rep =
         MemoryRepresentation::FromMachineType(machine_type);
     __ Store(storage, index, Asm().GetVariable(value_to_store),
@@ -134,4 +131,4 @@ class DataViewReducer : public Next {
 
 }  // namespace v8::internal::compiler::turboshaft
 
-#endif  // V8_COMPILER_TURBOSHAFT_DATAVIEW_REDUCER_H_
+#endif  // V8_COMPILER_TURBOSHAFT_DATAVIEW_LOWERING_REDUCER_H_

@@ -1338,7 +1338,7 @@ void Genesis::InstallGlobalThisBinding() {
 
   // Go ahead and hook it up while we're at it.
   int slot = scope_info->ReceiverContextSlotIndex();
-  DCHECK_EQ(slot, Context::MIN_CONTEXT_SLOTS);
+  DCHECK_EQ(slot, Context::MIN_CONTEXT_EXTENDED_SLOTS);
   context->set(slot, native_context()->global_proxy());
 
   Handle<ScriptContextTable> script_contexts(
@@ -6384,13 +6384,12 @@ void Genesis::InitializeMapCaches() {
 
     DisallowGarbageCollection no_gc;
     for (int i = 0; i < JSObject::kMapCacheSize; i++) {
-      cache->set(i, HeapObjectReference::ClearedValue(isolate()));
+      cache->set(i, ClearedValue(isolate()));
     }
     native_context()->set_map_cache(*cache);
     Tagged<Map> initial = native_context()->object_function()->initial_map();
-    cache->set(0, HeapObjectReference::Weak(initial));
-    cache->set(initial->GetInObjectProperties(),
-               HeapObjectReference::Weak(initial));
+    cache->set(0, MakeWeak(initial));
+    cache->set(initial->GetInObjectProperties(), MakeWeak(initial));
   }
 }
 
@@ -6421,11 +6420,9 @@ bool Genesis::InstallSpecialObjects(Isolate* isolate,
   WasmJs::Install(isolate, v8_flags.expose_wasm);
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-#ifdef V8_EXPOSE_MEMORY_CORRUPTION_API
-  if (GetProcessWideSandbox()->is_initialized()) {
-    SandboxTesting::InstallMemoryCorruptionApi(isolate);
-  }
-#endif  // V8_EXPOSE_MEMORY_CORRUPTION_API
+#ifdef V8_ENABLE_MEMORY_CORRUPTION_API
+  SandboxTesting::InstallMemoryCorruptionApiIfEnabled(isolate);
+#endif  // V8_ENABLE_MEMORY_CORRUPTION_API
 
   return true;
 }

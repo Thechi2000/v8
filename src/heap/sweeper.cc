@@ -264,7 +264,11 @@ void Sweeper::SweepingState<scope>::InitializeSweeping() {
   DCHECK(!HasValidJob());
   DCHECK(!in_progress_);
   DCHECK(concurrent_sweepers_.empty());
-  should_reduce_memory_ = sweeper_->heap_->ShouldReduceMemory();
+  DCHECK_IMPLIES(scope == Sweeper::SweepingScope::kMinor, v8_flags.minor_ms);
+  DCHECK_IMPLIES(scope == Sweeper::SweepingScope::kMinor,
+                 !sweeper_->heap_->ShouldReduceMemory());
+  should_reduce_memory_ = (scope != Sweeper::SweepingScope::kMinor) &&
+                          sweeper_->heap_->ShouldReduceMemory();
   trace_id_ =
       reinterpret_cast<uint64_t>(sweeper_) ^
       sweeper_->heap_->tracer()->CurrentEpoch(
@@ -319,8 +323,8 @@ void Sweeper::SweepingState<scope>::JoinSweeping() {
 template <Sweeper::SweepingScope scope>
 void Sweeper::SweepingState<scope>::FinishSweeping() {
   DCHECK(in_progress_);
-
-  if (HasValidJob()) job_handle_->Join();
+  // Sweeping jobs were already joined.
+  DCHECK(!HasValidJob());
 
   // Discard all pooled pages on memory-reducing GCs.
   if (should_reduce_memory_) {
@@ -337,6 +341,7 @@ void Sweeper::SweepingState<scope>::Pause() {
 
   DCHECK(v8_flags.concurrent_sweeping);
   job_handle_->Cancel();
+  job_handle_.reset();
 }
 
 template <Sweeper::SweepingScope scope>
@@ -359,20 +364,32 @@ void Sweeper::LocalSweeper::ContributeAndWaitForPromotedPagesIteration() {
       &sweeper_->promoted_pages_iteration_notification_mutex_);
 }
 
-void Sweeper::LocalSweeper::ParallelSweepSpace(AllocationSpace identity,
+bool Sweeper::LocalSweeper::ParallelSweepSpace(AllocationSpace identity,
                                                SweepingMode sweeping_mode,
-                                               int max_pages) {
-  int pages_freed = 0;
+                                               uint32_t max_pages) {
+  uint32_t pages_swept = 0;
+  bool found_usable_pages = false;
   Page* page = nullptr;
   while ((page = sweeper_->GetSweepingPageSafe(identity)) != nullptr) {
     ParallelSweepPage(page, identity, sweeping_mode);
-    ++pages_freed;
-    if (page->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE)) {
-      // Free list of a never-allocate page will be dropped later on.
-      continue;
+    if (!page->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE)) {
+      found_usable_pages = true;
+#if DEBUG
+    } else {
+      // All remaining pages are also marked with NEVER_ALLOCATE_ON_PAGE.
+      base::MutexGuard guard(&sweeper_->mutex_);
+      int space_index = GetSweepSpaceIndex(identity);
+      Sweeper::SweepingList& sweeping_list =
+          sweeper_->sweeping_list_[space_index];
+      DCHECK(std::all_of(sweeping_list.begin(), sweeping_list.end(),
+                         [](const Page* p) {
+                           return p->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE);
+                         }));
+#endif  // DEBUG
     }
-    if ((max_pages > 0) && (pages_freed >= max_pages)) return;
+    if (++pages_swept >= max_pages) break;
   }
+  return found_usable_pages;
 }
 
 void Sweeper::LocalSweeper::ParallelSweepPage(Page* page,
@@ -612,6 +629,18 @@ void Sweeper::InitializeMinorSweeping() {
   minor_sweeping_state_.InitializeSweeping();
 }
 
+namespace {
+V8_INLINE bool ComparePagesForSweepingOrder(const Page* a, const Page* b) {
+  // Prioritize pages that can be allocated on.
+  if (a->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE) !=
+      b->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE))
+    return a->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE);
+  // We sort in descending order of live bytes, i.e., ascending order of
+  // free bytes, because GetSweepingPageSafe returns pages in reverse order.
+  return a->live_bytes() > b->live_bytes();
+}
+}  // namespace
+
 void Sweeper::StartMajorSweeping() {
   DCHECK_EQ(GarbageCollector::MARK_COMPACTOR,
             heap_->tracer()->GetCurrentCollector());
@@ -623,13 +652,10 @@ void Sweeper::StartMajorSweeping() {
     // evacuating a page, already swept pages will have enough free bytes to
     // hold the objects to move (and therefore, we won't need to wait for more
     // pages to be swept in order to move those objects).
-    // We sort in descending order of live bytes, i.e., ascending order of
-    // free bytes, because GetSweepingPageSafe returns pages in reverse order.
     int space_index = GetSweepSpaceIndex(space);
     DCHECK_IMPLIES(space == NEW_SPACE, sweeping_list_[space_index].empty());
-    std::sort(
-        sweeping_list_[space_index].begin(), sweeping_list_[space_index].end(),
-        [](Page* a, Page* b) { return a->live_bytes() > b->live_bytes(); });
+    std::sort(sweeping_list_[space_index].begin(),
+              sweeping_list_[space_index].end(), ComparePagesForSweepingOrder);
   });
 }
 
@@ -640,7 +666,7 @@ void Sweeper::StartMinorSweeping() {
   int new_space_index = GetSweepSpaceIndex(NEW_SPACE);
   std::sort(sweeping_list_[new_space_index].begin(),
             sweeping_list_[new_space_index].end(),
-            [](Page* a, Page* b) { return a->live_bytes() > b->live_bytes(); });
+            ComparePagesForSweepingOrder);
 }
 
 namespace {
@@ -712,7 +738,7 @@ void Sweeper::FinishMajorJobs() {
   ForAllSweepingSpaces([this](AllocationSpace space) {
     if (space == NEW_SPACE) return;
     main_thread_local_sweeper_.ParallelSweepSpace(
-        space, SweepingMode::kLazyOrConcurrent, 0);
+        space, SweepingMode::kLazyOrConcurrent);
   });
 
   // Join all concurrent tasks.
@@ -757,7 +783,7 @@ void Sweeper::FinishMinorJobs() {
   if (!minor_sweeping_in_progress()) return;
 
   main_thread_local_sweeper_.ParallelSweepSpace(
-      NEW_SPACE, SweepingMode::kLazyOrConcurrent, 0);
+      NEW_SPACE, SweepingMode::kLazyOrConcurrent);
   // Array buffer sweeper may have grabbed a page for iteration to contribute.
   // Wait until it has finished iterating.
   main_thread_local_sweeper_.ContributeAndWaitForPromotedPagesIteration();
@@ -785,18 +811,16 @@ void Sweeper::EnsureMinorCompleted() {
   iterated_promoted_pages_count_ = 0;
 }
 
-void Sweeper::DrainSweepingWorklistForSpace(AllocationSpace space) {
-  if (!sweeping_in_progress_for_space(space)) return;
-  main_thread_local_sweeper_.ParallelSweepSpace(
-      space, SweepingMode::kLazyOrConcurrent, 0);
-}
-
-bool Sweeper::AreMinorSweeperTasksRunning() {
+bool Sweeper::AreMinorSweeperTasksRunning() const {
   return minor_sweeping_state_.HasActiveJob();
 }
 
-bool Sweeper::AreMajorSweeperTasksRunning() {
+bool Sweeper::AreMajorSweeperTasksRunning() const {
   return major_sweeping_state_.HasActiveJob();
+}
+
+bool Sweeper::UsingMajorSweeperTasks() const {
+  return major_sweeping_state_.HasValidJob();
 }
 
 namespace {
@@ -1053,11 +1077,12 @@ size_t Sweeper::ConcurrentMajorSweepingPageCount() {
   return count;
 }
 
-void Sweeper::ParallelSweepSpace(AllocationSpace identity,
-                                 SweepingMode sweeping_mode, int max_pages) {
+bool Sweeper::ParallelSweepSpace(AllocationSpace identity,
+                                 SweepingMode sweeping_mode,
+                                 uint32_t max_pages) {
   DCHECK_IMPLIES(identity == NEW_SPACE, heap_->IsMainThread());
-  main_thread_local_sweeper_.ParallelSweepSpace(identity, sweeping_mode,
-                                                max_pages);
+  return main_thread_local_sweeper_.ParallelSweepSpace(identity, sweeping_mode,
+                                                       max_pages);
 }
 
 void Sweeper::EnsurePageIsSwept(Page* page) {
@@ -1321,7 +1346,7 @@ void Sweeper::SweepEmptyNewSpacePage(Page* page) {
 
 Sweeper::PauseMajorSweepingScope::PauseMajorSweepingScope(Sweeper* sweeper)
     : sweeper_(sweeper),
-      resume_on_exit_(sweeper->major_sweeping_in_progress()) {
+      resume_on_exit_(sweeper->AreMajorSweeperTasksRunning()) {
   DCHECK(v8_flags.minor_ms);
   DCHECK_IMPLIES(resume_on_exit_, v8_flags.concurrent_sweeping);
   sweeper_->major_sweeping_state_.Pause();
@@ -1339,6 +1364,22 @@ uint64_t Sweeper::GetTraceIdForFlowEvent(
              ? minor_sweeping_state_.trace_id()
              : major_sweeping_state_.trace_id();
 }
+
+#if DEBUG
+bool Sweeper::HasUnsweptPagesForMajorSweeping() const {
+  DCHECK(heap_->IsMainThread());
+  DCHECK(!AreMajorSweeperTasksRunning());
+  bool has_unswept_pages = false;
+  ForAllSweepingSpaces([this, &has_unswept_pages](AllocationSpace space) {
+    DCHECK_EQ(IsSweepingDoneForSpace(space),
+              sweeping_list_[GetSweepSpaceIndex(space)].empty());
+    if (space == NEW_SPACE) return;
+    if (!sweeping_list_[GetSweepSpaceIndex(space)].empty())
+      has_unswept_pages = true;
+  });
+  return has_unswept_pages;
+}
+#endif  // DEBUG
 
 }  // namespace internal
 }  // namespace v8

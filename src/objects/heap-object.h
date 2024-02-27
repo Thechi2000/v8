@@ -103,16 +103,16 @@ V8_OBJECT class HeapObjectLayout {
 
 static_assert(sizeof(HeapObjectLayout) == kTaggedSize);
 
-inline bool operator==(const HeapObjectLayout* obj, TaggedBase ptr) {
+inline bool operator==(const HeapObjectLayout* obj, StrongTaggedBase ptr) {
   return Tagged<HeapObject>(obj) == ptr;
 }
-inline bool operator==(TaggedBase ptr, const HeapObjectLayout* obj) {
+inline bool operator==(StrongTaggedBase ptr, const HeapObjectLayout* obj) {
   return ptr == Tagged<HeapObject>(obj);
 }
-inline bool operator!=(const HeapObjectLayout* obj, TaggedBase ptr) {
+inline bool operator!=(const HeapObjectLayout* obj, StrongTaggedBase ptr) {
   return Tagged<HeapObject>(obj) != ptr;
 }
-inline bool operator!=(TaggedBase ptr, const HeapObjectLayout* obj) {
+inline bool operator!=(StrongTaggedBase ptr, const HeapObjectLayout* obj) {
   return ptr != Tagged<HeapObject>(obj);
 }
 
@@ -520,6 +520,7 @@ constexpr HeapObject Tagged<HeapObject>::ToRawPtr() const {
 HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
 IS_TYPE_FUNCTION_DECL(HashTableBase)
 IS_TYPE_FUNCTION_DECL(SmallOrderedHashTable)
+IS_TYPE_FUNCTION_DECL(PropertyDictionary)
 #undef IS_TYPE_FUNCTION_DECL
 
 // Most calls to Is<Oddball> should go via the Tagged<Object> overloads, withst

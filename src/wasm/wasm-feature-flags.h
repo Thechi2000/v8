@@ -48,7 +48,12 @@
   /* JavaScript Promise Integration proposal. */                               \
   /* https://github.com/WebAssembly/js-promise-integration */                  \
   /* V8 side owner: thibaudm, fgm */                                           \
-  V(jspi, "javascript promise integration", false)
+  V(jspi, "javascript promise integration", false)                             \
+                                                                               \
+  /* Shared-Everything Threads proposal. */                                    \
+  /* https://github.com/WebAssembly/shared-everything-threads */               \
+  /* V8 side owner: manoskouk */                                               \
+  V(shared, "shared-everything threads", false)
 
 // #############################################################################
 // Staged features (disabled by default, but enabled via --wasm-staging (also
@@ -85,6 +90,7 @@
   /* Not user-visible, defined here so an Origin Trial can control it. */      \
   /* V8 side owner: manoskouk, clemensb */                                     \
   /* Staged in v11.3 */                                                        \
+  /* Shipped for wasm-gc modules as part of wasm-gc in v11.9 */                \
   /* Launch bug: https://crbug.com/1424350 */                                  \
   V(inlining, "wasm-into-wasm inlining", false)                                \
                                                                                \

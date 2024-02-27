@@ -32,6 +32,7 @@
 #include "src/compiler/node-origin-table.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/pipeline.h"
+#include "src/compiler/turboshaft/wasm-turboshaft-compiler.h"
 #include "src/compiler/wasm-call-descriptors.h"
 #include "src/compiler/wasm-compiler-definitions.h"
 #include "src/compiler/wasm-graph-assembler.h"
@@ -40,6 +41,7 @@
 #include "src/execution/simulator-base.h"
 #include "src/heap/factory.h"
 #include "src/logging/counters.h"
+#include "src/objects/code-kind.h"
 #include "src/objects/heap-number.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/name.h"
@@ -202,8 +204,9 @@ bool WasmGraphBuilder::TryWasmInlining(int fct_index,
   }
   base::Vector<const uint8_t> bytes(native_module->wire_bytes().SubVector(
       inlinee.code.offset(), inlinee.code.end_offset()));
+  bool is_shared = module->types[inlinee.sig_index].is_shared;
   const wasm::FunctionBody inlinee_body(inlinee.sig, inlinee.code.offset(),
-                                        bytes.begin(), bytes.end());
+                                        bytes.begin(), bytes.end(), is_shared);
   // If the inlinee was not validated before, do that now.
   if (V8_UNLIKELY(!module->function_was_validated(fct_index))) {
     wasm::WasmFeatures unused_detected_features;
@@ -4213,14 +4216,12 @@ Graph* WasmGraphBuilder::graph() { return mcgraph()->graph(); }
 
 Zone* WasmGraphBuilder::graph_zone() { return graph()->zone(); }
 
-namespace {
 Signature<MachineRepresentation>* CreateMachineSignature(
-    Zone* zone, const wasm::FunctionSig* sig,
-    WasmGraphBuilder::CallOrigin origin) {
+    Zone* zone, const wasm::FunctionSig* sig, wasm::CallOrigin origin) {
   Signature<MachineRepresentation>::Builder builder(zone, sig->return_count(),
                                                     sig->parameter_count());
   for (auto ret : sig->returns()) {
-    if (origin == WasmGraphBuilder::kCalledFromJS) {
+    if (origin == wasm::kCalledFromJS) {
       builder.AddReturn(MachineRepresentation::kTagged);
     } else {
       builder.AddReturn(ret.machine_representation());
@@ -4228,7 +4229,7 @@ Signature<MachineRepresentation>* CreateMachineSignature(
   }
 
   for (auto param : sig->parameters()) {
-    if (origin == WasmGraphBuilder::kCalledFromJS) {
+    if (origin == wasm::kCalledFromJS) {
       // Parameters coming from JavaScript are always tagged values. Especially
       // when the signature says that it's an I64 value, then a BigInt object is
       // provided by JavaScript, and not two 32-bit parameters.
@@ -4240,8 +4241,6 @@ Signature<MachineRepresentation>* CreateMachineSignature(
   return builder.Get();
 }
 
-}  // namespace
-
 void WasmGraphBuilder::LowerInt64(Signature<MachineRepresentation>* sig) {
   if (mcgraph()->machine()->Is64()) return;
   Int64Lowering r(mcgraph()->graph(), mcgraph()->machine(), mcgraph()->common(),
@@ -4249,7 +4248,7 @@ void WasmGraphBuilder::LowerInt64(Signature<MachineRepresentation>* sig) {
   r.LowerGraph();
 }
 
-void WasmGraphBuilder::LowerInt64(CallOrigin origin) {
+void WasmGraphBuilder::LowerInt64(wasm::CallOrigin origin) {
   LowerInt64(CreateMachineSignature(mcgraph()->zone(), sig_, origin));
 }
 
@@ -6202,8 +6201,9 @@ Node* WasmGraphBuilder::StringNewWtf8Array(unibrow::Utf8Variant variant,
     Node* segment_offset_smi = gasm_->BuildChangeInt32ToSmi(segment_offset);
     Node* segment_length = NodeProperties::GetValueInput(array, 3);
     return gasm_->CallBuiltin(Builtin::kWasmStringFromDataSegment,
-                              Operator::kEliminatable, segment_length, start,
-                              end, segment_index_smi, segment_offset_smi);
+                              Operator::Operator::kNoDeopt | Operator::kNoThrow,
+                              segment_length, start, end, segment_index_smi,
+                              segment_offset_smi);
   }
 
   // Regular path if the shortcut wasn't taken.
@@ -6951,15 +6951,13 @@ Node* WasmGraphBuilder::SetType(Node* node, wasm::ValueType type) {
     // The exception is imported strings support, which may special-case
     // values that are officially externref-typed as being known to be strings.
 #if DEBUG
-    static constexpr wasm::ValueType kRefString =
-        wasm::ValueType::Ref(wasm::HeapType::kString);
     static constexpr wasm::ValueType kRefExtern =
         wasm::ValueType::Ref(wasm::HeapType::kExtern);
-    DCHECK(
-        (compiler::NodeProperties::GetType(node).AsWasm().type == type) ||
-        (enabled_features_.has_imported_strings() &&
-         compiler::NodeProperties::GetType(node).AsWasm().type == kRefString &&
-         (type == wasm::kWasmExternRef || type == kRefExtern)));
+    DCHECK((compiler::NodeProperties::GetType(node).AsWasm().type == type) ||
+           (enabled_features_.has_imported_strings() &&
+            compiler::NodeProperties::GetType(node).AsWasm().type ==
+                wasm::kWasmRefExternString &&
+            (type == wasm::kWasmExternRef || type == kRefExtern)));
 #endif
   }
   return node;
@@ -7170,7 +7168,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
       case wasm::kF64:
         return BuildChangeFloat64ToNumber(node);
       case wasm::kRef:
-        switch (type.heap_representation()) {
+        switch (type.heap_representation_non_shared()) {
           case wasm::HeapType::kEq:
           case wasm::HeapType::kI31:
           case wasm::HeapType::kStruct:
@@ -7191,7 +7189,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
             UNREACHABLE();
           case wasm::HeapType::kFunc:
           default:
-            if (type.heap_representation() == wasm::HeapType::kFunc ||
+            if (type.heap_representation_non_shared() ==
+                    wasm::HeapType::kFunc ||
                 module_->has_signature(type.ref_index())) {
               // Typed function. Extract the external function.
               auto done =
@@ -7214,7 +7213,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
             }
         }
       case wasm::kRefNull:
-        switch (type.heap_representation()) {
+        switch (type.heap_representation_non_shared()) {
           case wasm::HeapType::kExtern:
           case wasm::HeapType::kNoExtern:
           case wasm::HeapType::kExn:
@@ -7237,7 +7236,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
           }
           case wasm::HeapType::kFunc:
           default: {
-            if (type == wasm::kWasmFuncRef ||
+            if (type.heap_representation_non_shared() ==
+                    wasm::HeapType::kFunc ||
                 module_->has_signature(type.ref_index())) {
               auto done =
                   gasm_->MakeLabel(MachineRepresentation::kTaggedPointer);
@@ -7327,7 +7327,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
     switch (type.kind()) {
       case wasm::kRef:
       case wasm::kRefNull: {
-        switch (type.heap_representation()) {
+        switch (type.heap_representation_non_shared()) {
           // TODO(14034): Add more fast paths?
           case wasm::HeapType::kExtern:
           case wasm::HeapType::kNoExtern:
@@ -7347,7 +7347,6 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
               gasm_->Unreachable();
 
               gasm_->Bind(&done);
-              return input;
             }
             return input;
           case wasm::HeapType::kString:
@@ -7740,7 +7739,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
     } else {
       Return(jsval);
     }
-    if (ContainsInt64(sig_)) LowerInt64(kCalledFromJS);
+    if (ContainsInt64(sig_)) LowerInt64(wasm::kCalledFromJS);
   }
 
   Node* BuildReceiverNode(Node* callable_node, Node* native_context,
@@ -7956,37 +7955,9 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
       // =======================================================================
       // === JS Functions with matching arity ==================================
       // =======================================================================
-      case wasm::ImportCallKind::kJSFunctionArityMatch: {
-        base::SmallVector<Node*, 16> args(wasm_count + 7 - suspend);
-        int pos = 0;
-        Node* function_context =
-            gasm_->LoadContextFromJSFunction(callable_node);
-        args[pos++] = callable_node;  // target callable.
-
-        // Determine receiver at runtime.
-        args[pos++] =
-            BuildReceiverNode(callable_node, native_context, undefined_node);
-
-        auto call_descriptor = Linkage::GetJSCallDescriptor(
-            graph()->zone(), false, wasm_count + 1 - suspend,
-            CallDescriptor::kNoFlags);
-
-        // Convert wasm numbers to JS values.
-        pos = AddArgumentNodes(base::VectorOf(args), pos, wasm_count, sig_,
-                               native_context, suspend);
-
-        args[pos++] = undefined_node;  // new target
-        args[pos++] = Int32Constant(
-            JSParameterCount(wasm_count - suspend));  // argument count
-        args[pos++] = function_context;
-
-        call =
-            BuildCallOnCentralStack(args, pos, call_descriptor, callable_node);
-        break;
-      }
-      // =======================================================================
-      // === JS Functions with mismatching arity ===============================
-      // =======================================================================
+      case wasm::ImportCallKind::kJSFunctionArityMatch:
+        DCHECK_EQ(expected_arity, wasm_count - suspend);
+        V8_FALLTHROUGH;
       case wasm::ImportCallKind::kJSFunctionArityMismatch: {
         int pushed_count = std::max(expected_arity, wasm_count - suspend);
         base::SmallVector<Node*, 16> args(pushed_count + 7);
@@ -8085,7 +8056,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
       Return(base::VectorOf(wasm_values));
     }
 
-    if (ContainsInt64(sig_)) LowerInt64(kCalledFromWasm);
+    if (ContainsInt64(sig_)) LowerInt64(wasm::kCalledFromWasm);
     return true;
   }
 
@@ -8190,7 +8161,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
       Return(base::VectorOf(returns));
     }
 
-    if (ContainsInt64(sig_)) LowerInt64(kCalledFromWasm);
+    if (ContainsInt64(sig_)) LowerInt64(wasm::kCalledFromWasm);
   }
 
   Node* AdaptHandlifiedArgument(Node* node) {
@@ -8458,7 +8429,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
     }
     Return(jsval);
 
-    if (ContainsInt64(sig_)) LowerInt64(kCalledFromJS);
+    if (ContainsInt64(sig_)) LowerInt64(wasm::kCalledFromJS);
   }
 
   void BuildCWasmEntry() {
@@ -8569,40 +8540,47 @@ void BuildInlinedJSToWasmWrapper(Zone* zone, MachineGraph* mcgraph,
   builder.BuildJSToWasmWrapper(is_import, false, frame_state, set_in_wasm_flag);
 }
 
-std::unique_ptr<TurbofanCompilationJob> NewJSToWasmCompilationJob(
+std::unique_ptr<OptimizedCompilationJob> NewJSToWasmCompilationJob(
     Isolate* isolate, const wasm::FunctionSig* sig,
     const wasm::WasmModule* module, bool is_import,
     wasm::WasmFeatures enabled_features) {
-  //----------------------------------------------------------------------------
-  // Create the Graph.
-  //----------------------------------------------------------------------------
-  std::unique_ptr<Zone> zone = std::make_unique<Zone>(
-      wasm::GetWasmEngine()->allocator(), ZONE_NAME, kCompressGraphZone);
-  Graph* graph = zone->New<Graph>(zone.get());
-  CommonOperatorBuilder* common = zone->New<CommonOperatorBuilder>(zone.get());
-  MachineOperatorBuilder* machine = zone->New<MachineOperatorBuilder>(
-      zone.get(), MachineType::PointerRepresentation(),
-      InstructionSelector::SupportedMachineOperatorFlags(),
-      InstructionSelector::AlignmentRequirements());
-  MachineGraph* mcgraph = zone->New<MachineGraph>(graph, common, machine);
-
-  WasmWrapperGraphBuilder builder(
-      zone.get(), mcgraph, sig, module, WasmGraphBuilder::kJSFunctionAbiMode,
-      isolate, nullptr, StubCallMode::kCallBuiltinPointer, enabled_features);
-  builder.BuildJSToWasmWrapper(is_import);
-
-  //----------------------------------------------------------------------------
-  // Create the compilation job.
-  //----------------------------------------------------------------------------
   std::unique_ptr<char[]> debug_name = WasmExportedFunction::GetDebugName(sig);
+  if (v8_flags.turboshaft_wasm_wrappers) {
+    return Pipeline::NewWasmTurboshaftWrapperCompilationJob(
+        isolate, sig, is_import, module, CodeKind::JS_TO_WASM_FUNCTION,
+        std::move(debug_name), WasmAssemblerOptions());
+  } else {
+    std::unique_ptr<Zone> zone = std::make_unique<Zone>(
+        wasm::GetWasmEngine()->allocator(), ZONE_NAME, kCompressGraphZone);
+    int params = static_cast<int>(sig->parameter_count());
+    CallDescriptor* incoming = Linkage::GetJSCallDescriptor(
+        zone.get(), false, params + 1, CallDescriptor::kNoFlags);
 
-  int params = static_cast<int>(sig->parameter_count());
-  CallDescriptor* incoming = Linkage::GetJSCallDescriptor(
-      zone.get(), false, params + 1, CallDescriptor::kNoFlags);
+    //----------------------------------------------------------------------------
+    // Create the Graph.
+    //----------------------------------------------------------------------------
+    Graph* graph = zone->New<Graph>(zone.get());
+    CommonOperatorBuilder* common =
+        zone->New<CommonOperatorBuilder>(zone.get());
+    MachineOperatorBuilder* machine = zone->New<MachineOperatorBuilder>(
+        zone.get(), MachineType::PointerRepresentation(),
+        InstructionSelector::SupportedMachineOperatorFlags(),
+        InstructionSelector::AlignmentRequirements());
+    MachineGraph* mcgraph = zone->New<MachineGraph>(graph, common, machine);
 
-  return Pipeline::NewWasmHeapStubCompilationJob(
-      isolate, incoming, std::move(zone), graph, CodeKind::JS_TO_WASM_FUNCTION,
-      std::move(debug_name), WasmAssemblerOptions());
+    WasmWrapperGraphBuilder builder(
+        zone.get(), mcgraph, sig, module, WasmGraphBuilder::kJSFunctionAbiMode,
+        isolate, nullptr, StubCallMode::kCallBuiltinPointer, enabled_features);
+    builder.BuildJSToWasmWrapper(is_import);
+
+    //----------------------------------------------------------------------------
+    // Create the compilation job.
+    //----------------------------------------------------------------------------
+    return Pipeline::NewWasmHeapStubCompilationJob(
+        isolate, incoming, std::move(zone), graph,
+        CodeKind::JS_TO_WASM_FUNCTION, std::move(debug_name),
+        WasmAssemblerOptions());
+  }
 }
 
 namespace {

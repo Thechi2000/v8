@@ -529,6 +529,7 @@ GarbageCollector Heap::SelectGarbageCollector(AllocationSpace space,
                                               const char** reason) const {
   if (gc_reason == GarbageCollectionReason::kFinalizeConcurrentMinorMS) {
     DCHECK(new_space());
+    DCHECK(!ShouldReduceMemory());
     *reason = "Concurrent MinorMS needs finalization";
     return GarbageCollector::MINOR_MARK_SWEEPER;
   }
@@ -545,16 +546,18 @@ GarbageCollector Heap::SelectGarbageCollector(AllocationSpace space,
     return GarbageCollector::MARK_COMPACTOR;
   }
 
-  if (incremental_marking()->IsMajorMarking() &&
-      incremental_marking()->IsMajorMarkingComplete() &&
-      AllocationLimitOvershotByLargeMargin()) {
-    *reason = "Incremental marking needs finalization";
+  if (v8_flags.separate_gc_phases && incremental_marking()->IsMajorMarking()) {
+    // TODO(v8:12503): Remove next condition (allocation limit overshot) when
+    // separate_gc_phases flag is enabled and removed.
+    *reason = "Incremental marking forced finalization";
     return GarbageCollector::MARK_COMPACTOR;
   }
 
-  if (v8_flags.separate_gc_phases && incremental_marking()->IsMajorMarking()) {
-    // TODO(v8:12503): Remove previous condition when flag gets removed.
-    *reason = "Incremental marking forced finalization";
+  if (incremental_marking()->IsMajorMarking() &&
+      incremental_marking()->IsMajorMarkingComplete() &&
+      AllocationLimitOvershotByLargeMargin()) {
+    DCHECK(!v8_flags.minor_ms);
+    *reason = "Incremental marking needs finalization";
     return GarbageCollector::MARK_COMPACTOR;
   }
 
@@ -578,8 +581,7 @@ void Heap::SetGCState(HeapState state) {
 }
 
 bool Heap::IsGCWithStack() const {
-  return embedder_stack_state_ ==
-         cppgc::EmbedderStackState::kMayContainHeapPointers;
+  return embedder_stack_state_ == StackState::kMayContainHeapPointers;
 }
 
 bool Heap::CanShortcutStringsDuringGC(GarbageCollector collector) const {
@@ -1002,10 +1004,10 @@ bool Heap::IsRetainingPathTarget(Tagged<HeapObject> object,
                                  RetainingPathOption* option) {
   Tagged<WeakArrayList> targets = retaining_path_targets();
   int length = targets->length();
-  MaybeObject object_to_check = HeapObjectReference::Weak(object);
+  Tagged<MaybeObject> object_to_check = MakeWeak(object);
   for (int i = 0; i < length; i++) {
-    MaybeObject target = targets->Get(i);
-    DCHECK(target->IsWeakOrCleared());
+    Tagged<MaybeObject> target = targets->Get(i);
+    DCHECK(target.IsWeakOrCleared());
     if (target == object_to_check) {
       DCHECK(retaining_path_target_option_.count(i));
       *option = retaining_path_target_option_[i];
@@ -1496,9 +1498,10 @@ void Heap::StartMinorMSIncrementalMarkingIfNeeded() {
            MB) &&
       new_space()->Size() >= MinorMSConcurrentMarkingTrigger(this) &&
       ShouldUseBackgroundThreads()) {
-    StartIncrementalMarking(GCFlag::kNoFlags, GarbageCollectionReason::kTask,
-                            kNoGCCallbackFlags,
-                            GarbageCollector::MINOR_MARK_SWEEPER);
+    TryStartIncrementalMarking(
+        GCFlag::kNoFlags, GarbageCollectionReason::kTask, kNoGCCallbackFlags,
+        IncrementalMarkingMemoryReducingSweepingHandling::kFinalize,
+        GarbageCollector::MINOR_MARK_SWEEPER);
     // Schedule a task for finalizing the GC if needed.
     ScheduleMinorGCTaskIfNeeded();
   }
@@ -1509,7 +1512,7 @@ void Heap::CollectAllGarbage(GCFlags gc_flags,
                              const v8::GCCallbackFlags gc_callback_flags) {
   current_gc_flags_ = gc_flags;
   CollectGarbage(OLD_SPACE, gc_reason, gc_callback_flags);
-  current_gc_flags_ = GCFlag::kNoFlags;
+  DCHECK_EQ(GCFlags(GCFlag::kNoFlags), current_gc_flags_);
 }
 
 namespace {
@@ -1604,20 +1607,21 @@ void Heap::CollectAllAvailableGarbage(GarbageCollectionReason gc_reason) {
   isolate()->ClearSerializerData();
   isolate()->compilation_cache()->Clear();
 
-  current_gc_flags_ =
+  const GCFlags gc_flags =
       GCFlag::kReduceMemoryFootprint |
       (gc_reason == GarbageCollectionReason::kLowMemoryNotification
            ? GCFlag::kForced
            : GCFlag::kNoFlags);
   for (int attempt = 0; attempt < kMaxNumberOfAttempts; attempt++) {
     const size_t roots_before = num_roots();
+    current_gc_flags_ = gc_flags;
     CollectGarbage(OLD_SPACE, gc_reason, kNoGCCallbackFlags);
+    DCHECK_EQ(GCFlags(GCFlag::kNoFlags), current_gc_flags_);
     if ((roots_before == num_roots()) &&
         ((attempt + 1) >= kMinNumberOfAttempts)) {
       break;
     }
   }
-  current_gc_flags_ = GCFlag::kNoFlags;
 
   EagerlyFreeExternalMemory();
 
@@ -1682,9 +1686,10 @@ void Heap::ReportExternalMemoryPressure() {
   }
   if (incremental_marking()->IsStopped()) {
     if (incremental_marking()->CanBeStarted()) {
-      StartIncrementalMarking(GCFlagsForIncrementalMarking(),
-                              GarbageCollectionReason::kExternalMemoryPressure,
-                              kGCCallbackFlagsForExternalMemory);
+      TryStartIncrementalMarking(
+          GCFlagsForIncrementalMarking(),
+          GarbageCollectionReason::kExternalMemoryPressure,
+          kGCCallbackFlagsForExternalMemory);
     } else {
       CollectAllGarbage(i::GCFlag::kNoFlags,
                         GarbageCollectionReason::kExternalMemoryPressure,
@@ -1722,7 +1727,7 @@ void InvokeExternalCallbacks(Isolate* isolate, Callback callback) {
   // Temporary override any embedder stack state as callbacks may create
   // their own state on the stack and recursively trigger GC.
   EmbedderStackStateScope embedder_scope(
-      isolate->heap(), EmbedderStackStateScope::kExplicitInvocation,
+      isolate->heap(), EmbedderStackStateOrigin::kExplicitInvocation,
       StackState::kMayContainHeapPointers);
   VMState<EXTERNAL> callback_state(isolate);
 
@@ -1790,17 +1795,24 @@ void Heap::CollectGarbage(AllocationSpace space,
 
   DCHECK(AllowGarbageCollection::IsAllowed());
   // TODO(chromium:1523607): Ensure this for standalone cppgc as well.
-  CHECK(!isolate()->InFastCCall());
+  CHECK_IMPLIES(!v8_flags.allow_allocation_in_fast_api_call,
+                !isolate()->InFastCCall());
 
   const char* collector_reason = nullptr;
   const GarbageCollector collector =
       SelectGarbageCollector(space, gc_reason, &collector_reason);
   current_or_last_garbage_collector_ = collector;
+  DCHECK_IMPLIES(v8_flags.minor_ms && IsYoungGenerationCollector(collector),
+                 !ShouldReduceMemory());
 
   if (collector == GarbageCollector::MARK_COMPACTOR &&
       incremental_marking()->IsMinorMarking()) {
+    const GCFlags gc_flags = current_gc_flags_;
+    // Minor GCs should not be memory reducing.
+    current_gc_flags_ &= ~GCFlag::kReduceMemoryFootprint;
     CollectGarbage(NEW_SPACE,
                    GarbageCollectionReason::kFinalizeConcurrentMinorMS);
+    current_gc_flags_ = gc_flags;
   }
 
   const GCType gc_type = GetGCTypeFromGarbageCollector(collector);
@@ -1952,6 +1964,10 @@ void Heap::CollectGarbage(AllocationSpace space,
       FatalProcessOutOfMemory("Reached heap limit");
     }
   }
+
+  if (collector == GarbageCollector::MARK_COMPACTOR) {
+    current_gc_flags_ = GCFlag::kNoFlags;
+  }
 }
 
 int Heap::NotifyContextDisposed(bool has_dependent_context) {
@@ -1971,17 +1987,29 @@ int Heap::NotifyContextDisposed(bool has_dependent_context) {
   return ++contexts_disposed_;
 }
 
-void Heap::StartIncrementalMarking(GCFlags gc_flags,
-                                   GarbageCollectionReason gc_reason,
-                                   GCCallbackFlags gc_callback_flags,
-                                   GarbageCollector collector) {
+void Heap::TryStartIncrementalMarking(
+    GCFlags gc_flags, GarbageCollectionReason gc_reason,
+    GCCallbackFlags gc_callback_flags,
+    IncrementalMarkingMemoryReducingSweepingHandling sweeping_handling,
+    GarbageCollector collector) {
   DCHECK(incremental_marking()->IsStopped());
-  CHECK(!isolate()->InFastCCall());
+  CHECK_IMPLIES(!v8_flags.allow_allocation_in_fast_api_call,
+                !isolate()->InFastCCall());
 
   // Delay incremental marking start while concurrent sweeping still has work.
   // This helps avoid large CompleteSweep blocks on the main thread when major
   // incremental marking should be scheduled following a minor GC.
   if (sweeper()->AreMinorSweeperTasksRunning()) return;
+
+  // Finalizing sweeping for memory reducing GCs is expensive and may cause
+  // hangs. If we can afford to postpone incremental marking start (e.g. on soft
+  // limit), we wait for sweeping to finish concurrently first.
+  if (sweeping_handling ==
+      IncrementalMarkingMemoryReducingSweepingHandling::kWait) {
+    if (sweeper()->IsMemoryReducingMajorSweeping() &&
+        sweeper()->AreMajorSweeperTasksRunning())
+      return;
+  }
 
   if (v8_flags.separate_gc_phases && gc_callbacks_depth_ > 0) {
     // Do not start incremental marking while invoking GC callbacks.
@@ -2099,7 +2127,7 @@ void Heap::StartIncrementalMarkingIfAllocationLimitIsReached(
     switch (IncrementalMarkingLimitReached()) {
       case IncrementalMarkingLimit::kHardLimit:
         if (local_heap->is_main_thread_for(this)) {
-          StartIncrementalMarking(
+          TryStartIncrementalMarking(
               gc_flags,
               OldGenerationSpaceAvailable() <= NewSpaceTargetCapacity()
                   ? GarbageCollectionReason::kAllocationLimit
@@ -2252,6 +2280,11 @@ void Heap::EnsureWasmCanonicalRttsSize(int length) {
                                  required_wrapper_length, AllocationType::kOld);
   new_wrappers->set_length(required_wrapper_length);
   set_js_to_wasm_wrappers(*new_wrappers);
+}
+
+void Heap::ClearWasmCanonicalRttsForTesting() {
+  ReadOnlyRoots roots(this);
+  set_wasm_canonical_rtts(roots.empty_weak_array_list());
 }
 #endif
 
@@ -4184,8 +4217,8 @@ void Heap::CheckMemoryPressure() {
   } else if (memory_pressure_level == MemoryPressureLevel::kModerate) {
     if (v8_flags.incremental_marking && incremental_marking()->IsStopped()) {
       TRACE_EVENT0("devtools.timeline,v8", "V8.CheckMemoryPressure");
-      StartIncrementalMarking(GCFlag::kReduceMemoryFootprint,
-                              GarbageCollectionReason::kMemoryPressure);
+      TryStartIncrementalMarking(GCFlag::kReduceMemoryFootprint,
+                                 GarbageCollectionReason::kMemoryPressure);
     }
   }
 }
@@ -4219,8 +4252,8 @@ void Heap::CollectGarbageOnMemoryPressure() {
                         kGCCallbackFlagCollectAllAvailableGarbage);
     } else {
       if (v8_flags.incremental_marking && incremental_marking()->IsStopped()) {
-        StartIncrementalMarking(GCFlag::kReduceMemoryFootprint,
-                                GarbageCollectionReason::kMemoryPressure);
+        TryStartIncrementalMarking(GCFlag::kReduceMemoryFootprint,
+                                   GarbageCollectionReason::kMemoryPressure);
       }
     }
   }
@@ -5313,19 +5346,6 @@ bool Heap::IsMainThreadParked(LocalHeap* local_heap) {
   return local_heap->main_thread_parked_;
 }
 
-bool Heap::IsMajorMarkingComplete(LocalHeap* local_heap) {
-  // Only check this on the main thread.
-  if (!local_heap || !local_heap->is_main_thread()) return false;
-
-  // But also ignore main threads of client isolates.
-  if (local_heap->heap() != this) {
-    DCHECK(isolate()->is_shared_space_isolate());
-    return false;
-  }
-
-  return incremental_marking()->IsMajorMarkingComplete();
-}
-
 Heap::HeapGrowingMode Heap::CurrentHeapGrowingMode() {
   if (ShouldReduceMemory() || v8_flags.stress_compaction) {
     return Heap::HeapGrowingMode::kMinimal;
@@ -5978,9 +5998,9 @@ void Heap::DetachCppHeap() {
   cpp_heap_ = nullptr;
 }
 
-const cppgc::EmbedderStackState* Heap::overriden_stack_state() const {
-  const auto* cpp_heap = CppHeap::From(cpp_heap_);
-  return cpp_heap ? cpp_heap->override_stack_state() : nullptr;
+std::optional<StackState> Heap::overridden_stack_state() const {
+  if (!embedder_stack_state_origin_) return {};
+  return embedder_stack_state_;
 }
 
 void Heap::SetStackStart(void* stack_start) {
@@ -6197,8 +6217,8 @@ Handle<WeakArrayList> CompactWeakArrayList(Heap* heap,
   // fill in the new array.
   int copy_to = 0;
   for (int i = 0; i < array->length(); i++) {
-    MaybeObject element = array->Get(i);
-    if (element->IsCleared()) continue;
+    Tagged<MaybeObject> element = array->Get(i);
+    if (element.IsCleared()) continue;
     new_array->Set(copy_to++, element);
   }
   new_array->set_length(copy_to);
@@ -6264,7 +6284,7 @@ void Heap::AddRetainedMaps(Handle<NativeContext> context,
         continue;
       }
 
-      raw_array->Set(cur_length, HeapObjectReference::Weak(*map));
+      raw_array->Set(cur_length, MakeWeak(*map));
       raw_array->Set(cur_length + 1,
                      Smi::FromInt(v8_flags.retain_maps_for_n_gc));
       cur_length += 2;
@@ -6280,14 +6300,14 @@ void Heap::CompactRetainedMaps(Tagged<WeakArrayList> retained_maps) {
   int new_length = 0;
   // This loop compacts the array by removing cleared weak cells.
   for (int i = 0; i < length; i += 2) {
-    MaybeObject maybe_object = retained_maps->Get(i);
-    if (maybe_object->IsCleared()) {
+    Tagged<MaybeObject> maybe_object = retained_maps->Get(i);
+    if (maybe_object.IsCleared()) {
       continue;
     }
 
-    DCHECK(maybe_object->IsWeak());
+    DCHECK(maybe_object.IsWeak());
 
-    MaybeObject age = retained_maps->Get(i + 1);
+    Tagged<MaybeObject> age = retained_maps->Get(i + 1);
     DCHECK(IsSmi(age));
     if (i != new_length) {
       retained_maps->Set(new_length, maybe_object);
@@ -6297,7 +6317,7 @@ void Heap::CompactRetainedMaps(Tagged<WeakArrayList> retained_maps) {
   }
   Tagged<HeapObject> undefined = ReadOnlyRoots(this).undefined_value();
   for (int i = new_length; i < length; i++) {
-    retained_maps->Set(i, HeapObjectReference::Strong(undefined));
+    retained_maps->Set(i, undefined);
   }
   if (new_length != length) retained_maps->set_length(new_length);
 }
@@ -7418,14 +7438,21 @@ void StrongRootAllocatorBase::deallocate_impl(Address* p, size_t n) noexcept {
 void Heap::set_allocation_timeout(int allocation_timeout) {
   heap_allocator_->SetAllocationTimeout(allocation_timeout);
 }
+
+int Heap::get_allocation_timeout_for_testing() const {
+  return heap_allocator_->get_allocation_timeout_for_testing();
+}
 #endif  // V8_ENABLE_ALLOCATION_TIMEOUT
 
 void Heap::FinishSweepingIfOutOfWork() {
-  if (sweeper()->major_sweeping_in_progress() && v8_flags.concurrent_sweeping &&
+  if (sweeper()->major_sweeping_in_progress() &&
+      sweeper()->UsingMajorSweeperTasks() &&
       !sweeper()->AreMajorSweeperTasksRunning()) {
     // At this point we know that all concurrent sweeping tasks have run
     // out of work and quit: all pages are swept. The main thread still needs
     // to complete sweeping though.
+    DCHECK_IMPLIES(!delay_sweeper_tasks_for_testing_,
+                   !sweeper()->HasUnsweptPagesForMajorSweeping());
     EnsureSweepingCompleted(SweepingForcedFinalizationMode::kV8Only);
   }
   if (cpp_heap()) {
@@ -7513,30 +7540,23 @@ void Heap::EnsureYoungSweepingCompleted() {
   tracer()->NotifyYoungSweepingCompleted();
 }
 
-void Heap::DrainSweepingWorklistForSpace(AllocationSpace space) {
-  if (!sweeper()->sweeping_in_progress_for_space(space)) return;
-  sweeper()->DrainSweepingWorklistForSpace(space);
-}
-
-EmbedderStackStateScope::EmbedderStackStateScope(Heap* heap, Origin origin,
-                                                 StackState stack_state)
-    : heap_(heap), old_stack_state_(heap_->embedder_stack_state_) {
-  if (origin == kImplicitThroughTask && heap->overriden_stack_state()) {
-    stack_state = *heap->overriden_stack_state();
+EmbedderStackStateScope::EmbedderStackStateScope(
+    Heap* heap, EmbedderStackStateOrigin origin, StackState stack_state)
+    : heap_(heap),
+      old_stack_state_(heap_->embedder_stack_state_),
+      old_origin_(heap->embedder_stack_state_origin_) {
+  // Explicit scopes take precedence over implicit scopes.
+  if (origin == EmbedderStackStateOrigin::kExplicitInvocation ||
+      heap_->embedder_stack_state_origin_ !=
+          EmbedderStackStateOrigin::kExplicitInvocation) {
+    heap_->embedder_stack_state_ = stack_state;
+    heap_->embedder_stack_state_origin_ = origin;
   }
-
-  heap_->embedder_stack_state_ = stack_state;
-}
-
-// static
-EmbedderStackStateScope EmbedderStackStateScope::ExplicitScopeForTesting(
-    Heap* heap, StackState stack_state) {
-  return EmbedderStackStateScope(heap, Origin::kExplicitInvocation,
-                                 stack_state);
 }
 
 EmbedderStackStateScope::~EmbedderStackStateScope() {
   heap_->embedder_stack_state_ = old_stack_state_;
+  heap_->embedder_stack_state_origin_ = old_origin_;
 }
 
 CppClassNamesAsHeapObjectNameScope::CppClassNamesAsHeapObjectNameScope(

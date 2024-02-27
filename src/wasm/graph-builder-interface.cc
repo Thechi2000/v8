@@ -739,7 +739,7 @@ class WasmGraphBuildingInterface {
   TFNode* ExternRefToString(FullDecoder* decoder, const Value value,
                             bool null_succeeds = false) {
     wasm::ValueType target_type =
-        null_succeeds ? kWasmStringRef : kWasmRefString;
+        null_succeeds ? kWasmRefNullExternString : kWasmRefExternString;
     WasmTypeCheckConfig config{value.type, target_type};
     TFNode* string =
         builder_->RefCastAbstract(value.node, config, decoder->position());
@@ -768,7 +768,7 @@ class WasmGraphBuildingInterface {
         decoder->detected_->Add(kFeature_imported_strings);
         break;
       case WKI::kStringTest: {
-        WasmTypeCheckConfig config{args[0].type, kWasmRefString};
+        WasmTypeCheckConfig config{args[0].type, kWasmRefExternString};
         result = builder_->RefTestAbstract(args[0].node, config);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
@@ -777,7 +777,7 @@ class WasmGraphBuildingInterface {
         TFNode* string = ExternRefToString(decoder, args[0]);
         TFNode* view = builder_->StringAsWtf16(
             string, compiler::kWithoutNullCheck, decoder->position());
-        builder_->SetType(view, kWasmRefString);
+        builder_->SetType(view, kWasmRefExternString);
         result = builder_->StringViewWtf16GetCodeUnit(
             view, compiler::kWithoutNullCheck, args[1].node,
             decoder->position());
@@ -788,7 +788,7 @@ class WasmGraphBuildingInterface {
         TFNode* string = ExternRefToString(decoder, args[0]);
         TFNode* view = builder_->StringAsWtf16(
             string, compiler::kWithoutNullCheck, decoder->position());
-        builder_->SetType(view, kWasmRefString);
+        builder_->SetType(view, kWasmRefExternString);
         result = builder_->StringCodePointAt(view, compiler::kWithoutNullCheck,
                                              args[1].node, decoder->position());
         decoder->detected_->Add(kFeature_imported_strings);
@@ -809,7 +809,7 @@ class WasmGraphBuildingInterface {
         result = builder_->StringConcat(
             head_string, compiler::kWithoutNullCheck, tail_string,
             compiler::kWithoutNullCheck, decoder->position());
-        builder_->SetType(result, kWasmRefString);
+        builder_->SetType(result, kWasmRefExternString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
       }
@@ -826,19 +826,19 @@ class WasmGraphBuildingInterface {
       }
       case WKI::kStringFromCharCode:
         result = builder_->StringFromCharCode(args[0].node);
-        builder_->SetType(result, kWasmRefString);
+        builder_->SetType(result, kWasmRefExternString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
       case WKI::kStringFromCodePoint:
         result = builder_->StringFromCodePoint(args[0].node);
-        builder_->SetType(result, kWasmRefString);
+        builder_->SetType(result, kWasmRefExternString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
       case WKI::kStringFromWtf16Array:
         result = builder_->StringNewWtf16Array(
             args[0].node, NullCheckFor(args[0].type), args[1].node,
             args[2].node, decoder->position());
-        builder_->SetType(result, kWasmRefString);
+        builder_->SetType(result, kWasmRefExternString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
       case WKI::kStringFromUtf8Array:
@@ -846,7 +846,7 @@ class WasmGraphBuildingInterface {
             unibrow::Utf8Variant::kLossyUtf8, args[0].node,
             NullCheckFor(args[0].type), args[1].node, args[2].node,
             decoder->position());
-        builder_->SetType(result, kWasmRefString);
+        builder_->SetType(result, kWasmRefExternString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
       case WKI::kStringIntoUtf8Array: {
@@ -884,11 +884,11 @@ class WasmGraphBuildingInterface {
         TFNode* string = ExternRefToString(decoder, args[0]);
         TFNode* view = builder_->StringAsWtf16(
             string, compiler::kWithoutNullCheck, decoder->position());
-        builder_->SetType(view, kWasmRefString);
+        builder_->SetType(view, kWasmRefExternString);
         result = builder_->StringViewWtf16Slice(
             view, compiler::kWithoutNullCheck, args[1].node, args[2].node,
             decoder->position());
-        builder_->SetType(result, kWasmRefString);
+        builder_->SetType(result, kWasmRefExternString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
       }
@@ -956,6 +956,7 @@ class WasmGraphBuildingInterface {
       case WKI::kDataViewSetUint16:
       case WKI::kDataViewSetUint32:
       case WKI::kDataViewByteLength:
+      case WKI::kFastAPICall:
         return false;
     }
     if (v8_flags.trace_wasm_inlining) {
@@ -964,6 +965,36 @@ class WasmGraphBuildingInterface {
     }
     assumptions_->RecordAssumption(index, import);
     SetAndTypeNode(&returns[0], result);
+    // The decoder assumes that any call might throw, so if we are in a try
+    // block, it marks the associated catch block as reachable, and will
+    // later ask the graph builder to build the catch block's graph.
+    // However, we just replaced the call with a sequence that doesn't throw,
+    // which might make the catch block unreachable as far as the graph builder
+    // is concerned, which would violate assumptions when trying to build a
+    // graph for it. So we insert a fake branch to the catch block to make it
+    // reachable. Later phases will optimize this out.
+    if (decoder->current_catch() != -1) {
+      TryInfo* try_info = current_try_info(decoder);
+      if (try_info->catch_env->state == SsaEnv::kUnreachable) {
+        auto [true_cont, false_cont] =
+            builder_->BranchExpectTrue(builder_->Int32Constant(1));
+        SsaEnv* success_env = Steal(decoder->zone(), ssa_env_);
+        success_env->control = true_cont;
+
+        SsaEnv* exception_env = Split(decoder->zone(), success_env);
+        exception_env->control = false_cont;
+
+        ScopedSsaEnv scoped_env(this, exception_env, success_env);
+
+        if (emit_loop_exits()) {
+          ValueVector stack_values;
+          uint32_t depth = decoder->control_depth_of_current_catch();
+          BuildNestedLoopExits(decoder, depth, true, stack_values);
+        }
+        Goto(decoder, try_info->catch_env);
+        try_info->exception = builder_->Int32Constant(1);
+      }
+    }
     return true;
   }
 

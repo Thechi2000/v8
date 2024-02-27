@@ -966,6 +966,27 @@ OptionalObjectRef ContextRef::get(JSHeapBroker* broker, int index) const {
   return TryMakeRef(broker, object()->get(index));
 }
 
+OptionalObjectRef ContextRef::TryGetSideData(JSHeapBroker* broker,
+                                             int index) const {
+  if (!object()->IsScriptContext()) {
+    return {};
+  }
+
+  // No side data for slots which are not variables in the context.
+  if (index < Context::MIN_CONTEXT_EXTENDED_SLOTS) {
+    return {};
+  }
+
+  OptionalObjectRef maybe_side_data =
+      get(broker, Context::CONST_TRACKING_LET_SIDE_DATA_INDEX);
+  if (!maybe_side_data.has_value()) return {};
+  // The FixedArray itself will stay constant, but its contents may change while
+  // we compile in the background.
+  FixedArrayRef side_data_fixed_array = maybe_side_data.value().AsFixedArray();
+  return side_data_fixed_array.TryGet(
+      broker, index - Context::MIN_CONTEXT_EXTENDED_SLOTS);
+}
+
 void JSHeapBroker::InitializeAndStartSerializing(
     Handle<NativeContext> target_native_context) {
   TraceScope tracer(this, "JSHeapBroker::InitializeAndStartSerializing");
@@ -1052,6 +1073,13 @@ ObjectData* JSHeapBroker::TryGetOrCreateData(Handle<Object> object,
   {
     UNREACHABLE();
   }
+
+  // Our type checking (essentially GetMapInstanceType) assumes that a heap
+  // object with itself as map must be a meta map and so must be a MAP_TYPE.
+  // However, this isn't necessarily true in case of heap memory corruption.
+  // This check defends against that. See b/326700497 for more details.
+  SBXCHECK_EQ(object_data->IsMap(), IsMap(*object));
+
   // At this point the entry pointer is not guaranteed to be valid as
   // the refs_ hash hable could be resized by one of the constructors above.
   DCHECK_EQ(object_data, refs_->Lookup(object.address())->value);
@@ -1415,7 +1443,7 @@ Float64 FixedDoubleArrayRef::GetFromImmutableFixedDoubleArray(int i) const {
   return Float64::FromBits(object()->get_representation(i));
 }
 
-Handle<ByteArray> BytecodeArrayRef::SourcePositionTable(
+Handle<TrustedByteArray> BytecodeArrayRef::SourcePositionTable(
     JSHeapBroker* broker) const {
   return broker->CanonicalPersistentHandle(object()->SourcePositionTable());
 }
@@ -1627,6 +1655,7 @@ HEAP_ACCESSOR_C(ScopeInfo, int, ContextLength)
 HEAP_ACCESSOR_C(ScopeInfo, bool, HasContextExtensionSlot)
 HEAP_ACCESSOR_C(ScopeInfo, bool, HasOuterScopeInfo)
 HEAP_ACCESSOR_C(ScopeInfo, bool, ClassScopeHasPrivateBrand)
+HEAP_ACCESSOR_C(ScopeInfo, ScopeType, scope_type)
 
 ScopeInfoRef ScopeInfoRef::OuterScopeInfo(JSHeapBroker* broker) const {
   return MakeRefAssumeMemoryFence(broker, object()->OuterScopeInfo());
@@ -2328,10 +2357,10 @@ OptionalMapRef JSObjectRef::GetObjectCreateMap(JSHeapBroker* broker) const {
       map_handle->prototype_info(kAcquireLoad));
   if (!IsPrototypeInfo(*maybe_proto_info)) return {};
 
-  MaybeObject maybe_object_create_map =
+  Tagged<MaybeObject> maybe_object_create_map =
       Handle<PrototypeInfo>::cast(maybe_proto_info)
           ->ObjectCreateMap(kAcquireLoad);
-  if (!maybe_object_create_map->IsWeak()) return {};
+  if (!maybe_object_create_map.IsWeak()) return {};
 
   return MapRef(broker->GetOrCreateData(
       maybe_object_create_map.GetHeapObjectAssumeWeak(), kAssumeMemoryFence));

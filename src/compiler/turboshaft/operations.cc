@@ -1054,6 +1054,8 @@ std::ostream& operator<<(std::ostream& os, NumericKind kind) {
       return os << "Integer";
     case NumericKind::kSafeInteger:
       return os << "SafeInteger";
+    case NumericKind::kSmi:
+      return os << "kSmi";
     case NumericKind::kMinusZero:
       return os << "MinusZero";
     case NumericKind::kNaN:
@@ -1617,6 +1619,18 @@ void Simd128LoadTransformOp::PrintOptions(std::ostream& os) const {
 void Simd128ShuffleOp::PrintOptions(std::ostream& os) const {
   PrintSimd128Value(os, shuffle);
 }
+
+#if V8_ENABLE_WASM_SIMD256_REVEC
+std::ostream& operator<<(std::ostream& os, Simd256UnaryOp::Kind kind) {
+  switch (kind) {
+#define PRINT_KIND(kind)              \
+  case Simd256UnaryOp::Kind::k##kind: \
+    return os << #kind;
+    FOREACH_SIMD_256_UNARY_OPCODE(PRINT_KIND)
+  }
+#undef PRINT_KIND
+}
+#endif
 
 void WasmAllocateArrayOp::PrintOptions(std::ostream& os) const {
   os << '[' << array_type->element_type() << "]";

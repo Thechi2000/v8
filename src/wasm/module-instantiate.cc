@@ -14,6 +14,7 @@
 #include "src/numbers/conversions-inl.h"
 #include "src/objects/descriptor-array-inl.h"
 #include "src/objects/property-descriptor.h"
+#include "src/objects/torque-defined-classes.h"
 #include "src/tracing/trace-event.h"
 #include "src/utils/utils.h"
 #include "src/wasm/code-space-access.h"
@@ -29,6 +30,10 @@
 #include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-opcodes-inl.h"
 #include "src/wasm/wasm-subtyping.h"
+
+#ifdef V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
+#include "src/execution/simulator-base.h"
+#endif  // V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
 
 #define TRACE(...)                                          \
   do {                                                      \
@@ -156,7 +161,8 @@ void CreateMapForType(Isolate* isolate, const WasmModule* module,
   canonical_rtts = handle(isolate->heap()->wasm_canonical_rtts(), isolate);
   DCHECK_GT(static_cast<uint32_t>(canonical_rtts->length()),
             canonical_type_index);
-  MaybeObject maybe_canonical_map = canonical_rtts->Get(canonical_type_index);
+  Tagged<MaybeObject> maybe_canonical_map =
+      canonical_rtts->Get(canonical_type_index);
   if (maybe_canonical_map.IsStrongOrWeak() &&
       IsMap(maybe_canonical_map.GetHeapObject())) {
     maps->set(type_index, maybe_canonical_map.GetHeapObject());
@@ -186,7 +192,7 @@ void CreateMapForType(Isolate* isolate, const WasmModule* module,
       map = CreateFuncRefMap(isolate, rtt_parent);
       break;
   }
-  canonical_rtts->Set(canonical_type_index, HeapObjectReference::Weak(*map));
+  canonical_rtts->Set(canonical_type_index, MakeWeak(*map));
   maps->set(type_index, *map);
 }
 
@@ -201,19 +207,24 @@ MachineRepresentation NormalizeFastApiRepresentation(const CTypeInfo& info) {
   return t.representation();
 }
 
+enum class ReceiverKind { kFirstParamIsReceiver, kAnyReceiver };
+
 bool IsSupportedWasmFastApiFunction(Isolate* isolate,
                                     const wasm::FunctionSig* expected_sig,
-                                    Handle<SharedFunctionInfo> shared) {
+                                    Tagged<SharedFunctionInfo> shared,
+                                    ReceiverKind receiver_kind) {
   if (!shared->IsApiFunction()) {
     return false;
   }
   if (shared->api_func_data()->GetCFunctionsCount() == 0) {
     return false;
   }
-  if (!shared->api_func_data()->accept_any_receiver()) {
+  if (receiver_kind == ReceiverKind::kAnyReceiver &&
+      !shared->api_func_data()->accept_any_receiver()) {
     return false;
   }
-  if (!IsUndefined(shared->api_func_data()->signature())) {
+  if (receiver_kind == ReceiverKind::kAnyReceiver &&
+      !IsUndefined(shared->api_func_data()->signature())) {
     // TODO(wasm): CFunctionInfo* signature check.
     return false;
   }
@@ -263,18 +274,36 @@ bool IsSupportedWasmFastApiFunction(Isolate* isolate,
       return false;
     }
   }
+
+  if (receiver_kind == ReceiverKind::kFirstParamIsReceiver) {
+    if (expected_sig->parameter_count() < 1) {
+      log_imported_function_mismatch(
+          "at least one parameter is needed as the receiver");
+      return false;
+    }
+    if (!expected_sig->GetParam(0).is_reference()) {
+      log_imported_function_mismatch("the receiver has to be a reference");
+      return false;
+    }
+  }
+
+  int param_offset =
+      receiver_kind == ReceiverKind::kFirstParamIsReceiver ? 1 : 0;
   // Unsupported if arity doesn't match.
-  if (expected_sig->parameter_count() != info->ArgumentCount() - 1) {
+  if (expected_sig->parameter_count() - param_offset !=
+      info->ArgumentCount() - 1) {
     log_imported_function_mismatch("mismatched arity");
     return false;
   }
   // Unsupported if any argument types don't match.
-  for (unsigned int i = 0; i < expected_sig->parameter_count(); i += 1) {
-    // Arg 0 is the receiver, skip over it since wasm doesn't
-    // have a concept of receivers.
+  for (unsigned int i = 0; i < expected_sig->parameter_count() - param_offset;
+       ++i) {
+    int sig_index = i + param_offset;
+    // Arg 0 is the receiver, skip over it since either the receiver does not
+    // matter, or we already checked it above.
     CTypeInfo arg = info->ArgumentInfo(i + 1);
     if (NormalizeFastApiRepresentation(arg) !=
-        expected_sig->GetParam(i).machine_type().representation()) {
+        expected_sig->GetParam(sig_index).machine_type().representation()) {
       log_imported_function_mismatch("parameter type mismatch");
       return false;
     }
@@ -309,7 +338,8 @@ bool ResolveBoundJSFastApiFunction(const wasm::FunctionSig* expected_sig,
 
   Isolate* isolate = target->GetIsolate();
   Handle<SharedFunctionInfo> shared(target->shared(), isolate);
-  return IsSupportedWasmFastApiFunction(isolate, expected_sig, shared);
+  return IsSupportedWasmFastApiFunction(isolate, expected_sig, *shared,
+                                        ReceiverKind::kAnyReceiver);
 }
 
 bool IsStringRef(wasm::ValueType type) {
@@ -390,6 +420,33 @@ WellKnownImport CheckForWellKnownImport(
   Tagged<Object> bound_this = bound->bound_this();
   if (!IsJSFunction(bound_this)) return kGeneric;
   sfi = JSFunction::cast(bound_this)->shared();
+  Isolate* isolate = JSFunction::cast(bound_this)->GetIsolate();
+  if (v8_flags.wasm_fast_api &&
+      IsSupportedWasmFastApiFunction(isolate, sig, sfi,
+                                     ReceiverKind::kFirstParamIsReceiver)) {
+    Tagged<FunctionTemplateInfo> func_data = sfi->api_func_data();
+    NativeModule* native_module =
+        trusted_instance_data->module_object()->native_module();
+    if (!native_module->TrySetFastApiCallTarget(func_index,
+                                                func_data->GetCFunction(0))) {
+      return kGeneric;
+    }
+#ifdef V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
+    Address c_functions[] = {func_data->GetCFunction(0)};
+    const v8::CFunctionInfo* const c_signatures[] = {
+        func_data->GetCSignature(0)};
+    isolate->simulator_data()->RegisterFunctionsAndSignatures(c_functions,
+                                                              c_signatures, 1);
+#endif  //  V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
+    native_module->set_fast_api_sig(func_index, func_data->GetCSignature(0));
+
+    Handle<HeapObject> js_signature(sfi->api_func_data()->signature(), isolate);
+    Handle<WasmFastApiCallData> fast_api_call_data =
+        isolate->factory()->NewWasmFastApiCallData(js_signature);
+    trusted_instance_data->well_known_imports()->set(func_index,
+                                                     *fast_api_call_data);
+    return WellKnownImport::kFastAPICall;
+  }
   if (!sfi->HasBuiltinId()) return kGeneric;
   switch (sfi->builtin_id()) {
 #if V8_INTL_SUPPORT
@@ -1216,6 +1273,20 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
     CreateMapForType(isolate_, module_, index, instance_object, maps);
   }
   trusted_data->set_managed_object_maps(*maps);
+#if DEBUG
+  for (uint32_t index = 0; index < module_->types.size(); index++) {
+    Tagged<Object> o = maps->get(index);
+    DCHECK(IsMap(o));
+    Tagged<Map> map = Map::cast(o);
+    if (module_->has_signature(index)) {
+      DCHECK_EQ(map->instance_type(), WASM_INTERNAL_FUNCTION_TYPE);
+    } else if (module_->has_array(index)) {
+      DCHECK_EQ(map->instance_type(), WASM_ARRAY_TYPE);
+    } else if (module_->has_struct(index)) {
+      DCHECK_EQ(map->instance_type(), WASM_STRUCT_TYPE);
+    }
+  }
+#endif
 
   //--------------------------------------------------------------------------
   // Allocate the array that will hold type feedback vectors.
@@ -1777,7 +1848,8 @@ bool InstanceBuilder::ProcessImportedFunction(
                                    expected_sig);
         break;
       }
-      int expected_arity = static_cast<int>(expected_sig->parameter_count());
+      int expected_arity = static_cast<int>(expected_sig->parameter_count()) -
+                           resolved.suspend();
       if (kind == ImportCallKind::kJSFunctionArityMismatch) {
         Handle<JSFunction> function = Handle<JSFunction>::cast(js_receiver);
         Tagged<SharedFunctionInfo> shared = function->shared();
@@ -2169,7 +2241,8 @@ void InstanceBuilder::CompileImportWrappers(
       continue;
     }
 
-    int expected_arity = static_cast<int>(sig->parameter_count());
+    int expected_arity =
+        static_cast<int>(sig->parameter_count() - resolved.suspend());
     if (kind == ImportCallKind::kJSFunctionArityMismatch) {
       Handle<JSFunction> function =
           Handle<JSFunction>::cast(resolved.callable());
@@ -2747,7 +2820,9 @@ ValueOrError ConsumeElementSegmentEntry(
   }
 
   auto sig = FixedSizeSignature<ValueType>::Returns(segment.type);
-  FunctionBody body(&sig, decoder.pc_offset(), decoder.pc(), decoder.end());
+  constexpr bool kIsShared = false;  // TODO(14616): Is this correct?
+  FunctionBody body(&sig, decoder.pc_offset(), decoder.pc(), decoder.end(),
+                    kIsShared);
   WasmFeatures detected;
   ValueOrError result;
   {

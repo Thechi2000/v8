@@ -1147,7 +1147,9 @@ DecodeResult ValidateSingleFunction(Zone* zone, const WasmModule* module,
   // is the case, and exit early if so.
   if (module->function_was_validated(func_index)) return {};
   const WasmFunction* func = &module->functions[func_index];
-  FunctionBody body{func->sig, func->code.offset(), code.begin(), code.end()};
+  bool is_shared = module->types[func->sig_index].is_shared;
+  FunctionBody body{func->sig, func->code.offset(), code.begin(), code.end(),
+                    is_shared};
   WasmFeatures detected_features;
   DecodeResult result = ValidateFunctionBody(zone, enabled_features, module,
                                              &detected_features, body);
@@ -1524,6 +1526,22 @@ void TierUpNowForTesting(Isolate* isolate,
   CHECK(!native_module->compilation_state()->failed());
 }
 
+void TierUpAllForTesting(
+    Isolate* isolate, Tagged<WasmTrustedInstanceData> trusted_instance_data) {
+  const WasmModule* mod = trusted_instance_data->module();
+  NativeModule* native_module =
+      trusted_instance_data->module_object()->native_module();
+  WasmCodeRefScope code_ref_scope;
+
+  uint32_t start = mod->num_imported_functions;
+  uint32_t end = start + mod->num_declared_functions;
+  for (uint32_t func_index = start; func_index < end; func_index++) {
+    if (!native_module->HasCodeWithTier(func_index, ExecutionTier::kTurbofan)) {
+      TierUpNowForTesting(isolate, trusted_instance_data, func_index);
+    }
+  }
+}
+
 bool IsI16Array(wasm::ValueType type, const WasmModule* module) {
   if (!type.is_object_reference() || !type.has_index()) return false;
   uint32_t reftype = type.ref_index();
@@ -1843,7 +1861,7 @@ int AddExportWrapperUnits(Isolate* isolate, NativeModule* native_module,
     int wrapper_index =
         GetExportWrapperIndex(canonical_type_index, function.imported);
     if (wrapper_index < isolate->heap()->js_to_wasm_wrappers()->length()) {
-      MaybeObject existing_wrapper =
+      Tagged<MaybeObject> existing_wrapper =
           isolate->heap()->js_to_wasm_wrappers()->Get(wrapper_index);
       if (existing_wrapper.IsStrongOrWeak() &&
           !IsUndefined(existing_wrapper.GetHeapObject())) {
@@ -2050,6 +2068,11 @@ void CompileNativeModule(Isolate* isolate,
       InitializeCompilation(isolate, native_module.get(), pgo_info);
   compilation_state->InitializeCompilationUnits(std::move(builder));
 
+  // Wrapper compilation jobs keep a pointer to the function signatures, so
+  // finish them before we validate and potentially free the module.
+  compilation_state->WaitForCompilationEvent(
+      CompilationEvent::kFinishedExportWrappers);
+
   // Validate wasm modules for lazy compilation if requested. Never validate
   // asm.js modules as these are valid by construction (additionally a CHECK
   // will catch this during lazy compilation).
@@ -2062,12 +2085,8 @@ void CompileNativeModule(Isolate* isolate,
     }
   }
 
-  compilation_state->WaitForCompilationEvent(
-      CompilationEvent::kFinishedExportWrappers);
-
   if (!compilation_state->failed()) {
     compilation_state->FinalizeJSToWasmWrappers(isolate, module);
-
     compilation_state->WaitForCompilationEvent(
         CompilationEvent::kFinishedBaselineCompilation);
 
@@ -2186,20 +2205,30 @@ class AsyncCompileJSToWasmWrapperJob final
     PtrComprCageAccessScope ptr_compr_cage_access_scope(isolate);
     while (true) {
       DCHECK_EQ(isolate, wrapper_unit->isolate());
+      base::Optional<BackgroundCompileScope> compile_scope;
+      if (v8_flags.turboshaft_wasm_wrappers) {
+        compile_scope.emplace(native_module_);
+        if (compile_scope->cancelled()) return;
+        // The wrapper unit keeps a pointer to the signature, so execute the
+        // unit inside the compile scope to keep the WasmModule's signature_zone
+        // alive.
+      }
       wrapper_unit->Execute();
       bool complete_last_unit = CompleteUnit();
       bool yield = delegate && delegate->ShouldYield();
       if (yield && !complete_last_unit) return;
 
-      BackgroundCompileScope compile_scope(native_module_);
-      if (compile_scope.cancelled()) return;
+      if (!v8_flags.turboshaft_wasm_wrappers) {
+        compile_scope.emplace(native_module_);
+        if (compile_scope->cancelled()) return;
+      }
       if (complete_last_unit) {
-        compile_scope.compilation_state()->OnFinishedJSToWasmWrapperUnits();
+        compile_scope->compilation_state()->OnFinishedJSToWasmWrapperUnits();
       }
       if (yield) return;
       if (!GetNextUnitIndex(&index)) return;
       wrapper_unit =
-          compile_scope.compilation_state()->GetJSToWasmWrapperCompilationUnit(
+          compile_scope->compilation_state()->GetJSToWasmWrapperCompilationUnit(
               index);
     }
   }
@@ -3864,8 +3893,7 @@ void CompilationStateImpl::FinalizeJSToWasmWrappers(Isolate* isolate,
     DCHECK(!code->is_builtin());
     uint32_t index =
         GetExportWrapperIndex(unit->canonical_sig_index(), unit->is_import());
-    isolate->heap()->js_to_wasm_wrappers()->Set(
-        index, MaybeObject::FromObject(code->wrapper()));
+    isolate->heap()->js_to_wasm_wrappers()->Set(index, code->wrapper());
     RecordStats(*code, isolate->counters());
     isolate->counters()->wasm_compiled_export_wrapper()->Increment(1);
   }
@@ -4374,7 +4402,7 @@ void CompileJsToWasmWrappers(Isolate* isolate, const WasmModule* module) {
         module->isorecursive_canonical_type_ids[function.sig_index];
     int wrapper_index =
         GetExportWrapperIndex(canonical_type_index, function.imported);
-    MaybeObject existing_wrapper =
+    Tagged<MaybeObject> existing_wrapper =
         isolate->heap()->js_to_wasm_wrappers()->Get(wrapper_index);
     if (existing_wrapper.IsStrongOrWeak() &&
         !IsUndefined(existing_wrapper.GetHeapObject())) {
@@ -4418,8 +4446,7 @@ void CompileJsToWasmWrappers(Isolate* isolate, const WasmModule* module) {
     Handle<Code> code = unit->Finalize();
     DCHECK(!code->is_builtin());
     int wrapper_index = GetExportWrapperIndex(key.second, key.first);
-    isolate->heap()->js_to_wasm_wrappers()->Set(
-        wrapper_index, HeapObjectReference::Strong(code->wrapper()));
+    isolate->heap()->js_to_wasm_wrappers()->Set(wrapper_index, code->wrapper());
     // Do not increase code stats for non-jitted wrappers.
     RecordStats(*code, isolate->counters());
     isolate->counters()->wasm_compiled_export_wrapper()->Increment(1);

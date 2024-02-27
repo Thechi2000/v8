@@ -75,12 +75,11 @@ bool IsSupported(CpuOperation op) {
 #elif defined(V8_TARGET_ARCH_ARM)
       return CpuFeatures::IsSupported(ARMv8);
 #elif defined(V8_TARGET_ARCH_ARM64) || defined(V8_TARGET_ARCH_PPC64) || \
-    defined(V8_TARGET_ARCH_S390X)
+    defined(V8_TARGET_ARCH_S390X) || defined(V8_TARGET_ARCH_RISCV64) || \
+    defined(V8_TARGET_ARCH_RISCV32)
       return true;
 #else
-      // This architecture is not supported by the Maglev backend, and
-      // IsSupported should thus not be called.
-      UNREACHABLE();
+#error "V8 does not support this architecture."
 #endif
   }
 }
@@ -2484,9 +2483,9 @@ void MaglevGraphBuilder::BuildLoadContextSlot(
       context, Context::OffsetOfElementAt(slot_index), kMutable));
 }
 
-void MaglevGraphBuilder::BuildStoreContextSlot(ValueNode* context, size_t depth,
-                                               int slot_index,
-                                               ValueNode* value) {
+void MaglevGraphBuilder::BuildStoreContextSlotHelper(
+    ValueNode* context, size_t depth, int slot_index, ValueNode* value,
+    bool update_const_tracking_let_side_data) {
   MinimizeContextChainDepth(&context, &depth);
 
   if (compilation_unit_->info()->specialize_to_function_context()) {
@@ -2504,8 +2503,29 @@ void MaglevGraphBuilder::BuildStoreContextSlot(ValueNode* context, size_t depth,
         kImmutable);
   }
 
+  if (update_const_tracking_let_side_data) {
+    BuildCheckConstTrackingLetCell(context, value, slot_index);
+  }
+
   StoreAndCacheContextSlot(context, Context::OffsetOfElementAt(slot_index),
                            value);
+}
+
+void MaglevGraphBuilder::BuildStoreContextSlot(ValueNode* context, size_t depth,
+                                               int slot_index,
+                                               ValueNode* value) {
+  constexpr bool kUpdateConstTrackingLetSideData = false;
+  BuildStoreContextSlotHelper(context, depth, slot_index, value,
+                              kUpdateConstTrackingLetSideData);
+}
+
+void MaglevGraphBuilder::BuildStoreScriptContextSlot(ValueNode* context,
+                                                     size_t depth,
+                                                     int slot_index,
+                                                     ValueNode* value) {
+  bool kUpdateConstTrackingLetSideData = v8_flags.const_tracking_let;
+  BuildStoreContextSlotHelper(context, depth, slot_index, value,
+                              kUpdateConstTrackingLetSideData);
 }
 
 void MaglevGraphBuilder::VisitLdaContextSlot() {
@@ -2541,6 +2561,19 @@ void MaglevGraphBuilder::VisitStaCurrentContextSlot() {
   ValueNode* context = GetContext();
   int slot_index = iterator_.GetIndexOperand(0);
   BuildStoreContextSlot(context, 0, slot_index, GetRawAccumulator());
+}
+
+void MaglevGraphBuilder::VisitStaScriptContextSlot() {
+  ValueNode* context = LoadRegisterTagged(0);
+  int slot_index = iterator_.GetIndexOperand(1);
+  size_t depth = iterator_.GetUnsignedImmediateOperand(2);
+  BuildStoreScriptContextSlot(context, depth, slot_index, GetRawAccumulator());
+}
+
+void MaglevGraphBuilder::VisitStaCurrentScriptContextSlot() {
+  ValueNode* context = GetContext();
+  int slot_index = iterator_.GetIndexOperand(0);
+  BuildStoreScriptContextSlot(context, 0, slot_index, GetRawAccumulator());
 }
 
 void MaglevGraphBuilder::VisitStar() {
@@ -2644,6 +2677,11 @@ ReduceResult MaglevGraphBuilder::TryBuildScriptContextStore(
   }
   auto script_context = GetConstant(global_access_feedback.script_context());
   int offset = Context::OffsetOfElementAt(global_access_feedback.slot_index());
+  if (v8_flags.const_tracking_let) {
+    BuildCheckConstTrackingLetCell(script_context, GetRawAccumulator(),
+                                   global_access_feedback.slot_index());
+  }
+
   StoreAndCacheContextSlot(script_context, offset, GetRawAccumulator());
   return ReduceResult::Done();
 }
@@ -3013,18 +3051,6 @@ NodeType StaticTypeForNode(compiler::JSHeapBroker* broker,
       compiler::HeapObjectRef ref =
           MaglevGraphBuilder::TryGetConstant(broker, isolate, node).value();
       return StaticTypeForConstant(broker, ref);
-    }
-    case Opcode::kLoadPolymorphicTaggedField: {
-      Representation field_representation =
-          node->Cast<LoadPolymorphicTaggedField>()->field_representation();
-      switch (field_representation.kind()) {
-        case Representation::kSmi:
-          return NodeType::kSmi;
-        case Representation::kHeapObject:
-          return NodeType::kAnyHeapObject;
-        default:
-          return NodeType::kUnknown;
-      }
     }
     case Opcode::kToNumberOrNumeric:
       if (node->Cast<ToNumberOrNumeric>()->mode() ==
@@ -3430,14 +3456,15 @@ ReduceResult MaglevGraphBuilder::BuildTransitionElementsKindOrCheckMap(
 }
 
 ReduceResult MaglevGraphBuilder::BuildCompareMaps(
-    ValueNode* object, base::Vector<const compiler::MapRef> maps,
-    MaglevSubGraphBuilder* sub_graph,
+    ValueNode* heap_object, base::Optional<ValueNode*> object_map_opt,
+    base::Vector<const compiler::MapRef> maps, MaglevSubGraphBuilder* sub_graph,
     base::Optional<MaglevSubGraphBuilder::Label>& if_not_matched) {
-  NodeInfo* known_info = known_node_aspects().GetOrCreateInfoFor(object);
-  known_info->CombineType(StaticTypeForNode(broker(), local_isolate(), object));
+  NodeInfo* known_info = known_node_aspects().GetOrCreateInfoFor(heap_object);
+  known_info->CombineType(
+      StaticTypeForNode(broker(), local_isolate(), heap_object));
 
   KnownMapsMerger merger(broker(), maps);
-  merger.IntersectWithKnownNodeAspects(object, known_node_aspects());
+  merger.IntersectWithKnownNodeAspects(heap_object, known_node_aspects());
 
   if (merger.intersect_set().is_empty()) {
     return ReduceResult::DoneWithAbort();
@@ -3446,9 +3473,11 @@ ReduceResult MaglevGraphBuilder::BuildCompareMaps(
   // TODO(pthier): Avoid relaoding the map. This also applies to CheckMaps,
   // TransitionElementsKind, etc. We could change those nodes to optionally
   // take a map as input and returning the map.
-  AddNewNode<CheckHeapObject>({object});
   ValueNode* object_map =
-      AddNewNode<LoadTaggedField>({object}, HeapObject::kMapOffset);
+      object_map_opt.has_value()
+          ? object_map_opt.value()
+          : AddNewNode<LoadTaggedField>({heap_object}, HeapObject::kMapOffset);
+
   // TODO(pthier): Support map packing.
   DCHECK(!V8_MAP_PACKING_BOOL);
 
@@ -3470,28 +3499,29 @@ ReduceResult MaglevGraphBuilder::BuildCompareMaps(
     sub_graph->Goto(&*map_matched);
     sub_graph->Bind(&*map_matched);
   }
-  merger.UpdateKnownNodeAspects(object, known_node_aspects());
+  merger.UpdateKnownNodeAspects(heap_object, known_node_aspects());
   return ReduceResult::Done();
 }
 
 ReduceResult MaglevGraphBuilder::BuildTransitionElementsKindAndCompareMaps(
-    ValueNode* object, const ZoneVector<compiler::MapRef>& transition_sources,
+    ValueNode* heap_object,
+    const ZoneVector<compiler::MapRef>& transition_sources,
     compiler::MapRef transition_target, MaglevSubGraphBuilder* sub_graph,
     base::Optional<MaglevSubGraphBuilder::Label>& if_not_matched) {
   DCHECK(!transition_target.is_migration_target());
 
-  NodeInfo* known_info = known_node_aspects().GetOrCreateInfoFor(object);
-  known_info->CombineType(StaticTypeForNode(broker(), local_isolate(), object));
+  NodeInfo* known_info = known_node_aspects().GetOrCreateInfoFor(heap_object);
+  known_info->CombineType(
+      StaticTypeForNode(broker(), local_isolate(), heap_object));
 
   // TODO(pthier): Calculate and use the intersection of known maps with
   // (transition_sources union transition_target).
 
-  AddNewNode<TransitionElementsKind>({object}, transition_sources,
+  AddNewNode<TransitionElementsKind>({heap_object}, transition_sources,
                                      transition_target);
-  // TODO(pthier): Avoid relaoding the map.
-  AddNewNode<CheckHeapObject>({object});
   ValueNode* object_map =
-      AddNewNode<LoadTaggedField>({object}, HeapObject::kMapOffset);
+      AddNewNode<LoadTaggedField>({heap_object}, HeapObject::kMapOffset);
+
   // TODO(pthier): Support map packing.
   DCHECK(!V8_MAP_PACKING_BOOL);
   if_not_matched.emplace(sub_graph, 1);
@@ -4094,120 +4124,111 @@ ReduceResult MaglevGraphBuilder::TryBuildNamedAccess(
     return TryBuildPropertyAccess(receiver, lookup_start_object,
                                   feedback.name(), access_info, access_mode);
   } else {
-    // TODO(victorgomes): Support more generic polymorphic case.
+    // TODO(victorgomes): Unify control flow logic with
+    // TryBuildPolymorphicElementAccess and support polymorphic stores.
 
     // Only support polymorphic load at the moment.
     if (access_mode != compiler::AccessMode::kLoad) {
       return ReduceResult::Fail();
     }
 
-    // Check if we support the polymorphic load.
-    for (compiler::PropertyAccessInfo const& access_info : access_infos) {
-      DCHECK(!access_info.IsInvalid());
-      if (access_info.IsDictionaryProtoDataConstant()) {
-        compiler::OptionalObjectRef constant =
-            access_info.holder()->GetOwnDictionaryProperty(
-                broker(), access_info.dictionary_index(),
-                broker()->dependencies());
-        if (!constant.has_value()) {
-          return ReduceResult::Fail();
-        }
-      } else if (access_info.IsDictionaryProtoAccessorConstant() ||
-                 access_info.IsFastAccessorConstant()) {
-        return ReduceResult::Fail();
-      }
+    const int access_info_count = static_cast<int>(access_infos.size());
+    int number_map_index = -1;
 
+    // Check if we support the polymorphic load.
+    for (int i = 0; i < access_info_count; i++) {
+      compiler::PropertyAccessInfo const& access_info = access_infos[i];
+      DCHECK(!access_info.IsInvalid());
       // TODO(victorgomes): Support map migration.
       for (compiler::MapRef map : access_info.lookup_start_object_maps()) {
         if (map.is_migration_target()) {
           return ReduceResult::Fail();
         }
+        if (map.IsHeapNumberMap()) {
+          DCHECK_EQ(number_map_index, -1);
+          number_map_index = i;
+        }
       }
     }
 
-    // Add compilation dependencies if needed, get constants and fill
-    // polymorphic access info.
-    Representation field_repr = Representation::Smi();
-    ZoneVector<PolymorphicAccessInfo> poly_access_infos(zone());
-    poly_access_infos.reserve(access_infos.size());
+    MaglevSubGraphBuilder subgraph(this, 1);
+    MaglevSubGraphBuilder::Variable ret_val(0);
+    MaglevSubGraphBuilder::Label done(&subgraph, access_info_count, {&ret_val});
+    base::Optional<MaglevSubGraphBuilder::Label> is_number;
+    base::Optional<MaglevSubGraphBuilder::Label> generic_access;
 
-    for (compiler::PropertyAccessInfo const& access_info : access_infos) {
-      if (access_info.holder().has_value() &&
-          !access_info.HasDictionaryHolder()) {
-        broker()->dependencies()->DependOnStablePrototypeChains(
-            access_info.lookup_start_object_maps(), kStartAtPrototype,
-            access_info.holder().value());
+    if (number_map_index >= 0) {
+      is_number.emplace(&subgraph, 2);
+      subgraph.GotoIfTrue<BranchIfSmi>(&*is_number, {lookup_start_object});
+    } else {
+      AddNewNode<CheckHeapObject>({lookup_start_object});
+    }
+    ValueNode* lookup_start_object_map = AddNewNode<LoadTaggedField>(
+        {lookup_start_object}, HeapObject::kMapOffset);
+
+    for (int i = 0; i < access_info_count; i++) {
+      compiler::PropertyAccessInfo const& access_info = access_infos[i];
+      base::Optional<MaglevSubGraphBuilder::Label> check_next_map;
+      ReduceResult map_check_result;
+      const auto& maps = access_info.lookup_start_object_maps();
+      if (i == access_info_count - 1) {
+        map_check_result =
+            BuildCheckMaps(lookup_start_object, base::VectorOf(maps));
+      } else {
+        map_check_result =
+            BuildCompareMaps(lookup_start_object, lookup_start_object_map,
+                             base::VectorOf(maps), &subgraph, check_next_map);
+      }
+      if (map_check_result.IsDoneWithAbort()) {
+        // We know from known possible maps that this branch is not reachable,
+        // so don't emit any code for it.
+        continue;
+      }
+      if (i == number_map_index) {
+        DCHECK(is_number.has_value());
+        subgraph.Goto(&*is_number);
+        subgraph.Bind(&*is_number);
       }
 
-      const auto& maps = access_info.lookup_start_object_maps();
-      switch (access_info.kind()) {
-        case compiler::PropertyAccessInfo::kNotFound:
-          field_repr = Representation::Tagged();
-          poly_access_infos.push_back(PolymorphicAccessInfo::NotFound(maps));
+      ReduceResult result = TryBuildPropertyLoad(receiver, lookup_start_object,
+                                                 feedback.name(), access_info);
+      switch (result.kind()) {
+        case ReduceResult::kDoneWithValue:
+          subgraph.set(ret_val, result.value());
           break;
-        case compiler::PropertyAccessInfo::kDataField:
-        case compiler::PropertyAccessInfo::kFastDataConstant: {
-          field_repr =
-              field_repr.generalize(access_info.field_representation());
-
-          compiler::OptionalJSObjectRef constant_holder =
-              TryGetConstantDataFieldHolder(access_info, lookup_start_object);
-          if (constant_holder) {
-            if (access_info.field_representation().IsDouble()) {
-              base::Optional<Float64> constant = TryFoldLoadConstantDoubleField(
-                  constant_holder.value(), access_info);
-              if (constant.has_value()) {
-                poly_access_infos.push_back(
-                    PolymorphicAccessInfo::ConstantDouble(maps,
-                                                          constant.value()));
-                break;
-              }
-            } else {
-              compiler::OptionalObjectRef constant =
-                  TryFoldLoadConstantDataField(constant_holder.value(),
-                                               access_info);
-              if (constant.has_value()) {
-                poly_access_infos.push_back(
-                    PolymorphicAccessInfo::Constant(maps, constant.value()));
-                break;
-              }
-            }
+        case ReduceResult::kDoneWithAbort:
+          break;
+        case ReduceResult::kFail:
+          if (!generic_access.has_value()) {
+            // Conservatively assume that all remaining branches can go into the
+            // generic path, as we have to initialize the predecessors upfront.
+            // TODO(pthier): Find a better way to do that.
+            generic_access.emplace(&subgraph, access_info_count - i);
           }
-
-          poly_access_infos.push_back(PolymorphicAccessInfo::DataLoad(
-              maps, access_info.field_representation(), access_info.holder(),
-              access_info.field_index()));
-          break;
-        }
-        case compiler::PropertyAccessInfo::kDictionaryProtoDataConstant: {
-          field_repr =
-              field_repr.generalize(access_info.field_representation());
-          compiler::OptionalObjectRef constant =
-              TryFoldLoadDictPrototypeConstant(access_info);
-          DCHECK(constant.has_value());
-          poly_access_infos.push_back(
-              PolymorphicAccessInfo::Constant(maps, constant.value()));
-          break;
-        }
-        case compiler::PropertyAccessInfo::kModuleExport:
-          field_repr = Representation::Tagged();
-          break;
-        case compiler::PropertyAccessInfo::kStringLength:
-          poly_access_infos.push_back(
-              PolymorphicAccessInfo::StringLength(maps));
+          subgraph.Goto(&*generic_access);
           break;
         default:
           UNREACHABLE();
       }
+      subgraph.Goto(&done);
+
+      if (check_next_map.has_value()) {
+        subgraph.Bind(&*check_next_map);
+      }
     }
 
-    if (field_repr.kind() == Representation::kDouble) {
-      return AddNewNode<LoadPolymorphicDoubleField>(
-          {lookup_start_object}, std::move(poly_access_infos));
+    if (generic_access.has_value() &&
+        !subgraph.TrimPredecessorsAndBind(&*generic_access).IsDoneWithAbort()) {
+      // Create a generic load.
+      ValueNode* context = GetContext();
+      subgraph.set(ret_val, AddNewNode<LoadNamedGeneric>(
+                                {context, lookup_start_object}, feedback.name(),
+                                feedback_source));
+      subgraph.Goto(&done);
     }
 
-    return AddNewNode<LoadPolymorphicTaggedField>(
-        {lookup_start_object}, field_repr, std::move(poly_access_infos));
+    RETURN_IF_ABORT(subgraph.TrimPredecessorsAndBind(&done));
+    return subgraph.get(ret_val);
   }
 }
 
@@ -4335,6 +4356,30 @@ ReduceResult TryFindLoadedProperty(
 }
 
 }  // namespace
+
+ValueNode* MaglevGraphBuilder::BuildLoadElements(ValueNode* object) {
+  ReduceResult known_elements =
+      TryFindLoadedProperty(known_node_aspects().loaded_properties, object,
+                            KnownNodeAspects::LoadedPropertyMapKey::Elements());
+  if (known_elements.IsDone()) {
+    DCHECK(known_elements.IsDoneWithValue());
+    if (v8_flags.trace_maglev_graph_building) {
+      std::cout << "  * Reusing non-constant [Elements] "
+                << PrintNodeLabel(graph_labeller(), known_elements.value())
+                << ": " << PrintNode(graph_labeller(), known_elements.value())
+                << std::endl;
+    }
+    return known_elements.value();
+  }
+
+  DCHECK_EQ(JSObject::kElementsOffset, JSArray::kElementsOffset);
+  ValueNode* elements =
+      AddNewNode<LoadTaggedField>({object}, JSObject::kElementsOffset);
+  RecordKnownProperty(object,
+                      KnownNodeAspects::LoadedPropertyMapKey::Elements(),
+                      elements, false, compiler::AccessMode::kLoad);
+  return elements;
+}
 
 ReduceResult MaglevGraphBuilder::BuildLoadTypedArrayLength(
     ValueNode* object, ElementsKind elements_kind) {
@@ -4486,8 +4531,7 @@ ReduceResult MaglevGraphBuilder::TryBuildElementLoadOnJSArrayOrJSObject(
   bool is_jsarray = HasOnlyJSArrayMaps(maps);
   DCHECK(is_jsarray || HasOnlyJSObjectMaps(maps));
 
-  ValueNode* elements_array =
-      AddNewNode<LoadTaggedField>({object}, JSObject::kElementsOffset);
+  ValueNode* elements_array = BuildLoadElements(object);
   ValueNode* index = GetInt32ElementIndex(index_object);
   ValueNode* length;
   if (is_jsarray) {
@@ -4565,9 +4609,7 @@ ReduceResult MaglevGraphBuilder::TryBuildElementStoreOnJSArrayOrJSObject(
   DCHECK(is_jsarray || HasOnlyJSObjectMaps(maps));
 
   // Get the elements array.
-  ValueNode* elements_array =
-      AddNewNode<LoadTaggedField>({object}, JSObject::kElementsOffset);
-
+  ValueNode* elements_array = BuildLoadElements(object);
   GET_VALUE_OR_ABORT(value, ConvertForStoring(value, elements_kind));
   ValueNode* index;
 
@@ -4814,6 +4856,8 @@ ReduceResult MaglevGraphBuilder::TryBuildPolymorphicElementAccess(
   base::Optional<MaglevSubGraphBuilder::Label> done;
   base::Optional<MaglevSubGraphBuilder::Label> generic_access;
 
+  AddNewNode<CheckHeapObject>({object});
+
   // TODO(pthier): We could do better here than just emitting code for each map,
   // as many different maps can produce the exact samce code (e.g. TypedArray
   // access for Uint16/Uint32/Int16/Int32/...).
@@ -4841,7 +4885,7 @@ ReduceResult MaglevGraphBuilder::TryBuildPolymorphicElementAccess(
             &sub_graph, check_next_map);
       } else {
         map_check_result = BuildCompareMaps(
-            object, base::VectorOf(access_info.lookup_start_object_maps()),
+            object, {}, base::VectorOf(access_info.lookup_start_object_maps()),
             &sub_graph, check_next_map);
       }
     }
@@ -4951,6 +4995,9 @@ void MaglevGraphBuilder::RecordKnownProperty(
         case KnownNodeAspects::LoadedPropertyMapKey::kName:
           std::cout << "properties with name " << *key.name().object();
           break;
+        case KnownNodeAspects::LoadedPropertyMapKey::kElements:
+          std::cout << "Elements";
+          break;
         case KnownNodeAspects::LoadedPropertyMapKey::kTypedArrayLength:
           std::cout << "TypedArray length";
           break;
@@ -4968,6 +5015,9 @@ void MaglevGraphBuilder::RecordKnownProperty(
     switch (key.type()) {
       case KnownNodeAspects::LoadedPropertyMapKey::kName:
         std::cout << *key.name().object();
+        break;
+      case KnownNodeAspects::LoadedPropertyMapKey::kElements:
+        std::cout << "Elements";
         break;
       case KnownNodeAspects::LoadedPropertyMapKey::kTypedArrayLength:
         std::cout << "TypedArray length";
@@ -6157,8 +6207,7 @@ ReduceResult MaglevGraphBuilder::TryReduceArrayForEach(
   // ```
   // element = array.elements[index]
   // ```
-  ValueNode* elements =
-      AddNewNode<LoadTaggedField>({receiver}, JSArray::kElementsOffset);
+  ValueNode* elements = BuildLoadElements(receiver);
   ValueNode* element;
   if (IsDoubleElementsKind(elements_kind)) {
     element = AddNewNode<LoadFixedDoubleArrayElement>({elements, index_int32});
@@ -6720,9 +6769,7 @@ ReduceResult MaglevGraphBuilder::TryReduceArrayPrototypePush(
   ValueNode* new_array_length_smi =
       AddNewNode<CheckedSmiIncrement>({old_array_length_smi});
 
-  ValueNode* elements_array =
-      AddNewNode<LoadTaggedField>({receiver}, JSObject::kElementsOffset);
-
+  ValueNode* elements_array = BuildLoadElements(receiver);
   ValueNode* elements_array_length =
       AddNewNode<UnsafeSmiUntag>({AddNewNode<LoadTaggedField>(
           {elements_array}, FixedArray::kLengthOffset)});
@@ -6873,9 +6920,7 @@ ReduceResult MaglevGraphBuilder::TryReduceArrayPrototypePop(
   sub_graph.GotoIfTrue<BranchIfReferenceEqual>(
       &empty_array, {old_array_length_smi, GetSmiConstant(0)});
 
-  ValueNode* elements_array =
-      AddNewNode<LoadTaggedField>({receiver}, JSObject::kElementsOffset);
-
+  ValueNode* elements_array = BuildLoadElements(receiver);
   ValueNode* new_array_length_smi =
       AddNewNode<CheckedSmiDecrement>({old_array_length_smi});
   ValueNode* new_array_length =
@@ -7503,6 +7548,19 @@ ReduceResult MaglevGraphBuilder::BuildCheckValue(ValueNode* node,
   }
   SetKnownValue(node, ref);
   return ReduceResult::Done();
+}
+
+void MaglevGraphBuilder::BuildCheckConstTrackingLetCell(ValueNode* context,
+                                                        ValueNode* value,
+                                                        int index) {
+  switch (value->properties().value_representation()) {
+    case ValueRepresentation::kTagged:
+      AddNewNode<CheckConstTrackingLetCellTagged>({context, value}, index);
+      break;
+    default:
+      AddNewNode<CheckConstTrackingLetCell>({context}, index);
+      break;
+  }
 }
 
 ReduceResult MaglevGraphBuilder::ReduceCallForConstant(
@@ -8866,6 +8924,11 @@ void MaglevGraphBuilder::VisitCreateEmptyArrayLiteral() {
 
   compiler::NativeContextRef native_context = broker()->target_native_context();
   compiler::MapRef map = native_context.GetInitialJSArrayMap(broker(), kind);
+  // Initial JSArray map shouldn't have any in-object properties.
+  // The fields array of the FastObject is allocated according to the in-object
+  // property count. The array stays uninitialized, but it is later accessed in
+  // BuildAllocateFastObject
+  SBXCHECK_EQ(map.GetInObjectProperties(), 0);
   FastObject literal(map, zone(), {});
   literal.js_array_length = MakeRef(broker(), Object::cast(Smi::zero()));
   SetAccumulator(BuildAllocateFastObject(literal, AllocationType::kYoung));
@@ -8997,13 +9060,15 @@ base::Optional<FastObject> MaglevGraphBuilder::TryReadBoilerplateForFastLiteral(
       value = FastField(boilerplate_value);
     }
 
-    DCHECK_LT(index, boilerplate_map.GetInObjectProperties());
+    // The index is derived from the in-sandbox `NumberOfOwnDescriptors` value,
+    // but the access is out-of-sandbox fast_literal fields.
+    SBXCHECK_LT(index, fast_literal.inobject_properties);
     fast_literal.fields[index] = value;
     index++;
   }
 
   // Fill slack at the end of the boilerplate object with filler maps.
-  int const boilerplate_length = boilerplate_map.GetInObjectProperties();
+  int const boilerplate_length = fast_literal.inobject_properties;
   for (; index < boilerplate_length; ++index) {
     DCHECK(!V8_MAP_PACKING_BOOL);
     // TODO(wenyuzhao): Fix incorrect MachineType when V8_MAP_PACKING is
@@ -9124,9 +9189,14 @@ ValueNode* MaglevGraphBuilder::BuildAllocateFastObject(
   if (object.js_array_length.has_value()) {
     BuildStoreTaggedField(allocation, GetConstant(*object.js_array_length),
                           JSArray::kLengthOffset);
+    RecordKnownProperty(allocation, broker()->length_string(),
+                        GetConstant(*object.js_array_length), false,
+                        compiler::AccessMode::kLoad);
   }
-
   BuildStoreTaggedField(allocation, elements, JSObject::kElementsOffset);
+  RecordKnownProperty(allocation,
+                      KnownNodeAspects::LoadedPropertyMapKey::Elements(),
+                      elements, false, compiler::AccessMode::kLoad);
   int number_of_own_descriptors = object.map.NumberOfOwnDescriptors();
   for (int i = 0; i < object.inobject_properties; ++i) {
     BuildStoreTaggedField(allocation, properties[i],
@@ -9134,6 +9204,13 @@ ValueNode* MaglevGraphBuilder::BuildAllocateFastObject(
     if (i < number_of_own_descriptors && object.fields[i].IsInitialized()) {
       compiler::NameRef name =
           object.map.GetPropertyKey(broker(), InternalIndex(i));
+      if (object.fields[i].type == FastField::kMutableDouble) {
+        // Do not cache the property if it is a recently allocated HeapNumber,
+        // since the loaded result should be immutable.
+        // TOOD(victorgomes): we could cache the double value instead and force
+        // an allocation at loading point.
+        continue;
+      }
       // We record as a load, since we don't want to wipe the recorded
       // properties with this name so far. Since we have just allocated the
       // object, it is impossible to alias.

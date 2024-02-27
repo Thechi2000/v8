@@ -131,9 +131,9 @@ class ZoneBuffer : public ZoneObject {
 
   size_t offset() const { return static_cast<size_t>(pos_ - buffer_); }
   size_t size() const { return static_cast<size_t>(pos_ - buffer_); }
-  const uint8_t* data() const { return buffer_; }
-  const uint8_t* begin() const { return buffer_; }
-  const uint8_t* end() const { return pos_; }
+  uint8_t* data() const { return buffer_; }
+  uint8_t* begin() const { return buffer_; }
+  uint8_t* end() const { return pos_; }
 
   void EnsureSpace(size_t size) {
     if ((pos_ + size) > end_) {
@@ -445,6 +445,7 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
   struct WasmGlobalImport {
     base::Vector<const char> module;
     base::Vector<const char> name;
+    // TODO(manoskouk): Extend to full value type.
     ValueTypeCode type_code;
     bool mutability;
   };

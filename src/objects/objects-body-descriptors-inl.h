@@ -366,7 +366,7 @@ class JSArrayBuffer::BodyDescriptor final : public BodyDescriptorBase {
     IteratePointers(obj, kPropertiesOrHashOffset, kEndOfTaggedFieldsOffset, v);
     IterateJSObjectBodyImpl(map, obj, kHeaderSize, object_size, v);
     v->VisitExternalPointer(
-        map, obj->RawExternalPointerField(kExtensionOffset,
+        obj, obj->RawExternalPointerField(kExtensionOffset,
                                           kArrayBufferExtensionTag));
   }
 
@@ -486,7 +486,7 @@ class BytecodeArray::BodyDescriptor final : public BodyDescriptorBase {
                                  int object_size, ObjectVisitor* v) {
     IterateSelfIndirectPointer(obj, kBytecodeArrayIndirectPointerTag, v);
     IteratePointer(obj, kWrapperOffset, v);
-    IteratePointer(obj, kSourcePositionTableOffset, v);
+    IterateProtectedPointer(obj, kSourcePositionTableOffset, v);
     IterateProtectedPointer(obj, kHandlerTableOffset, v);
     IterateProtectedPointer(obj, kConstantPoolOffset, v);
   }
@@ -826,8 +826,9 @@ class WasmTrustedInstanceData::BodyDescriptor final
       IteratePointer(obj, offset, v);
     }
 
-    IterateProtectedPointer(obj, kDispatchTable0Offset, v);
-    IterateProtectedPointer(obj, kDispatchTablesOffset, v);
+    for (uint16_t offset : kProtectedFieldOffsets) {
+      IterateProtectedPointer(obj, offset, v);
+    }
   }
 
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
@@ -1046,6 +1047,7 @@ class Code::BodyDescriptor final : public BodyDescriptorBase {
     IterateSelfIndirectPointer(obj, kCodeIndirectPointerTag, v);
     IterateProtectedPointer(
         obj, Code::kDeoptimizationDataOrInterpreterDataOffset, v);
+    IterateProtectedPointer(obj, Code::kPositionTableOffset, v);
     IteratePointers(obj, Code::kStartOfStrongFieldsOffset,
                     Code::kEndOfStrongFieldsWithMainCageBaseOffset, v);
 
@@ -1340,6 +1342,8 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
       return CALL_APPLY(Cell);
     case PROPERTY_CELL_TYPE:
       return CALL_APPLY(PropertyCell);
+    case CONST_TRACKING_LET_CELL_TYPE:
+      return CALL_APPLY(ConstTrackingLetCell);
     case SYMBOL_TYPE:
       return CALL_APPLY(Symbol);
     case SMALL_ORDERED_HASH_SET_TYPE:

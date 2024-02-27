@@ -835,7 +835,11 @@ NativeModule::NativeModule(WasmFeatures enabled,
       code_allocator_(async_counters),
       enabled_features_(enabled),
       compile_imports_(compile_imports),
-      module_(std::move(module)) {
+      module_(std::move(module)),
+      fast_api_targets_(
+          new std::atomic<Address>[module_->num_imported_functions]()),
+      fast_api_sigs_(
+          new const CFunctionInfo*[module_->num_imported_functions]()) {
   DCHECK(engine_scope_);
   // We receive a pointer to an empty {std::shared_ptr}, and install ourselve
   // there.
@@ -923,8 +927,8 @@ WasmCode* NativeModule::AddCodeForTesting(Handle<Code> code) {
     reloc_info = base::OwnedVector<uint8_t>::Of(
         base::Vector<uint8_t>{code->relocation_start(), relocation_size});
   }
-  Handle<ByteArray> source_pos_table(code->source_position_table(),
-                                     code->instruction_stream()->GetIsolate());
+  Handle<TrustedByteArray> source_pos_table(
+      code->source_position_table(), code->instruction_stream()->GetIsolate());
   int source_pos_len = source_pos_table->length();
   auto source_pos = base::OwnedVector<uint8_t>::NewForOverwrite(source_pos_len);
   if (source_pos_len > 0) {
@@ -2427,7 +2431,7 @@ NamesProvider* NativeModule::GetNamesProvider() {
 }
 
 size_t NativeModule::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(NativeModule, 520);
+  UPDATE_WHEN_CLASS_CHANGES(NativeModule, 536);
   size_t result = sizeof(NativeModule);
   result += module_->EstimateCurrentMemoryConsumption();
 
@@ -2444,6 +2448,9 @@ size_t NativeModule::EstimateCurrentMemoryConsumption() const {
   // For {tiering_budgets_}.
   result += module_->num_declared_functions * sizeof(uint32_t);
 
+  // For fast api call targets.
+  result += module_->num_imported_functions *
+            (sizeof(std::atomic<Address>) + sizeof(CFunctionInfo*));
   {
     base::RecursiveMutexGuard lock(&allocation_mutex_);
     result += ContentSize(owned_code_);
@@ -2537,21 +2544,27 @@ std::pair<WasmCode*, SafepointEntry> WasmCodeManager::LookupCodeAndSafepoint(
     Isolate* isolate, Address pc) {
   auto* entry = isolate->wasm_code_look_up_cache()->GetCacheEntry(pc);
   WasmCode* code = entry->code;
-  DCHECK(code);
-  if (!entry->safepoint_entry.is_initialized()) {
-    SafepointTable table(code);
-    entry->safepoint_entry = table.TryFindEntry(pc);
-    if (!entry->safepoint_entry.is_initialized()) {
-      // Only for protected instructions the safepoint entry is not mandatory.
-      // This is rare, so we don't bother caching the result in this case.
-      CHECK(code->IsProtectedInstruction(
-          pc - WasmFrameConstants::kProtectedInstructionReturnAddressOffset));
-    }
+  DCHECK_NOT_NULL(code);
+  // For protected instructions we usually do not emit a safepoint because the
+  // frame will be unwound anyway. The exception is debugging code, where the
+  // frame might be inspected if "pause on exception" is set.
+  // For those instructions, we thus need to explicitly return an empty
+  // safepoint; using any previously registered safepoint can lead to crashes
+  // when we try to visit spill slots that do not hold tagged values at this
+  // point.
+  // Evaluate this condition only on demand (the fast path does not need it).
+  auto expect_safepoint = [code, pc]() {
+    const bool is_protected_instruction = code->IsProtectedInstruction(
+        pc - WasmFrameConstants::kProtectedInstructionReturnAddressOffset);
+    return !is_protected_instruction || code->for_debugging();
+  };
+  if (!entry->safepoint_entry.is_initialized() && expect_safepoint()) {
+    entry->safepoint_entry = SafepointTable{code}.TryFindEntry(pc);
+    CHECK(entry->safepoint_entry.is_initialized());
+  } else if (expect_safepoint()) {
+    DCHECK_EQ(entry->safepoint_entry, SafepointTable{code}.TryFindEntry(pc));
   } else {
-#ifdef DEBUG
-    SafepointTable table(code);
-    DCHECK_EQ(entry->safepoint_entry, table.TryFindEntry(pc));
-#endif  // DEBUG
+    DCHECK(!entry->safepoint_entry.is_initialized());
   }
   return std::make_pair(code, entry->safepoint_entry);
 }

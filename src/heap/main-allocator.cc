@@ -9,6 +9,7 @@
 #include "src/common/globals.h"
 #include "src/execution/vm-state-inl.h"
 #include "src/execution/vm-state.h"
+#include "src/heap/concurrent-marking.h"
 #include "src/heap/free-list-inl.h"
 #include "src/heap/gc-tracer-inl.h"
 #include "src/heap/heap.h"
@@ -179,7 +180,9 @@ AllocationResult MainAllocator::AllocateRawSlow(int size_in_bytes,
                                                 AllocationAlignment alignment,
                                                 AllocationOrigin origin) {
   // We are not supposed to allocate in fast c calls.
-  CHECK_IMPLIES(is_main_thread(), !isolate_heap()->isolate()->InFastCCall());
+  CHECK_IMPLIES(is_main_thread(),
+                v8_flags.allow_allocation_in_fast_api_call ||
+                    !isolate_heap()->isolate()->InFastCCall());
 
   AllocationResult result =
       USE_ALLOCATION_ALIGNMENT_BOOL && alignment != kTaggedAligned
@@ -543,6 +546,11 @@ bool PagedNewSpaceAllocatorPolicy::EnsureAllocation(
   space_->paged_space()->last_lab_page_->IncreaseAllocatedLabSize(
       allocator_->limit() - allocator_->top());
 
+  if (space_heap()->incremental_marking()->IsMinorMarking()) {
+    space_heap()->concurrent_marking()->RescheduleJobIfNeeded(
+        GarbageCollector::MINOR_MARK_SWEEPER);
+  }
+
   return true;
 }
 
@@ -661,10 +669,10 @@ bool PagedSpaceAllocatorPolicy::RefillLab(int size_in_bytes,
     }
 
     static constexpr int kMaxPagesToSweep = 1;
-    ContributeToSweeping(kMaxPagesToSweep);
-
-    if (TryAllocationFromFreeList(size_in_bytes, origin)) {
-      return true;
+    if (ContributeToSweeping(kMaxPagesToSweep)) {
+      if (TryAllocationFromFreeList(size_in_bytes, origin)) {
+        return true;
+      }
     }
   }
 
@@ -692,9 +700,10 @@ bool PagedSpaceAllocatorPolicy::RefillLab(int size_in_bytes,
   }
 
   // Try sweeping all pages.
-  ContributeToSweeping(0);
-  if (TryAllocationFromFreeList(size_in_bytes, origin)) {
-    return true;
+  if (ContributeToSweeping()) {
+    if (TryAllocationFromFreeList(size_in_bytes, origin)) {
+      return true;
+    }
   }
 
   if (allocator_->identity() != NEW_SPACE && allocator_->in_gc() &&
@@ -720,11 +729,11 @@ bool PagedSpaceAllocatorPolicy::TryExpandAndAllocate(size_t size_in_bytes,
   return false;
 }
 
-void PagedSpaceAllocatorPolicy::ContributeToSweeping(int max_pages) {
+bool PagedSpaceAllocatorPolicy::ContributeToSweeping(uint32_t max_pages) {
   if (!space_heap()->sweeping_in_progress_for_space(allocator_->identity()))
-    return;
+    return false;
   if (space_heap()->sweeper()->IsSweepingDoneForSpace(allocator_->identity()))
-    return;
+    return false;
 
   const bool is_main_thread =
       allocator_->is_main_thread() ||
@@ -744,9 +753,12 @@ void PagedSpaceAllocatorPolicy::ContributeToSweeping(int max_pages) {
       allocator_->in_gc_for_space() ? Sweeper::SweepingMode::kEagerDuringGC
                                     : Sweeper::SweepingMode::kLazyOrConcurrent;
 
-  space_heap()->sweeper()->ParallelSweepSpace(allocator_->identity(),
-                                              sweeping_mode, max_pages);
+  if (!space_heap()->sweeper()->ParallelSweepSpace(allocator_->identity(),
+                                                   sweeping_mode, max_pages)) {
+    return false;
+  }
   space_->RefillFreeList();
+  return true;
 }
 
 void PagedSpaceAllocatorPolicy::SetLinearAllocationArea(Address top,
@@ -776,11 +788,6 @@ bool PagedSpaceAllocatorPolicy::TryAllocationFromFreeList(
   DCHECK_LT(static_cast<size_t>(allocator_->limit() - allocator_->top()),
             size_in_bytes);
 
-  // Mark the old linear allocation area with a free space map so it can be
-  // skipped when scanning the heap.  This also puts it back in the free list
-  // if it is big enough.
-  FreeLinearAllocationAreaUnsynchronized();
-
   size_t new_node_size = 0;
   Tagged<FreeSpace> new_node =
       space_->free_list_->Allocate(size_in_bytes, &new_node_size, origin);
@@ -791,6 +798,11 @@ bool PagedSpaceAllocatorPolicy::TryAllocationFromFreeList(
   // Verify that it did not turn the page of the new node into an evacuation
   // candidate.
   DCHECK(!MarkCompactCollector::IsOnEvacuationCandidate(new_node));
+
+  // Mark the old linear allocation area with a free space map so it can be
+  // skipped when scanning the heap.  This also puts it back in the free list
+  // if it is big enough.
+  FreeLinearAllocationAreaUnsynchronized();
 
   // Memory in the linear allocation area is counted as allocated.  We may free
   // a little of this again immediately - see below.

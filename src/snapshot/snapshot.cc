@@ -254,7 +254,7 @@ void Snapshot::ClearReconstructableDataForSerialization(
     Handle<WeakArrayList> wrappers =
         handle(isolate->heap()->js_to_wasm_wrappers(), isolate);
     for (int i = 0; i < wrappers->length(); ++i) {
-      wrappers->Set(i, MaybeObject{});
+      wrappers->Set(i, Tagged<MaybeObject>{});
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -1082,7 +1082,7 @@ StartupData SnapshotCreatorImpl::CreateBlob(
     // point, so that all dead objects are reclaimed. This is required to avoid
     // conservative stack scanning and guarantee deterministic behaviour.
     EmbedderStackStateScope stack_scope(
-        isolate_->heap(), EmbedderStackStateScope::kExplicitInvocation,
+        isolate_->heap(), EmbedderStackStateOrigin::kExplicitInvocation,
         StackState::kNoHeapPointers);
     isolate_->heap()->CollectAllAvailableGarbage(
         GarbageCollectionReason::kSnapshotCreator);
