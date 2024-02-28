@@ -30,6 +30,7 @@ namespace {
 const int debug_lookaround = -2;
 
 constexpr int kUndefinedRegisterValue = -1;
+constexpr uint64_t kUndefinedClockValue = -1;
 
 template <class Character>
 bool SatisfiesAssertion(RegExpAssertion::Type type,
@@ -173,7 +174,8 @@ private:
 
         // Checks whether the captured group should be saved or discarded.
         int register_id = 2 * group_id;
-        if (capture_clocks_[register_id] >= max_clock_) {
+        if (capture_clocks_[register_id] >= max_clock_ &&
+            capture_clocks_[register_id] != kUndefinedClockValue) {
           filtered_registers_[register_id] = registers_[register_id];
           filtered_registers_[register_id + 1] = registers_[register_id + 1];
           IncrementPC();
@@ -321,6 +323,10 @@ public:
         lookaround_table_.emplace_back(input_.length() + 1, zone_);
       }
 
+      if (RegExpInstruction::IsFilter(inst) && !filter_groups_pc_.has_value()) {
+        filter_groups_pc_ = i;
+      }
+
       if (inst.opcode == RegExpInstruction::SET_QUANTIFIER_TO_CLOCK) {
         quantifier_count_ =
             std::max(quantifier_count_, inst.payload.quantifier_id + 1);
@@ -449,6 +455,8 @@ private:
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
 
+    int old_input_index = input_index_;
+
     for (int i = lookarounds_priority_.length() - 1; i >= 0; --i) {
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
@@ -472,8 +480,7 @@ private:
       active_threads_.Add(
           InterpreterThread(lookarounds_[idx].match_pc_,
                             NewRegisterArray(kUndefinedRegisterValue),
-                            NewQuantifierClockArrayUninitialized(),
-                            NewCaptureClockArrayUninitialized(),
+                            NewQuantifierClockArray(0), NewCaptureClockArray(0),
                             InterpreterThread::ConsumedCharacter::DidConsume),
           zone_);
 
@@ -482,7 +489,7 @@ private:
 
     reverse_ = false;
     current_lookaround_ = -1;
-    input_index_ = 0;
+    input_index_ = old_input_index;
   }
 
   void FillLookaroundCaptures() {
@@ -702,8 +709,8 @@ private:
     // bytecode is located at PC 0, and is executed with the lowest priority.
     active_threads_.Add(
         InterpreterThread(0, NewRegisterArrayUninitialized(),
-                          NewQuantifierClockArrayUninitialized(),
-                          NewCaptureClockArrayUninitialized(),
+                          NewQuantifierClockArray(kUndefinedClockValue),
+                          NewCaptureClockArray(kUndefinedClockValue),
                           InterpreterThread::ConsumedCharacter::DidConsume),
         zone_);
 
@@ -972,7 +979,7 @@ private:
     return capture_clock_array_allocator_.allocate(register_count_per_match_);
   }
 
-  uint64_t *NewCaptureClockArray(int fill_value) {
+  uint64_t *NewCaptureClockArray(uint64_t fill_value) {
     uint64_t *array_begin = NewCaptureClockArrayUninitialized();
     uint64_t *array_end = array_begin + register_count_per_match_;
     std::fill(array_begin, array_end, fill_value);

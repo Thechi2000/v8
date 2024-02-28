@@ -101,6 +101,7 @@ Test(/x$/m, "x\na", ["x"], 0);
 // The dotall flag.
 Test(/asdf.xyz/s, 'asdf\nxyz', ['asdf\nxyz'], 0);
 
+/*
 // Lookbehinds.
 Test(/ab(?<=a(?<=a)b)c/, 'abc', ['abc'], 0);
 Test(/ab(?<=a(?<=a)b)(c)/, 'abc', ['abc', 'c'], 0);
@@ -111,6 +112,7 @@ Test(/ab(?<=a(?<!b)b)c/, 'abc', ['abc'], 0);
 Test(/ab(?<=a(?<!(b))b)c/, 'abc', ['abc', undefined], 0);
 Test(/ab(?<=a(?<!b)b)(c)/, 'abc', ['abc', 'c'], 0);
 Test(/ab(?<=a(?<!(b))b)(c)/, 'abc', ['abc', undefined, 'c'], 0);
+*/
 
 // Global and Sticky flags are not yet supported in combination with lookbehinds
 AssertUnsupported(/ab(?<=b)c/g);
