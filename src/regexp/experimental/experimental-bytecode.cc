@@ -77,6 +77,9 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
     case RegExpInstruction::FILTER_GROUP:
       os << "FILTER_GROUP " << inst.payload.group_id;
       break;
+    case RegExpInstruction::FILTER_LOOKAROUND:
+      os << "FILTER_LOOKAROUND " << inst.payload.lookaround_id;
+      break;
     case RegExpInstruction::FILTER_CHILD:
       os << "FILTER_CHILD " << inst.payload.pc;
       break;
@@ -95,7 +98,7 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
       os << "END_LOOKAROUND";
       break;
     case RegExpInstruction::WRITE_LOOKAROUND_TABLE:
-      os << "WRITE_LOOKAROUND_TABLE " << inst.payload.looktable_index;
+      os << "WRITE_LOOKAROUND_TABLE " << inst.payload.lookaround_id;
       break;
     case RegExpInstruction::READ_LOOKAROUND_TABLE:
       os << "READ_LOOKAROUND_TABLE "

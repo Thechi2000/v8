@@ -314,6 +314,10 @@ class BytecodeAssembler {
     code_.Add(RegExpInstruction::FilterGroup(group_id), zone_);
   }
 
+  void FilterLookaround(int32_t lookaround_id) {
+    code_.Add(RegExpInstruction::FilterLookaround(lookaround_id), zone_);
+  }
+
   void FilterChild(Label& target) {
     LabelledInstrImpl(RegExpInstruction::Opcode::FILTER_CHILD, target);
   }
@@ -469,6 +473,15 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
   }
 
   void* VisitLookaround(RegExpLookaround* node, void*) override {
+    if (compile_capture_or_quant_) {
+      assembler_.FilterLookaround(node->index());
+      compile_capture_or_quant_ = false;
+      node->body()->Accept(this, nullptr);
+    } else {
+      nodes_.emplace_back(node);
+      assembler_.FilterChild(nodes_.back().label);
+    }
+
     return nullptr;
   }
 

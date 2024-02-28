@@ -104,6 +104,7 @@ struct RegExpInstruction {
     SET_QUANTIFIER_TO_CLOCK,
     FILTER_QUANTIFIER,
     FILTER_GROUP,
+    FILTER_LOOKAROUND,
     FILTER_CHILD,
     BEGIN_LOOP,
     END_LOOP,
@@ -120,8 +121,8 @@ struct RegExpInstruction {
   class ReadLookaroundTablePayload {
    public:
     ReadLookaroundTablePayload() = default;
-    ReadLookaroundTablePayload(int32_t lookbehind_index, bool is_positive)
-        : payload_(IsPositive::update(LookaroundIndex::encode(lookbehind_index),
+    ReadLookaroundTablePayload(int32_t LOOKAROUND_index, bool is_positive)
+        : payload_(IsPositive::update(LookaroundIndex::encode(LOOKAROUND_index),
                                       is_positive)) {}
 
     int32_t lookaround_index() const {
@@ -137,8 +138,8 @@ struct RegExpInstruction {
   class StartLookaroundPayload {
    public:
     StartLookaroundPayload() = default;
-    StartLookaroundPayload(int32_t lookbehind_index, bool is_positive)
-        : payload_(IsAhead::update(LookaroundIndex::encode(lookbehind_index),
+    StartLookaroundPayload(int32_t LOOKAROUND_index, bool is_positive)
+        : payload_(IsAhead::update(LookaroundIndex::encode(LOOKAROUND_index),
                                    is_positive)) {}
 
     int32_t lookaround_index() const {
@@ -224,6 +225,13 @@ struct RegExpInstruction {
     return result;
   }
 
+  static RegExpInstruction FilterLookaround(int32_t lookaround_id) {
+    RegExpInstruction result;
+    result.opcode = FILTER_LOOKAROUND;
+    result.payload.lookaround_id = lookaround_id;
+    return result;
+  }
+
   static RegExpInstruction FilterChild(int32_t pc) {
     RegExpInstruction result;
     result.opcode = FILTER_CHILD;
@@ -261,7 +269,7 @@ struct RegExpInstruction {
   static RegExpInstruction WriteLookTable(int32_t index) {
     RegExpInstruction result;
     result.opcode = WRITE_LOOKAROUND_TABLE;
-    result.payload.looktable_index = index;
+    result.payload.lookaround_id = index;
     return result;
   }
 
@@ -297,9 +305,9 @@ struct RegExpInstruction {
     int32_t quantifier_id;
     // Payload of FILTER_GROUP:
     int32_t group_id;
-    // Payload of WRITE_LOOKBEHIND_TABLE:
-    int32_t looktable_index;
-    // Payload of READ_LOOKBEHIND_TABLE:
+    // Payload of WRITE_LOOKAROUND_TABLE and FILTER_LOOKAROUND:
+    int32_t lookaround_id;
+    // Payload of READ_LOOKAROUND_TABLE:
     ReadLookaroundTablePayload read_lookaround;
     // Payload of START_LOOKAROUND:
     StartLookaroundPayload start_lookaround;
