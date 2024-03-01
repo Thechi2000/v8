@@ -345,7 +345,7 @@ private:
   public:
     static base::Vector<int>
     Filter(int pc, InterpreterThread main_thread,
-           ZoneList<InterpreterThread> lookaround_threads,
+           ZoneList<std::optional<InterpreterThread>> lookaround_threads,
            base::Vector<int> filtered_registers,
            base::Vector<const RegExpInstruction> bytecode, Zone *zone) {
       /* Capture groups that were not traversed in the last iteration of a
@@ -392,9 +392,10 @@ private:
       }
     }
 
-    base::Vector<int> Run(InterpreterThread main_thread,
-                          ZoneList<InterpreterThread> lookaround_threads,
-                          base::Vector<int> filtered_registers_) {
+    base::Vector<int>
+    Run(InterpreterThread main_thread,
+        ZoneList<std::optional<InterpreterThread>> lookaround_threads,
+        base::Vector<int> filtered_registers_) {
       InterpreterThread current_thread = main_thread;
       pc_stack_.push(pc_);
       max_clock_stack_.push(max_clock_);
@@ -456,10 +457,11 @@ private:
           int lookaround_id = instr.payload.lookaround_id;
 
           // Checks whether the quantifier should be saved or discarded.
-          if (lookaround_clocks[lookaround_id] >= max_clock_) {
+          if (lookaround_clocks[lookaround_id] >= max_clock_ &&
+              lookaround_threads[lookaround_id].has_value()) {
             max_clock_ = 0;
             thread_stacks_.push(current_thread);
-            current_thread = lookaround_threads[lookaround_id];
+            current_thread = *lookaround_threads[lookaround_id];
             IncrementPC();
           } else {
             // If the node should be discarded, all its children should be too.
@@ -538,13 +540,12 @@ private:
     input_index_ = old_input_index;
   }
 
-  ZoneList<InterpreterThread> GenerateLookaroundCaptures() {
-    ZoneList<InterpreterThread> threads(
+  ZoneList<std::optional<InterpreterThread>> GenerateLookaroundCaptures() {
+    ZoneList<std::optional<InterpreterThread>> threads(
         static_cast<int>(lookaround_table_.size()), zone_);
-    std::fill(
-        threads.begin(), threads.end(),
-        InterpreterThread(0, nullptr, nullptr, nullptr, nullptr, nullptr,
-                          InterpreterThread::ConsumedCharacter::DidConsume));
+    for (size_t i = 0; i < lookaround_table_.size(); ++i) {
+      threads.Add(std::nullopt, zone_);
+    }
 
     if (!best_match_thread_.has_value()) {
       return threads;
@@ -553,48 +554,72 @@ private:
 
     capturing_lookarounds_ = true;
 
+    struct LookaroundToCapture {
+      int id;
+      int input_index;
+    };
+    ZoneQueue<LookaroundToCapture> to_capture(zone_);
+
     for (size_t i = 0; i < lookaround_table_.size(); ++i) {
       if (GetLookaroundMatchIndexArray(main_thread)[i] !=
           kUndefinedMatchIndexValue) {
-        Lookaround &lookaround = lookarounds_[static_cast<int>(i)];
+        to_capture.push(LookaroundToCapture{
+            .id = static_cast<int>(i),
+            .input_index = GetLookaroundMatchIndexArray(main_thread)[i]});
+      }
+    }
 
-        std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
-                  LastInputIndex());
+    while (!to_capture.empty()) {
+      LookaroundToCapture tc = to_capture.front();
+      to_capture.pop();
 
-        // Clean up left-over data from last iteration.
-        for (InterpreterThread t : blocked_threads_) {
-          DestroyThread(t);
-        }
-        blocked_threads_.DropAndClear();
+      Lookaround &lookaround = lookarounds_[tc.id];
 
-        for (InterpreterThread t : active_threads_) {
-          DestroyThread(t);
-        }
-        active_threads_.DropAndClear();
+      std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
+                LastInputIndex());
 
-        best_match_thread_ = std::nullopt;
+      // Clean up left-over data from last iteration.
+      for (InterpreterThread t : blocked_threads_) {
+        DestroyThread(t);
+      }
+      blocked_threads_.DropAndClear();
 
-        clock = 0;
-        reverse_ = !lookaround.is_ahead;
-        input_index_ = GetLookaroundMatchIndexArray(main_thread)[i];
+      for (InterpreterThread t : active_threads_) {
+        DestroyThread(t);
+      }
+      active_threads_.DropAndClear();
 
-        active_threads_.Add(
-            InterpreterThread(
-                lookaround.capture_pc_,
-                NewRegisterArray(kUndefinedRegisterValue),
-                NewGetLookaroundMatchIndexArray(kUndefinedMatchIndexValue),
-                NewQuantifierClockArray(kUndefinedClockValue),
-                NewCaptureClockArray(kUndefinedClockValue),
-                NewLookaroundClockArray(kUndefinedClockValue),
-                InterpreterThread::ConsumedCharacter::DidConsume),
-            zone_);
+      best_match_thread_ = std::nullopt;
 
-        RunActiveThreadsToEnd();
+      clock = 0;
+      reverse_ = !lookaround.is_ahead;
+      input_index_ = tc.input_index;
 
-        if (best_match_thread_.has_value()) {
-          threads.Set(static_cast<int>(i), *best_match_thread_);
+      active_threads_.Add(
+          InterpreterThread(
+              lookaround.capture_pc_, NewRegisterArray(kUndefinedRegisterValue),
+              NewGetLookaroundMatchIndexArray(kUndefinedMatchIndexValue),
+              NewQuantifierClockArray(kUndefinedClockValue),
+              NewCaptureClockArray(kUndefinedClockValue),
+              NewLookaroundClockArray(kUndefinedClockValue),
+              InterpreterThread::ConsumedCharacter::DidConsume),
+          zone_);
+
+      RunActiveThreadsToEnd();
+
+      if (best_match_thread_.has_value()) {
+        for (size_t i = 0; i < lookaround_table_.size(); ++i) {
+          if (GetLookaroundMatchIndexArray(*best_match_thread_)[i] !=
+              kUndefinedMatchIndexValue) {
+            to_capture.push(LookaroundToCapture{
+                .id = static_cast<int>(i),
+                .input_index =
+                    GetLookaroundMatchIndexArray(*best_match_thread_)[i]});
+          }
         }
       }
+
+      threads.Set(tc.id, best_match_thread_);
     }
 
     capturing_lookarounds_ = false;
@@ -791,7 +816,7 @@ private:
     }
 
     if (best_match_thread_.has_value()) {
-      ZoneList<InterpreterThread> lookaround_threads =
+      ZoneList<std::optional<InterpreterThread>> lookaround_threads =
           GenerateLookaroundCaptures();
 
       best_match_registers_ = GetFilteredRegisters(
@@ -860,6 +885,12 @@ private:
         std::copy(t_registers.begin(), t_registers.end(),
                   fork_registers.begin());
 
+        base::Vector<int> fork_lookaround_match_index = GetLookaroundMatchIndexArray(fork);
+        base::Vector<int> t_fork_lookaround_match_index = GetLookaroundMatchIndexArray(t);
+        DCHECK_EQ(fork_lookaround_match_index.length(), t_fork_lookaround_match_index.length());
+        std::copy(t_fork_lookaround_match_index.begin(), t_fork_lookaround_match_index.end(),
+                  fork_lookaround_match_index.begin());
+
         base::Vector<uint64_t> fork_quantifier_clocks =
             GetQuantifierClockArray(fork);
         base::Vector<uint64_t> t_fork_quantifier_clocks =
@@ -875,6 +906,16 @@ private:
         DCHECK_EQ(fork_capture_clocks.length(), t_fork_capture_clocks.length());
         std::copy(t_fork_capture_clocks.begin(), t_fork_capture_clocks.end(),
                   fork_capture_clocks.begin());
+
+        base::Vector<uint64_t> fork_lookaround_clocks =
+            GetLookaroundClockArray(fork);
+        base::Vector<uint64_t> t_fork_lookaround_clocks =
+            GetLookaroundClockArray(t);
+        DCHECK_EQ(fork_lookaround_clocks.length(),
+                  t_fork_lookaround_clocks.length());
+        std::copy(t_fork_lookaround_clocks.begin(),
+                  t_fork_lookaround_clocks.end(),
+                  fork_lookaround_clocks.begin());
 
         active_threads_.Add(fork, zone_);
 
@@ -930,13 +971,16 @@ private:
         break;
 
       case RegExpInstruction::END_LOOKAROUND:
-        DCHECK(capturing_lookarounds_ && best_match_thread_.has_value());
-        for (int i = 0; i < register_count_per_match_; ++i) {
-          if (GetRegisterArray(t)[i] != kUndefinedRegisterValue) {
-            GetRegisterArray(*best_match_thread_)[i] = GetRegisterArray(t)[i];
-          }
+        if (best_match_thread_.has_value()) {
+          DestroyThread(*best_match_thread_);
         }
-        break;
+        best_match_thread_ = t;
+
+        for (InterpreterThread s : active_threads_) {
+          DestroyThread(s);
+        }
+        active_threads_.DropAndClear();
+        return;
       case RegExpInstruction::WRITE_LOOKAROUND_TABLE:
         // Reaching this instruction means that the current lookbehind thread
         // has found a match and needs to be destroyed. Since the lookbehind
@@ -1115,9 +1159,9 @@ private:
                                                  register_count_per_match_);
   }
 
-  base::Vector<int>
-  GetFilteredRegisters(InterpreterThread main_thread,
-                       ZoneList<InterpreterThread> lookaround_threads) {
+  base::Vector<int> GetFilteredRegisters(
+      InterpreterThread main_thread,
+      ZoneList<std::optional<InterpreterThread>> lookaround_threads) {
     base::Vector<int> registers = GetRegisterArray(main_thread);
 
     if (filter_groups_pc_.has_value()) {
