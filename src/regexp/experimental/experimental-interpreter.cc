@@ -341,161 +341,6 @@ private:
     ConsumedCharacter consumed_since_last_quantifier;
   };
 
-  class FilterGroups {
-  public:
-    static base::Vector<int>
-    Filter(int pc, InterpreterThread main_thread,
-           ZoneList<std::optional<InterpreterThread>> lookaround_threads,
-           base::Vector<int> filtered_registers,
-           base::Vector<const RegExpInstruction> bytecode, Zone *zone) {
-      /* Capture groups that were not traversed in the last iteration of a
-       * quantifier need to be discarded. In order to determine which groups
-       * need to be discarded, the interpreter maintains a clock, an internal
-       * count of bytecode instructions executed. Whenever it reaches a
-       * quantifier or captures a part of the string, it records the current
-       * clock. After a match is found, the interpreter filters out capture
-       * groups that were defined in any other iteration than the last. To do
-       * so, it compares the last clock value of the group with the last clock
-       * value of its parent quantifier/group, keeping only groups that were
-       * defined after the parent quantifier/group last iteration. The structure
-       * of the bytecode used is explained in `FilterGroupsCompileVisitor`
-       * (experimental-compiler.cc). */
-
-      return FilterGroups(pc, bytecode, zone)
-          .Run(main_thread, std::move(lookaround_threads), filtered_registers);
-    }
-
-  private:
-    FilterGroups(int pc, base::Vector<const RegExpInstruction> bytecode,
-                 Zone *zone)
-        : status_({pc, 0,
-                   InterpreterThread(
-                       0, nullptr, nullptr, nullptr, nullptr, nullptr,
-                       InterpreterThread::ConsumedCharacter::DidConsume)}),
-          status_stack_(zone), bytecode_(bytecode) {}
-
-    /* Goes back to the parent node, restoring pc_ and max_clock_. If already at
-     * the root of the tree, completes the filtering process. */
-    void Up() {
-      if (status_stack_.size() > 0) {
-        status_ = status_stack_.top();
-        status_stack_.pop();
-      }
-    }
-
-    /* Increments pc_. When at the end of a node, goes back to the parent node.
-     */
-    void IncrementPC() {
-      ++status_.pc;
-      if (status_.pc == bytecode_.length() ||
-          bytecode_[status_.pc].opcode != RegExpInstruction::FILTER_CHILD) {
-        Up();
-      }
-    }
-
-    base::Vector<int>
-    Run(InterpreterThread main_thread,
-        ZoneList<std::optional<InterpreterThread>> lookaround_threads,
-        base::Vector<int> filtered_registers_) {
-      status_.current_thread = main_thread;
-      status_stack_.push(status_);
-
-      while (!status_stack_.empty()) {
-        // TODO change to base::Vector
-        int *registers = status_.current_thread.register_array_begin;
-        uint64_t *capture_clocks =
-            status_.current_thread.captures_clock_array_begin;
-        uint64_t *quantifier_clocks =
-            status_.current_thread.quantifier_clock_array_begin;
-        uint64_t *lookaround_clocks =
-            status_.current_thread.lookaround_clock_array_begin;
-
-        auto instr = bytecode_[status_.pc];
-        switch (instr.opcode) {
-        case RegExpInstruction::FILTER_CHILD:
-          // Enter the child's node.
-          status_stack_.push({status_.pc + 1, status_.max_clock, status_.current_thread});
-          status_.pc = instr.payload.pc;
-          break;
-
-        case RegExpInstruction::FILTER_GROUP: {
-          int group_id = instr.payload.group_id;
-
-          // Checks whether the captured group should be saved or discarded.
-          int register_id = 2 * group_id;
-          if (capture_clocks[register_id] >= status_.max_clock &&
-              capture_clocks[register_id] != kUndefinedClockValue) {
-            filtered_registers_[register_id] = registers[register_id];
-            filtered_registers_[register_id + 1] = registers[register_id + 1];
-            IncrementPC();
-          } else {
-            // If the node should be discarded, all its children should be too.
-            // By going back to the parent, we don't visit the children, and
-            // therefore don't copy their registers.
-            Up();
-          }
-          break;
-        }
-
-        case RegExpInstruction::FILTER_QUANTIFIER: {
-          int quantifier_id = instr.payload.quantifier_id;
-
-          // Checks whether the quantifier should be saved or discarded.
-          if (quantifier_clocks[quantifier_id] >= status_.max_clock) {
-            status_.max_clock = quantifier_clocks[quantifier_id];
-            IncrementPC();
-          } else {
-            // If the node should be discarded, all its children should be too.
-            // By going back to the parent, we don't visit the children, and
-            // therefore don't copy their registers.
-            Up();
-          }
-          break;
-        }
-
-        case RegExpInstruction::FILTER_LOOKAROUND: {
-          int lookaround_id = instr.payload.lookaround_id;
-
-          // Checks whether the quantifier should be saved or discarded.
-          if (lookaround_clocks[lookaround_id] >= status_.max_clock &&
-              lookaround_threads[lookaround_id].has_value()) {
-            status_.max_clock = 0;
-            status_.current_thread = *lookaround_threads[lookaround_id];
-            IncrementPC();
-          } else {
-            // If the node should be discarded, all its children should be too.
-            // By going back to the parent, we don't visit the children, and
-            // therefore don't copy their registers.
-            Up();
-          }
-          break;
-        }
-
-        default:
-          UNREACHABLE();
-        }
-      }
-
-      return filtered_registers_;
-    }
-
-    struct NodeStatus {
-      int pc;
-
-      // The last clock encountered (either from a quantifier or a capture
-      // group). Any groups whose clock is less then max_clock_ needs to be
-      // discarded.
-      uint64_t max_clock;
-
-      InterpreterThread current_thread;
-    };
-
-    NodeStatus status_;
-    ZoneStack<NodeStatus> status_stack_;
-
-    base::Vector<const RegExpInstruction> bytecode_;
-  };
-
   void FillLookaroundTable() {
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
@@ -1175,12 +1020,125 @@ private:
       filtered_registers[0] = registers[0];
       filtered_registers[1] = registers[1];
 
-      return FilterGroups::Filter(*filter_groups_pc_, main_thread,
-                                  std::move(lookaround_threads),
-                                  filtered_registers, bytecode_, zone_);
+      return FilterGroups(main_thread, std::move(lookaround_threads),
+                          filtered_registers);
     } else {
       return registers;
     }
+  }
+
+  base::Vector<int>
+  FilterGroups(InterpreterThread main_thread,
+               ZoneList<std::optional<InterpreterThread>> lookaround_threads,
+               base::Vector<int> filtered_registers) {
+    struct NodeStatus {
+      int pc;
+      // The last clock encountered (either from a quantifier or a capture
+      // group). Any groups whose clock is less then max_clock_ needs to be
+      // discarded.
+      uint64_t max_clock;
+
+      InterpreterThread current_thread;
+    };
+
+    if (!filter_groups_pc_.has_value()) {
+      return filtered_registers;
+    }
+
+    NodeStatus status_ = {*filter_groups_pc_, 0, main_thread};
+    ZoneStack<NodeStatus> status_stack_(zone_);
+    status_stack_.push(status_);
+
+    auto up = [&]() {
+      if (status_stack_.size() > 0) {
+        status_ = status_stack_.top();
+        status_stack_.pop();
+      }
+    };
+
+    auto incr = [&]() {
+      ++status_.pc;
+      if (status_.pc == bytecode_.length() ||
+          bytecode_[status_.pc].opcode != RegExpInstruction::FILTER_CHILD) {
+        up();
+      }
+    };
+
+    while (!status_stack_.empty()) {
+      // TODO change to base::Vector
+      auto registers = GetRegisterArray(status_.current_thread);
+      auto capture_clocks = GetCaptureClockArray(status_.current_thread);
+      auto quantifier_clocks = GetQuantifierClockArray(status_.current_thread);
+      auto lookaround_clocks = GetLookaroundClockArray(status_.current_thread);
+
+      auto instr = bytecode_[status_.pc];
+      switch (instr.opcode) {
+      case RegExpInstruction::FILTER_CHILD:
+        // Enter the child's node.
+        status_stack_.push(
+            {status_.pc + 1, status_.max_clock, status_.current_thread});
+        status_.pc = instr.payload.pc;
+        break;
+
+      case RegExpInstruction::FILTER_GROUP: {
+        int group_id = instr.payload.group_id;
+
+        // Checks whether the captured group should be saved or discarded.
+        int register_id = 2 * group_id;
+        if (capture_clocks[register_id] >= status_.max_clock &&
+            capture_clocks[register_id] != kUndefinedClockValue) {
+          filtered_registers[register_id] = registers[register_id];
+          filtered_registers[register_id + 1] = registers[register_id + 1];
+          incr();
+        } else {
+          // If the node should be discarded, all its children should be too.
+          // By going back to the parent, we don't visit the children, and
+          // therefore don't copy their registers.
+          up();
+        }
+        break;
+      }
+
+      case RegExpInstruction::FILTER_QUANTIFIER: {
+        int quantifier_id = instr.payload.quantifier_id;
+
+        // Checks whether the quantifier should be saved or discarded.
+        if (quantifier_clocks[quantifier_id] >= status_.max_clock) {
+          status_.max_clock = quantifier_clocks[quantifier_id];
+          incr();
+        } else {
+          // If the node should be discarded, all its children should be too.
+          // By going back to the parent, we don't visit the children, and
+          // therefore don't copy their registers.
+          up();
+        }
+        break;
+      }
+
+      case RegExpInstruction::FILTER_LOOKAROUND: {
+        int lookaround_id = instr.payload.lookaround_id;
+
+        // Checks whether the quantifier should be saved or discarded.
+        if (lookaround_clocks[lookaround_id] >= status_.max_clock &&
+            lookaround_threads[lookaround_id].has_value()) {
+          status_.max_clock = 0;
+          status_.current_thread = *lookaround_threads[lookaround_id];
+          incr();
+        } else {
+          // If the node should be discarded, all its children should be too.
+          // By going back to the parent, we don't visit the children, and
+          // therefore don't copy their registers.
+          up();
+        }
+        break;
+      }
+
+      default:
+        UNREACHABLE();
+      }
+    }
+
+    return filtered_registers;
   }
 
   void DestroyThread(InterpreterThread t) {
