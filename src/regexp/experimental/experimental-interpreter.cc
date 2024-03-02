@@ -368,26 +368,27 @@ private:
   private:
     FilterGroups(int pc, base::Vector<const RegExpInstruction> bytecode,
                  Zone *zone)
-        : pc_(pc), max_clock_(0), pc_stack_(zone), max_clock_stack_(zone),
-          thread_stacks_(zone), bytecode_(bytecode) {}
+        : status_({pc, 0,
+                   InterpreterThread(
+                       0, nullptr, nullptr, nullptr, nullptr, nullptr,
+                       InterpreterThread::ConsumedCharacter::DidConsume)}),
+          status_stack_(zone), bytecode_(bytecode) {}
 
     /* Goes back to the parent node, restoring pc_ and max_clock_. If already at
      * the root of the tree, completes the filtering process. */
     void Up() {
-      if (pc_stack_.size() > 0) {
-        pc_ = pc_stack_.top();
-        max_clock_ = max_clock_stack_.top();
-        pc_stack_.pop();
-        max_clock_stack_.pop();
+      if (status_stack_.size() > 0) {
+        status_ = status_stack_.top();
+        status_stack_.pop();
       }
     }
 
     /* Increments pc_. When at the end of a node, goes back to the parent node.
      */
     void IncrementPC() {
-      ++pc_;
-      if (pc_ == bytecode_.length() ||
-          bytecode_[pc_].opcode != RegExpInstruction::FILTER_CHILD) {
+      ++status_.pc;
+      if (status_.pc == bytecode_.length() ||
+          bytecode_[status_.pc].opcode != RegExpInstruction::FILTER_CHILD) {
         Up();
       }
     }
@@ -396,26 +397,25 @@ private:
     Run(InterpreterThread main_thread,
         ZoneList<std::optional<InterpreterThread>> lookaround_threads,
         base::Vector<int> filtered_registers_) {
-      InterpreterThread current_thread = main_thread;
-      pc_stack_.push(pc_);
-      max_clock_stack_.push(max_clock_);
+      status_.current_thread = main_thread;
+      status_stack_.push(status_);
 
-      while (!pc_stack_.empty()) {
+      while (!status_stack_.empty()) {
         // TODO change to base::Vector
-        int *registers = current_thread.register_array_begin;
-        uint64_t *capture_clocks = current_thread.captures_clock_array_begin;
+        int *registers = status_.current_thread.register_array_begin;
+        uint64_t *capture_clocks =
+            status_.current_thread.captures_clock_array_begin;
         uint64_t *quantifier_clocks =
-            current_thread.quantifier_clock_array_begin;
+            status_.current_thread.quantifier_clock_array_begin;
         uint64_t *lookaround_clocks =
-            current_thread.lookaround_clock_array_begin;
+            status_.current_thread.lookaround_clock_array_begin;
 
-        auto instr = bytecode_[pc_];
+        auto instr = bytecode_[status_.pc];
         switch (instr.opcode) {
         case RegExpInstruction::FILTER_CHILD:
           // Enter the child's node.
-          pc_stack_.push(pc_ + 1);
-          max_clock_stack_.push(max_clock_);
-          pc_ = instr.payload.pc;
+          status_stack_.push({status_.pc + 1, status_.max_clock, status_.current_thread});
+          status_.pc = instr.payload.pc;
           break;
 
         case RegExpInstruction::FILTER_GROUP: {
@@ -423,7 +423,7 @@ private:
 
           // Checks whether the captured group should be saved or discarded.
           int register_id = 2 * group_id;
-          if (capture_clocks[register_id] >= max_clock_ &&
+          if (capture_clocks[register_id] >= status_.max_clock &&
               capture_clocks[register_id] != kUndefinedClockValue) {
             filtered_registers_[register_id] = registers[register_id];
             filtered_registers_[register_id + 1] = registers[register_id + 1];
@@ -441,8 +441,8 @@ private:
           int quantifier_id = instr.payload.quantifier_id;
 
           // Checks whether the quantifier should be saved or discarded.
-          if (quantifier_clocks[quantifier_id] >= max_clock_) {
-            max_clock_ = quantifier_clocks[quantifier_id];
+          if (quantifier_clocks[quantifier_id] >= status_.max_clock) {
+            status_.max_clock = quantifier_clocks[quantifier_id];
             IncrementPC();
           } else {
             // If the node should be discarded, all its children should be too.
@@ -457,11 +457,10 @@ private:
           int lookaround_id = instr.payload.lookaround_id;
 
           // Checks whether the quantifier should be saved or discarded.
-          if (lookaround_clocks[lookaround_id] >= max_clock_ &&
+          if (lookaround_clocks[lookaround_id] >= status_.max_clock &&
               lookaround_threads[lookaround_id].has_value()) {
-            max_clock_ = 0;
-            thread_stacks_.push(current_thread);
-            current_thread = *lookaround_threads[lookaround_id];
+            status_.max_clock = 0;
+            status_.current_thread = *lookaround_threads[lookaround_id];
             IncrementPC();
           } else {
             // If the node should be discarded, all its children should be too.
@@ -480,18 +479,19 @@ private:
       return filtered_registers_;
     }
 
-    int pc_;
+    struct NodeStatus {
+      int pc;
 
-    // The last clock encountered (either from a quantifier or a capture group).
-    // Any groups whose clock is less then max_clock_ needs to be discarded.
-    uint64_t max_clock_;
+      // The last clock encountered (either from a quantifier or a capture
+      // group). Any groups whose clock is less then max_clock_ needs to be
+      // discarded.
+      uint64_t max_clock;
 
-    // Stores pc_ and max_clock_ when the interpreter enters a node.
-    ZoneStack<int> pc_stack_;
-    ZoneStack<uint64_t> max_clock_stack_;
+      InterpreterThread current_thread;
+    };
 
-    // Stores the thread when the interpreter enters a lookaround
-    ZoneStack<InterpreterThread> thread_stacks_;
+    NodeStatus status_;
+    ZoneStack<NodeStatus> status_stack_;
 
     base::Vector<const RegExpInstruction> bytecode_;
   };
@@ -885,10 +885,14 @@ private:
         std::copy(t_registers.begin(), t_registers.end(),
                   fork_registers.begin());
 
-        base::Vector<int> fork_lookaround_match_index = GetLookaroundMatchIndexArray(fork);
-        base::Vector<int> t_fork_lookaround_match_index = GetLookaroundMatchIndexArray(t);
-        DCHECK_EQ(fork_lookaround_match_index.length(), t_fork_lookaround_match_index.length());
-        std::copy(t_fork_lookaround_match_index.begin(), t_fork_lookaround_match_index.end(),
+        base::Vector<int> fork_lookaround_match_index =
+            GetLookaroundMatchIndexArray(fork);
+        base::Vector<int> t_fork_lookaround_match_index =
+            GetLookaroundMatchIndexArray(t);
+        DCHECK_EQ(fork_lookaround_match_index.length(),
+                  t_fork_lookaround_match_index.length());
+        std::copy(t_fork_lookaround_match_index.begin(),
+                  t_fork_lookaround_match_index.end(),
                   fork_lookaround_match_index.begin());
 
         base::Vector<uint64_t> fork_quantifier_clocks =
