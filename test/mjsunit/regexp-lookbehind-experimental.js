@@ -36,7 +36,6 @@ function stringEscape(string) {
 
 function testRE(re, input, expected_result) {
   assertEquals(%RegexpTypeTag(re), "EXPERIMENTAL");
-  console.log(`Testing "${input}".match(${re}l)`)
 
   var testName = re + ".test(" + stringEscape(input) +")";
   if (expected_result) {
@@ -48,7 +47,6 @@ function testRE(re, input, expected_result) {
 
 function execRE(re, input, expected_result) {
   assertEquals(%RegexpTypeTag(re), "EXPERIMENTAL");
-  console.log(`Testing "${input}".match(${re}l)`)
 
   var testName = re + ".exec('" + stringEscape(input) +"')";
   assertEquals(expected_result, re.exec(input), testName);

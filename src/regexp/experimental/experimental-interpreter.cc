@@ -29,8 +29,6 @@ namespace v8 {
 namespace internal {
 
 namespace {
-const int debug_lookaround = -2;
-
 constexpr int kUndefinedRegisterValue = -1;
 constexpr int kUndefinedMatchIndexValue = -1;
 constexpr uint64_t kUndefinedClockValue = -1;
@@ -226,34 +224,7 @@ public:
   // the number of matches found.
   int FindMatches(int32_t *output_registers, int output_register_count) {
     const int max_match_num = output_register_count / register_count_per_match_;
-
-    std::cout << "Bytecode:" << std::endl;
-    for (int i = 0; i < bytecode_.length(); ++i) {
-      if (bytecode_[i].opcode == RegExpInstruction::START_LOOKAROUND) {
-        std::cout << std::endl
-                  << "#### Lookaround "
-                  << bytecode_[i].payload.start_lookaround.lookaround_index()
-                  << std::endl
-                  << std::endl;
-      }
-      std::cout << std::dec << i << ". " << bytecode_.at(i) << std::endl;
-    }
-
     FillLookaroundTable();
-
-    std::cout << std::endl << "Lookaround table:" << std::endl;
-    std::cout << "s: ";
-    for (auto c : input_) {
-      std::cout << c << ", ";
-    }
-    std::cout << std::endl;
-    for (size_t i = 0; i < lookaround_table_.size(); ++i) {
-      std::cout << i << ": ";
-      for (size_t j = 0; j < lookaround_table_[i].size(); ++j) {
-        std::cout << lookaround_table_[i][j] << ", ";
-      }
-      std::cout << std::endl;
-    }
 
     int match_num = 0;
     while (match_num != max_match_num) {
@@ -360,7 +331,6 @@ private:
       active_threads_.DropAndClear();
 
       int idx = lookarounds_priority_[i];
-      std::cout << "Running lookaround " << idx << std::endl;
 
       current_lookaround_ = idx;
       reverse_ = lookarounds_[idx].is_ahead;
@@ -469,21 +439,8 @@ private:
           return err_code;
       }
 
-      if (current_lookaround_ == debug_lookaround) {
-        std::cout << "Flushing with " << input_char << std::endl;
-        for (auto &t : blocked_threads_) {
-          std::cout << "Thread at " << t.pc << std::endl;
-        }
-      }
       // We unblock all blocked_threads_ by feeding them the input char.
       FlushBlockedThreads(input_char);
-
-      if (current_lookaround_ == debug_lookaround) {
-        std::cout << "Active threads:" << std::endl;
-        for (auto &t : active_threads_) {
-          std::cout << "Thread at " << t.pc << std::endl;
-        }
-      }
 
       // Run all threads until they block or accept.
       RunActiveThreads();
@@ -650,19 +607,11 @@ private:
     while (true) {
       if (current_lookaround_ == -1 &&
           IsPcProcessed(t.pc, t.consumed_since_last_quantifier)) {
-        if (current_lookaround_ == debug_lookaround) {
-          std::cout << "Thread at " << t.pc << " discarded" << std::endl;
-        }
         return;
       }
       MarkPcProcessed(t.pc, t.consumed_since_last_quantifier);
 
       RegExpInstruction inst = bytecode_[t.pc];
-
-      if (current_lookaround_ == debug_lookaround) {
-        std::cout << "At index " << input_index_ << ": running " << inst
-                  << std::endl;
-      }
 
       switch (inst.opcode) {
       case RegExpInstruction::CONSUME_RANGE: {
@@ -836,8 +785,6 @@ private:
     while (!active_threads_.is_empty()) {
       RunActiveThread(active_threads_.RemoveLast());
     }
-    if (current_lookaround_ == debug_lookaround)
-      std::cout << std::endl;
   }
 
   // Unblock all blocked_threads_ by feeding them an `input_char`.  Should only
