@@ -151,6 +151,40 @@ template <class Character> class NfaInterpreter {
   // the search continues with the threads with higher priority.  If no threads
   // with high priority are left, we return the match that was produced by the
   // ACCEPTing thread with highest priority.
+  //
+  // To handle lookarounds, the interpreter builds a table indicating
+  // at each index of the input which lookaround does match, therefore having a
+  // size of input_size x lookaround_count. It is constructed before starting
+  // the search, by running each lookaround's automaton independently on the
+  // whole input. Since a lookaround may depend on others, it is imperative to
+  // run them in a correct order, starting from those not containing any other.
+  // This order is inferred from the order in which the lookarounds' automata
+  // appear in the bytecode. Once the table is completed, the interpreter runs
+  // the main expression's bytecode to find a match.
+  //
+  // The lookaround's automaton ends with the `WRITE_LOOKAROUND_TABLE`
+  // instruction, setting the corresponding boolean of the lookaround table to
+  // true. Since the compiler appends a /.*/ at the beginning of the
+  // lookaround's automaton, the search starts with exactly one thread, and
+  // destroy those after reaching the write instruction. To work on lookaheads,
+  // they need to be ran in reverse, such that they end their match on the input
+  // where they are required, and the compiler produces their automata reversed.
+  //
+  // Once the interpreter has found a match, it still needs to compute the
+  // captures from groups within lookarounds. To achieve this, it runs each
+  // lookaround's automaton on the index where it was matched, and recovers the
+  // resulting capture groups. Once again, the lookarounds need to be run in a
+  // particular order, from parents to children, such that the lookarounds
+  // requiring other ones can add those to the list of lookarounds to capture.
+  // Since the threads only retains the index where the lookaround matched,
+  // lookbehinds need to be reversed. Again the compiler produces their automata
+  // reversed.
+  //
+  // As the lookaround table construction and the capture require automata in
+  // different directions, the compiler produces two automata per lookaround,
+  // delimited by the `START_LOOKAROUND` and `END_LOOKAROUND` instructions, and
+  // with the separation occurring right after the `WRITE_LOOKAROUND_TABLE`
+  // instruction.
 public:
   NfaInterpreter(Isolate *isolate, RegExp::CallOrigin call_origin,
                  Tagged<ByteArray> bytecode, int register_count_per_match,
@@ -172,14 +206,18 @@ public:
         lookaround_clock_array_allocator_(zone),
         best_match_thread_(base::nullopt), lookarounds_(0, zone),
         lookarounds_priority_(0, zone), lookaround_table_(zone),
-        reverse_(false), capturing_lookarounds_(false), current_lookaround_(-1),
-        zone_(zone) {
+        reverse_(false), current_lookaround_(-1), zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    // Finds the starting PC of every lookaround by location all the
-    // `START_LOOKAROUND` instructions.
+    // Iterate over the bytecode to find the PC of the filtering
+    // instructions and lookarounds, and the number of quantifiers. It also
+    // builds a lookaround priority list: the compilation ensures that a
+    // lookaround's bytecode can only before the bytecode of all the lookarounds
+    // it contains. Thus lookarounds must be run from the last to the first
+    // (regarding their appearance order) to never execute a lookaround before
+    // one of its child.
     struct Lookaround lookaround;
     int lookaround_index;
     for (int i = 0; i < bytecode_.length() - 1; ++i) {
@@ -295,6 +333,9 @@ private:
     // `register_array_allocator_`.
     int *register_array_begin;
 
+    // Pointer to an array containing the input index when the thread did match
+    // a lookaround. Should be deallocated with
+    // `lookaround_match_index_array_allocator_`.
     int *lookaround_match_index_array_begin;
 
     // Pointer to an array containing the clock when the
@@ -355,15 +396,17 @@ private:
     input_index_ = old_input_index;
   }
 
+  // Capture the groups in matched lookarounds.
   void FillLookaroundCaptures() {
     DCHECK(best_match_thread_.has_value());
 
-    InterpreterThread main_thread = *best_match_thread_;
+    InterpreterThread base_thread = *best_match_thread_;
 
-    capturing_lookarounds_ = true;
-
+    // We need to capture the lookarounds from parents to childrens, since we
+    // need the index on which the lookaround was matched, and those indexes are
+    // computed when the parent expression is captured.
     for (int lookaround_id : lookarounds_priority_) {
-      if (GetLookaroundMatchIndexArray(main_thread)[lookaround_id] ==
+      if (GetLookaroundMatchIndexArray(base_thread)[lookaround_id] ==
           kUndefinedMatchIndexValue) {
         continue;
       }
@@ -386,23 +429,25 @@ private:
 
       best_match_thread_ = std::nullopt;
 
-      clock = 0;
       reverse_ = !lookaround.is_ahead;
-      input_index_ = GetLookaroundMatchIndexArray(main_thread)[lookaround_id];
+      input_index_ = GetLookaroundMatchIndexArray(base_thread)[lookaround_id];
 
-      main_thread.pc = lookaround.capture_pc_;
-      main_thread.consumed_since_last_quantifier =
+      // We reuse the same thread as initial thread, to avoid having to merge
+      // the new `best_match_thread_` with the previous results.
+      base_thread.pc = lookaround.capture_pc_;
+      base_thread.consumed_since_last_quantifier =
           InterpreterThread::ConsumedCharacter::DidConsume;
-      active_threads_.Add(main_thread, zone_);
+      active_threads_.Add(base_thread, zone_);
 
       RunActiveThreadsToEnd();
 
+      // The lookaround has already been matched once on this position during
+      // the match research.
       DCHECK(best_match_thread_.has_value());
-      main_thread = *best_match_thread_;
+      base_thread = *best_match_thread_;
     }
 
-    capturing_lookarounds_ = false;
-    best_match_thread_ = main_thread;
+    best_match_thread_ = base_thread;
   }
 
   int RunActiveThreadsToEnd() {
@@ -559,11 +604,6 @@ private:
     }
     // TODO clear best_match_registers_
 
-    // The lookbehind threads need to be executed before the thread of their
-    // parent (lookbehind or main expression). The order of the bytecode (see
-    // also `BytecodeAssembler`) ensures that they need to be executed from last
-    // to first (as of their position in the bytecode). The main expression
-    // bytecode is located at PC 0, and is executed with the lowest priority.
     active_threads_.Add(
         InterpreterThread(
             0, NewRegisterArrayUninitialized(),
@@ -605,8 +645,7 @@ private:
     DCHECK_GT(clock, 0);
 
     while (true) {
-      if (current_lookaround_ == -1 &&
-          IsPcProcessed(t.pc, t.consumed_since_last_quantifier)) {
+      if (IsPcProcessed(t.pc, t.consumed_since_last_quantifier)) {
         return;
       }
       MarkPcProcessed(t.pc, t.consumed_since_last_quantifier);
@@ -741,21 +780,18 @@ private:
         active_threads_.DropAndClear();
         return;
       case RegExpInstruction::WRITE_LOOKAROUND_TABLE:
-        // Reaching this instruction means that the current lookbehind thread
-        // has found a match and needs to be destroyed. Since the lookbehind
-        // is verified at this position, we update the `lookbehind_table_`.
-        if (!capturing_lookarounds_) {
-          DCHECK_NE(current_lookaround_, -1);
-          lookaround_table_[current_lookaround_][input_index_] = true;
-          DestroyThread(t);
-        }
+        // Reaching this instruction means that the current lookaround thread
+        // has found a match and needs to be destroyed. Since the lookaround
+        // is verified at this position, we update the `lookaround_table_`.
+        DCHECK_NE(current_lookaround_, -1);
+        lookaround_table_[current_lookaround_][input_index_] = true;
+        DestroyThread(t);
         return;
       case RegExpInstruction::READ_LOOKAROUND_TABLE:
-        // Destroy the thread if the corresponding lookbehind did or did not
+        // Destroy the thread if the corresponding lookaround did or did not
         // complete a match at the current position (depending on whether or
-        // not the lookbehind is positive). The thread's priority ensures that
-        // all the threads of the lookbehind have already been run at this
-        // position.
+        // not the lookaround is positive). The lookaround priority list ensures
+        // that all the lookaround has already been run.
         if (lookaround_table_[inst.payload.read_lookaround.lookaround_index()]
                              [input_index_] !=
             inst.payload.read_lookaround.is_positive()) {
@@ -763,8 +799,7 @@ private:
           return;
         }
 
-        if ((current_lookaround_ == -1) &&
-            inst.payload.read_lookaround.is_positive()) {
+        if (inst.payload.read_lookaround.is_positive()) {
           GetLookaroundClockArray(
               t)[inst.payload.read_lookaround.lookaround_index()] = clock;
           GetLookaroundMatchIndexArray(
@@ -1016,11 +1051,9 @@ private:
       }
 
       case RegExpInstruction::FILTER_LOOKAROUND: {
-        int lookaround_id = instr.payload.lookaround_id;
-
         // Checks whether the lookaround should be saved or discarded.
-        if (lookaround_clocks[lookaround_id] >= status_.max_clock) {
-          status_.max_clock = 0;
+        if (lookaround_clocks[instr.payload.lookaround_id] >=
+            status_.max_clock) {
           incr();
         } else {
           // If the node should be discarded, all its children should be too.
@@ -1150,22 +1183,30 @@ private:
   base::Optional<InterpreterThread> best_match_thread_;
   base::Vector<int> best_match_registers_;
 
-  // Starting PC of each of the lookbehinds in the bytecode. Computed during the
-  // NFA instantiation (see the constructor).
   struct Lookaround {
     int match_pc_;
     int capture_pc_;
     bool is_ahead;
   };
+
+  // Stores the match pc, capture pc and direction of each lookaround, mapped by
+  // lookaround id. Computed during the NFA instantiation (see the
+  // constructor).
   ZoneList<Lookaround> lookarounds_;
+
+  // Stores the id of the lookarounds, ordered such that a lookaround can only
+  // depend on lookarounds appearing after its position in this list.
   ZoneList<int> lookarounds_priority_;
 
   // Truth table for the lookarounds. lookaround_table_[l][r] indicates whether
   // the lookaround of index l did complete a match on the position r.
   ZoneVector<ZoneVector<bool>> lookaround_table_;
 
+  // Whether we are traversing the input from end to start.
   bool reverse_;
-  bool capturing_lookarounds_;
+
+  // When computing the `lookaround_table_`, the id of the lookaround currently
+  // being ran.
   int current_lookaround_;
 
   // PC of the first FILTER_* instruction. Computed during the NFA instantiation
