@@ -132,11 +132,16 @@ class FilterGroups {
 
   /* Increments pc_. When at the end of a node, goes back to the parent node. */
   void IncrementPC() {
-    ++pc_;
-    if (pc_ == bytecode_.length() ||
-        bytecode_[pc_].opcode != RegExpInstruction::FILTER_CHILD) {
+    if (IsAtNodeEnd()) {
       Up();
+    } else {
+      pc_++;
     }
+  }
+
+  bool IsAtNodeEnd() {
+    return pc_ + 1 == bytecode_.length() ||
+           bytecode_[pc_ + 1].opcode != RegExpInstruction::FILTER_CHILD;
   }
 
   base::Vector<int> Run(base::Vector<int> registers_,
@@ -150,9 +155,14 @@ class FilterGroups {
       auto instr = bytecode_[pc_];
       switch (instr.opcode) {
         case RegExpInstruction::FILTER_CHILD:
+          // We only need to come back for the next instructions if we are at
+          // the end of the node.
+          if (!IsAtNodeEnd()) {
+            pc_stack_.push(pc_ + 1);
+            max_clock_stack_.push(max_clock_);
+          }
+
           // Enter the child's node.
-          pc_stack_.push(pc_ + 1);
-          max_clock_stack_.push(max_clock_);
           pc_ = instr.payload.pc;
           break;
 
