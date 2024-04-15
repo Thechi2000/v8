@@ -902,6 +902,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchPrepareTailCall:
       AssemblePrepareTailCall();
       break;
+    case kArchCallCFunctionWithFrameState:
     case kArchCallCFunction: {
       int const num_gp_parameters = ParamField::decode(instr->opcode());
       int const num_fp_parameters = FPParamField::decode(instr->opcode());
@@ -925,6 +926,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                                      set_isolate_data_slots, &return_location);
       }
       RecordSafepoint(instr->reference_map(), pc_offset);
+
+      bool const needs_frame_state =
+          (arch_opcode == kArchCallCFunctionWithFrameState);
+      if (needs_frame_state) {
+        RecordDeoptInfo(instr, pc_offset);
+      }
+
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -1984,6 +1992,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Float64ExtractHighWord32:
       __ Umov(i.OutputRegister32(), i.InputFloat64Register(0).V2S(), 1);
       break;
+    case kArm64Float64FromWord32Pair:
+      __ uxtw(i.TempRegister(0), i.InputRegister64(1));
+      __ orr(i.TempRegister(0), i.TempRegister(0),
+             Operand(i.InputRegister64(0), LSL, 32));
+      __ Fmov(i.OutputFloat64Register(), i.TempRegister(0));
+      break;
     case kArm64Float64InsertLowWord32:
       DCHECK_EQ(i.OutputFloat64Register(), i.InputFloat64Register(0));
       __ Ins(i.OutputFloat64Register().V2S(), 0, i.InputRegister32(1));
@@ -2061,6 +2075,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64LdrDecompressTagged:
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ DecompressTagged(i.OutputRegister(), i.MemoryOperand());
+      break;
+    case kArm64LdrDecompressProtected:
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ DecompressProtected(i.OutputRegister(), i.MemoryOperand());
       break;
     case kArm64LdarDecompressTaggedSigned:
       __ AtomicDecompressTaggedSigned(i.OutputRegister(), i.InputRegister(0),
@@ -2827,7 +2845,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kArm64I8x16BitMask: {
-      __ I8x16BitMask(i.OutputRegister32(), i.InputSimd128Register(0));
+      VRegister temp = NoVReg;
+
+      if (CpuFeatures::IsSupported(PMULL1Q)) {
+        temp = i.TempSimd128Register(0);
+      }
+
+      __ I8x16BitMask(i.OutputRegister32(), i.InputSimd128Register(0), temp);
       break;
     }
     case kArm64S128Const: {
@@ -2906,8 +2930,39 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Mov(temp, src1);
         src1 = temp;
       }
-      // Perform shuffle as a vmov per lane.
       int32_t shuffle = i.InputInt32(2);
+
+      // Check whether we can reduce the number of vmovs by performing a dup
+      // first.
+      if (src0 == src1) {
+        const std::array<int, 4> lanes{shuffle & 0x3, shuffle >> 8 & 0x3,
+                                       shuffle >> 16 & 0x3,
+                                       shuffle >> 24 & 0x3};
+        std::array<int, 4> lane_counts{};
+        for (int lane : lanes) {
+          ++lane_counts[lane];
+        }
+
+        int duplicate_lane = -1;
+        for (int lane = 0; lane < 4; ++lane) {
+          if (lane_counts[lane] > 1) {
+            duplicate_lane = lane;
+            break;
+          }
+        }
+
+        if (duplicate_lane != -1) {
+          __ Dup(dst, src0, duplicate_lane);
+          for (int i = 0; i < 4; ++i) {
+            int lane = lanes[i];
+            if (lane == duplicate_lane) continue;
+            __ Mov(dst, i, src0, lane);
+          }
+          break;
+        }
+      }
+
+      // Perform shuffle as a vmov per lane.
       for (int i = 0; i < 4; i++) {
         VRegister src = src0;
         int lane = shuffle & 0x7;
@@ -3058,6 +3113,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Fmov(i.OutputRegister64(), temp.D());
       __ Cmp(i.OutputRegister64(), 0);
       __ Cset(i.OutputRegister32(), ne);
+      break;
+    }
+    case kArm64S32x4OneLaneSwizzle: {
+      Simd128Register dst = i.OutputSimd128Register().V4S(),
+                      src = i.InputSimd128Register(0).V4S();
+      int from = i.InputInt32(1);
+      int to = i.InputInt32(2);
+      if (dst != src) {
+        __ Mov(dst, src);
+      }
+      __ Mov(dst, to, src, from);
       break;
     }
 #define SIMD_REDUCE_OP_CASE(Op, Instr, format, FORMAT)     \

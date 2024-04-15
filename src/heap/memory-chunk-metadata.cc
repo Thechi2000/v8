@@ -7,7 +7,6 @@
 #include <cstdlib>
 
 #include "src/heap/heap-write-barrier-inl.h"
-#include "src/heap/incremental-marking.h"
 #include "src/heap/marking-inl.h"
 #include "src/objects/heap-object.h"
 #include "src/utils/allocation.h"
@@ -19,14 +18,21 @@ MemoryChunkMetadata::MemoryChunkMetadata(Heap* heap, BaseSpace* space,
                                          size_t chunk_size, Address area_start,
                                          Address area_end,
                                          VirtualMemory reservation)
-    : size_(chunk_size),
+    : reservation_(std::move(reservation)),
+      allocated_bytes_(area_end - area_start),
+      high_water_mark_(area_start -
+                       MemoryChunk::FromAddress(area_start)->address()),
+      size_(chunk_size),
+      area_end_(area_end),
       heap_(heap),
       area_start_(area_start),
-      area_end_(area_end),
-      allocated_bytes_(area_end - area_start),
-      high_water_mark_(area_start - ChunkAddress()),
-      owner_(space),
-      reservation_(std::move(reservation)) {}
+      owner_(space) {}
+
+MemoryChunkMetadata::~MemoryChunkMetadata() {
+#ifdef V8_ENABLE_SANDBOX
+  MemoryChunk::ClearMetadataPointer(this);
+#endif
+}
 
 bool MemoryChunkMetadata::InOldSpace() const {
   return owner()->identity() == OLD_SPACE;
@@ -36,6 +42,16 @@ bool MemoryChunkMetadata::InLargeObjectSpace() const {
   return owner()->identity() == LO_SPACE;
 }
 
+bool MemoryChunkMetadata::InSharedSpace() const {
+  return owner()->identity() == SHARED_SPACE ||
+         owner()->identity() == SHARED_LO_SPACE;
+}
+
+bool MemoryChunkMetadata::InTrustedSpace() const {
+  return owner()->identity() == TRUSTED_SPACE ||
+         owner()->identity() == TRUSTED_LO_SPACE;
+}
+
 #ifdef THREAD_SANITIZER
 void MemoryChunkMetadata::SynchronizedHeapLoad() const {
   CHECK(reinterpret_cast<Heap*>(
@@ -43,15 +59,31 @@ void MemoryChunkMetadata::SynchronizedHeapLoad() const {
                 const_cast<MemoryChunkMetadata*>(this)->heap_)))) != nullptr ||
         Chunk()->IsFlagSet(MemoryChunk::READ_ONLY_HEAP));
 }
+
+void MemoryChunkMetadata::SynchronizedHeapStore() {
+  // Since TSAN does not process memory fences, we use the following annotation
+  // to tell TSAN that there is no data race when emitting a
+  // InitializationMemoryFence. Note that the other thread still needs to
+  // perform MutablePageMetadata::synchronized_heap().
+  base::Release_Store(reinterpret_cast<base::AtomicWord*>(&heap_),
+                      reinterpret_cast<base::AtomicWord>(heap_));
+}
 #endif
 
 class BasicMemoryChunkValidator {
   // Computed offsets should match the compiler generated ones.
-  static_assert(MemoryChunkLayout::kSizeOffset ==
-                offsetof(MemoryChunkMetadata, size_));
   static_assert(MemoryChunkLayout::kFlagsOffset ==
                 offsetof(MemoryChunk, main_thread_flags_));
-  static_assert(offsetof(MemoryChunkMetadata, chunk_) == 0);
+#ifdef V8_ENABLE_SANDBOX
+  static_assert(MemoryChunkLayout::kMetadataIndexOffset ==
+                offsetof(MemoryChunk, metadata_index_));
+#else
+  static_assert(MemoryChunkLayout::kMetadataOffset ==
+                offsetof(MemoryChunk, metadata_));
+#endif
+
+  static_assert(MemoryChunkLayout::kSizeOffset ==
+                offsetof(MemoryChunkMetadata, size_));
   static_assert(MemoryChunkLayout::kHeapOffset ==
                 offsetof(MemoryChunkMetadata, heap_));
   static_assert(offsetof(MemoryChunkMetadata, size_) ==

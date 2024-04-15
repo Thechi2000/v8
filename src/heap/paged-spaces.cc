@@ -74,19 +74,19 @@ PagedSpaceBase::PagedSpaceBase(Heap* heap, AllocationSpace space,
   accounting_stats_.Clear();
 }
 
-PageMetadata* PagedSpaceBase::InitializePage(MutablePageMetadata* chunk) {
-  PageMetadata* page = static_cast<PageMetadata*>(chunk);
+PageMetadata* PagedSpaceBase::InitializePage(
+    MutablePageMetadata* mutable_page_metadata) {
+  MemoryChunk* chunk = mutable_page_metadata->Chunk();
+  PageMetadata* page = PageMetadata::cast(mutable_page_metadata);
   DCHECK_EQ(
       MemoryChunkLayout::AllocatableMemoryInMemoryChunk(page->owner_identity()),
       page->area_size());
   // Make sure that categories are initialized before freeing the area.
   page->ResetAllocationStatistics();
-  page->SetOldGenerationPageFlags(
-      heap()->incremental_marking()->marking_mode());
   page->AllocateFreeListCategories();
   page->InitializeFreeListCategories();
   page->list_node().Initialize();
-  page->InitializationMemoryFence();
+  chunk->InitializationMemoryFence();
   return page;
 }
 
@@ -112,7 +112,7 @@ void PagedSpaceBase::MergeCompactionSpace(CompactionSpace* other) {
 
     // Ensure that pages are initialized before objects on it are discovered by
     // concurrent markers.
-    p->InitializationMemoryFence();
+    p->Chunk()->InitializationMemoryFence();
 
     // Relinking requires the category to be unlinked.
     other->RemovePage(p);
@@ -142,9 +142,6 @@ size_t PagedSpaceBase::CommittedPhysicalMemory() const {
     DCHECK_EQ(0, committed_physical_memory());
     return CommittedMemory();
   }
-  CodePageHeaderModificationScope rwx_write_scope(
-      "Updating high water mark for Code pages requires write access to "
-      "the Code page headers");
   return committed_physical_memory();
 }
 
@@ -198,7 +195,10 @@ void PagedSpaceBase::RefineAllocatedBytesAfterSweeping(PageMetadata* page) {
     if (identity() == NEW_SPACE) size_at_last_gc_ -= counter_diff;
     DecreaseAllocatedBytes(counter_diff, page);
   }
-  page->SetLiveBytes(0);
+  if (!v8_flags.sticky_mark_bits) {
+    // With sticky mark-bits the counter is reset on unmarking.
+    page->SetLiveBytes(0);
+  }
 }
 
 PageMetadata* PagedSpaceBase::RemovePageSafe(int size_in_bytes) {
@@ -277,11 +277,6 @@ void PagedSpaceBase::ResetFreeList() {
 }
 
 void PagedSpaceBase::ShrinkImmortalImmovablePages() {
-  base::Optional<CodePageHeaderModificationScope> optional_scope;
-  if (identity() == CODE_SPACE) {
-    optional_scope.emplace(
-        "ShrinkImmortalImmovablePages writes to the page header.");
-  }
   DCHECK(!heap()->deserialization_complete());
   ResetFreeList();
   for (PageMetadata* page : *this) {
@@ -292,10 +287,6 @@ void PagedSpaceBase::ShrinkImmortalImmovablePages() {
 
 bool PagedSpaceBase::TryExpand(LocalHeap* local_heap, AllocationOrigin origin) {
   DCHECK_EQ(!local_heap, origin == AllocationOrigin::kGC);
-  base::Optional<CodePageHeaderModificationScope> optional_scope;
-  if (identity() == CODE_SPACE) {
-    optional_scope.emplace("TryExpand writes to the page header.");
-  }
   const size_t accounted_size =
       MemoryChunkLayout::AllocatableMemoryInMemoryChunk(identity());
   if (origin != AllocationOrigin::kGC && identity() != NEW_SPACE) {
@@ -338,7 +329,7 @@ size_t PagedSpaceBase::Available() const {
 }
 
 void PagedSpaceBase::ReleasePage(PageMetadata* page) {
-  ReleasePageImpl(page, MemoryAllocator::FreeMode::kPostpone);
+  ReleasePageImpl(page, MemoryAllocator::FreeMode::kImmediately);
 }
 
 void PagedSpaceBase::ReleasePageImpl(PageMetadata* page,
@@ -652,6 +643,16 @@ void OldSpace::AddPromotedPage(PageMetadata* page) {
 
 void OldSpace::ReleasePage(PageMetadata* page) {
   ReleasePageImpl(page, MemoryAllocator::FreeMode::kPool);
+}
+
+// -----------------------------------------------------------------------------
+// SharedSpace implementation
+
+void SharedSpace::ReleasePage(PageMetadata* page) {
+  // Old-to-new slots in old objects may be overwritten with references to
+  // shared objects. Postpone releasing empty pages so that updating old-to-new
+  // slots in dead old objects may access the dead shared objects.
+  ReleasePageImpl(page, MemoryAllocator::FreeMode::kPostpone);
 }
 
 }  // namespace internal

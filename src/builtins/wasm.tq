@@ -46,13 +46,14 @@ extern runtime WasmArrayCopy(Context, WasmArray, Smi, WasmArray, Smi, Smi):
 extern runtime WasmArrayNewSegment(
     Context, WasmTrustedInstanceData, Smi, Smi, Smi, Map): Object;
 extern runtime WasmStringNewSegmentWtf8(
-    Context, WasmTrustedInstanceData, Smi, Smi, Smi, Smi): String;
+    Context, WasmTrustedInstanceData, Smi, Smi, Smi, Smi): String|WasmNull;
 extern runtime WasmArrayInitSegment(
     Context, WasmTrustedInstanceData, Smi, WasmArray, Smi, Smi, Smi): JSAny;
 extern runtime WasmStringNewWtf8(
-    Context, WasmTrustedInstanceData, Smi, Smi, Number, Number): String|Null;
+    Context, WasmTrustedInstanceData, Smi, Smi, Number, Number): String
+    |WasmNull;
 extern runtime WasmStringNewWtf8Array(Context, Smi, WasmArray, Smi, Smi): String
-    |Null;
+    |WasmNull;
 extern runtime WasmStringNewWtf16(
     Context, WasmTrustedInstanceData, Smi, Number, Number): String;
 extern runtime WasmStringNewWtf16Array(Context, WasmArray, Smi, Smi): String;
@@ -76,6 +77,8 @@ extern runtime WasmStringFromCodePoint(Context, Number): String;
 extern runtime WasmStringHash(NoContext, String): Smi;
 extern runtime WasmSubstring(Context, String, Smi, Smi): String;
 extern runtime WasmJSToWasmObject(Context, JSAny, Smi): JSAny;
+
+extern runtime PropagateException(NoContext): JSAny;
 }
 
 namespace unsafe {
@@ -108,7 +111,7 @@ extern macro WasmBuiltinsAssembler::LoadContextFromInstanceData(
     WasmTrustedInstanceData): NativeContext;
 extern macro WasmBuiltinsAssembler::LoadTablesFromInstanceData(
     WasmTrustedInstanceData): FixedArray;
-extern macro WasmBuiltinsAssembler::LoadInternalFunctionsFromInstanceData(
+extern macro WasmBuiltinsAssembler::LoadFuncRefsFromInstanceData(
     WasmTrustedInstanceData): FixedArray;
 extern macro WasmBuiltinsAssembler::LoadManagedObjectMapsFromInstanceData(
     WasmTrustedInstanceData): FixedArray;
@@ -126,18 +129,18 @@ builtin WasmInt32ToHeapNumber(val: int32): HeapNumber {
 }
 
 builtin WasmFuncRefToJS(
-    implicit context: Context)(val: WasmInternalFunction|WasmNull): JSFunction
-    |Null {
+    implicit context: Context)(val: WasmFuncRef|WasmNull): JSFunction|Null {
   typeswitch (val) {
     case (WasmNull): {
       return Null;
     }
-    case (func: WasmInternalFunction): {
-      const maybeExternal: Object = func.external;
+    case (func: WasmFuncRef): {
+      const internal: WasmInternalFunction = func.internal;
+      const maybeExternal: Object = internal.external;
       if (maybeExternal != Undefined) {
         return %RawDownCast<JSFunction>(maybeExternal);
       }
-      tail runtime::WasmInternalFunctionCreateExternal(context, func);
+      tail runtime::WasmInternalFunctionCreateExternal(context, internal);
     }
   }
 }
@@ -269,6 +272,7 @@ builtin WasmTableSet(tableIndex: intptr, index: uint32, value: Object):
   }
 }
 
+// Returns WasmFuncRef or WasmNull, or throws an exception.
 builtin WasmTableGetFuncRef(tableIndex: intptr, index: uint32): Object {
   const trustedData: WasmTrustedInstanceData = LoadInstanceDataFromFrame();
   const entryIndex: intptr = Signed(ChangeUint32ToWord(index));
@@ -282,16 +286,14 @@ builtin WasmTableGetFuncRef(tableIndex: intptr, index: uint32): Object {
     if (index >= entriesCount) goto IndexOutOfRange;
 
     const entries: FixedArray = table.entries;
-    const entry: Object = LoadFixedArrayElement(entries, entryIndex);
+    const entry: HeapObject =
+        UnsafeCast<HeapObject>(LoadFixedArrayElement(entries, entryIndex));
 
-    try {
-      const entryObject: HeapObject =
-          TaggedToHeapObject<HeapObject>(entry) otherwise ReturnEntry;
-      if (IsTuple2Map(entryObject.map)) goto CallRuntime;
-      goto ReturnEntry;
-    } label ReturnEntry {
-      return entry;
-    }
+    dcheck(Is<WasmFuncRef>(entry) || Is<WasmNull>(entry) || Is<Tuple2>(entry));
+    if (IsTuple2Map(entry.map)) goto CallRuntime;
+    if (Is<WasmNull>(entry)) return entry;
+    dcheck(Is<WasmFuncRef>(entry));
+    return entry;
   } label CallRuntime deferred {
     tail runtime::WasmFunctionTableGet(
         LoadContextFromInstanceData(trustedData), trustedData,
@@ -310,8 +312,9 @@ builtin WasmFunctionTableGet(tableIndex: intptr, index: int32): Object {
       SmiFromIntPtr(tableIndex), SmiFromInt32(index));
 }
 
-builtin WasmTableSetFuncRef(tableIndex: intptr, index: uint32, value: Object):
-    Object {
+builtin WasmTableSetFuncRef(
+    tableIndex: intptr, index: uint32, value: WasmFuncRef): Object {
+  dcheck(Is<WasmFuncRef>(value) || Is<WasmNull>(value));
   const trustedData: WasmTrustedInstanceData = LoadInstanceDataFromFrame();
   const entryIndex: intptr = Signed(ChangeUint32ToWord(index));
   try {
@@ -335,14 +338,13 @@ builtin WasmTableSetFuncRef(tableIndex: intptr, index: uint32, value: Object):
 builtin WasmRefFunc(index: uint32): Object {
   const trustedData: WasmTrustedInstanceData = LoadInstanceDataFromFrame();
   try {
-    const table: FixedArray =
-        LoadInternalFunctionsFromInstanceData(trustedData);
-    const functionIndex: intptr = Signed(ChangeUint32ToWord(index));
-    const result: Object = LoadFixedArrayElement(table, functionIndex);
-    // {result} is either a funcref or nullptr. A Smi check is the fastest
-    // way to distinguish these two cases.
-    if (TaggedIsSmi(result)) goto CallRuntime;
-    return result;
+    const funcRefs: FixedArray = LoadFuncRefsFromInstanceData(trustedData);
+    const funcref: Object = funcRefs.objects[index];
+    // {funcref} is either a WasmFuncRef or Smi::zero(). A Smi check is the
+    // fastest way to distinguish these two cases.
+    if (TaggedIsSmi(funcref)) goto CallRuntime;
+    dcheck(Is<WasmFuncRef>(funcref));
+    return funcref;
   } label CallRuntime deferred {
     tail runtime::WasmRefFunc(
         LoadContextFromInstanceData(trustedData), trustedData,
@@ -564,9 +566,6 @@ builtin WasmI64AtomicWait(
 
 // Type feedback collection support for `call_ref`.
 
-extern macro LoadWasmInternalFunctionInstructionStart(WasmInternalFunction):
-    RawPtr;
-
 // Vector format:
 // Two slots per call_ref instruction. These slots' values can be:
 // - uninitialized: (0, <unused>). Note: we use {0} as the sentinel because
@@ -579,8 +578,8 @@ extern macro LoadWasmInternalFunctionInstructionStart(WasmInternalFunction):
 //
 // TODO(rstz): The counter might overflow if it exceeds the range of a Smi.
 // This can lead to incorrect inlining decisions.
-macro UpdateIC(
-    vector: FixedArray, index: intptr, funcref: WasmInternalFunction): void {
+macro UpdateIC(vector: FixedArray, index: intptr, funcref: WasmFuncRef):
+    void {
   const value = vector.objects[index];
   if (value == funcref) {
     // Monomorphic hit. Check for this case first to maximize its performance.
@@ -624,7 +623,7 @@ macro UpdateIC(
       newEntries.objects[newIndex + 1] = SmiConstant(1);
       vector.objects[index] = newEntries;
     }
-  } else if (Is<WasmInternalFunction>(value)) {
+  } else if (Is<WasmFuncRef>(value)) {
     // Monomorphic miss.
     const newEntries = UnsafeCast<FixedArray>(AllocateFixedArray(
         ElementsKind::PACKED_ELEMENTS, 4, AllocationFlag::kNone));
@@ -646,19 +645,16 @@ macro UpdateIC(
 // Liftoff uses the two returned values directly.
 struct TargetAndRef {
   target: RawPtr;
-  ref: WasmInstanceObject|WasmApiFunctionRef;
+  ref: WasmTrustedInstanceData|WasmApiFunctionRef;
 }
 
-builtin CallRefIC(
-    vector: FixedArray, index: intptr,
-    funcref: WasmInternalFunction): TargetAndRef {
+builtin CallRefIC(vector: FixedArray, index: intptr, funcref: WasmFuncRef):
+    TargetAndRef {
+  dcheck(Is<WasmFuncRef>(funcref));
   UpdateIC(vector, index, funcref);
 
-  let target = funcref.call_target_ptr;
-  if (Signed(target) == IntPtrConstant(0)) {
-    target = LoadWasmInternalFunctionInstructionStart(funcref);
-  }
-  return TargetAndRef{target: target, ref: funcref.ref};
+  const internal = funcref.internal;
+  return TargetAndRef{target: internal.call_target, ref: internal.ref};
 }
 
 extern macro TryHasOwnProperty(HeapObject, Map, InstanceType, Name): never
@@ -702,6 +698,10 @@ builtin ThrowWasmTrapUnreachable(): JSAny {
 
 builtin WasmTrapHandlerThrowTrap(): JSAny {
   tail runtime::TrapHandlerThrowWasmError(LoadContextFromWasmOrJsFrame());
+}
+
+builtin WasmPropagateException(): JSAny {
+  tail runtime::PropagateException(kNoContext);
 }
 
 builtin ThrowWasmTrapMemOutOfBounds(): JSAny {
@@ -790,7 +790,8 @@ macro ModifyThreadInWasmFlag(newValue: int32): void {
 }
 
 builtin WasmStringNewWtf8(
-    offset: uint32, size: uint32, memory: Smi, utf8Variant: Smi): String|Null {
+    offset: uint32, size: uint32, memory: Smi, utf8Variant: Smi): String
+    |WasmNull {
   const trustedData = LoadInstanceDataFromFrame();
   tail runtime::WasmStringNewWtf8(
       LoadContextFromInstanceData(trustedData), trustedData, memory,
@@ -798,7 +799,7 @@ builtin WasmStringNewWtf8(
 }
 builtin WasmStringNewWtf8Array(
     start: uint32, end: uint32, array: WasmArray, utf8Variant: Smi): String
-    |Null {
+    |WasmNull {
   // This can be called from Wasm and from "JS String Builtins".
   const context = LoadContextFromWasmOrJsFrame();
   try {
@@ -939,11 +940,11 @@ builtin WasmStringNewWtf16Array(array: WasmArray, start: uint32, end: uint32):
 }
 
 // For imports based string constants.
-// Always returns a String if it didn't trap; typed "JSAny" to satisfy
-// Torque's type checker for tail calls.
+// Always returns a String or WasmNull if it didn't trap; typed "JSAny" to
+// satisfy Torque's type checker for tail calls.
 builtin WasmStringFromDataSegment(
     segmentLength: uint32, arrayStart: uint32, arrayEnd: uint32,
-    segmentIndex: Smi, segmentOffset: Smi, variant: Smi): JSAny {
+    segmentIndex: Smi, segmentOffset: Smi, variant: Smi): JSAny|WasmNull {
   const trustedData = LoadInstanceDataFromFrame();
   try {
     const segmentOffsetU: uint32 = Unsigned(SmiToInt32(segmentOffset));

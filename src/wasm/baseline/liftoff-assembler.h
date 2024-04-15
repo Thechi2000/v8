@@ -751,17 +751,12 @@ class LiftoffAssembler : public MacroAssembler {
                           Label* ool_label, const FreezeCacheState& frozen);
   inline void LoadConstant(LiftoffRegister, WasmValue);
   inline void LoadInstanceDataFromFrame(Register dst);
-  inline void LoadTrustedDataFromInstanceObject(Register dst,
-                                                Register instance_object);
+  inline void LoadTrustedPointer(Register dst, Register src_addr, int offset,
+                                 IndirectPointerTag tag);
   inline void LoadFromInstance(Register dst, Register instance, int offset,
                                int size);
   inline void LoadTaggedPointerFromInstance(Register dst, Register instance,
                                             int offset);
-  inline void LoadExternalPointer(Register dst, Register src_addr, int offset,
-                                  ExternalPointerTag tag, Register scratch);
-  inline void LoadExternalPointer(Register dst, Register src_addr, int offset,
-                                  Register index, ExternalPointerTag tag,
-                                  Register scratch);
   inline void SpillInstanceData(Register instance);
   inline void ResetOSRTarget();
   inline void LoadTaggedPointer(Register dst, Register src_addr,

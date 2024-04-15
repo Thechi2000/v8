@@ -93,21 +93,6 @@ TEST_F(SpacesTest, CompactionSpaceMerge) {
   heap->SetGCState(Heap::NOT_IN_GC);
 }
 
-TEST_F(SpacesTest, WriteBarrierFromHeapObject) {
-  constexpr Address address1 = PageMetadata::kPageSize;
-  Tagged<HeapObject> object1 =
-      HeapObject::unchecked_cast(Tagged<Object>(address1));
-  MemoryChunkMetadata* chunk1 = MemoryChunkMetadata::FromHeapObject(object1);
-  MemoryChunk* slim_chunk1 = MemoryChunk::FromHeapObject(object1);
-  EXPECT_EQ(static_cast<void*>(chunk1), static_cast<void*>(slim_chunk1));
-  constexpr Address address2 = 2 * PageMetadata::kPageSize - 1;
-  Tagged<HeapObject> object2 =
-      HeapObject::unchecked_cast(Tagged<Object>(address2));
-  MemoryChunkMetadata* chunk2 = MemoryChunkMetadata::FromHeapObject(object2);
-  MemoryChunk* slim_chunk2 = MemoryChunk::FromHeapObject(object2);
-  EXPECT_EQ(static_cast<void*>(chunk2), static_cast<void*>(slim_chunk2));
-}
-
 TEST_F(SpacesTest, WriteBarrierIsMarking) {
   const size_t kSizeOfMemoryChunk = sizeof(MutablePageMetadata);
   char memory[kSizeOfMemoryChunk];
@@ -115,10 +100,10 @@ TEST_F(SpacesTest, WriteBarrierIsMarking) {
   MemoryChunk* chunk = reinterpret_cast<MemoryChunk*>(&memory);
   EXPECT_FALSE(chunk->IsFlagSet(MemoryChunk::INCREMENTAL_MARKING));
   EXPECT_FALSE(chunk->IsMarking());
-  chunk->SetFlag(MemoryChunk::INCREMENTAL_MARKING);
+  chunk->SetFlagNonExecutable(MemoryChunk::INCREMENTAL_MARKING);
   EXPECT_TRUE(chunk->IsFlagSet(MemoryChunk::INCREMENTAL_MARKING));
   EXPECT_TRUE(chunk->IsMarking());
-  chunk->ClearFlag(MemoryChunk::INCREMENTAL_MARKING);
+  chunk->ClearFlagNonExecutable(MemoryChunk::INCREMENTAL_MARKING);
   EXPECT_FALSE(chunk->IsFlagSet(MemoryChunk::INCREMENTAL_MARKING));
   EXPECT_FALSE(chunk->IsMarking());
 }
@@ -129,9 +114,9 @@ TEST_F(SpacesTest, WriteBarrierInYoungGenerationToSpace) {
   memset(&memory, 0, kSizeOfMemoryChunk);
   MemoryChunk* chunk = reinterpret_cast<MemoryChunk*>(&memory);
   EXPECT_FALSE(chunk->InYoungGeneration());
-  chunk->SetFlag(MemoryChunk::TO_PAGE);
+  chunk->SetFlagNonExecutable(MemoryChunk::TO_PAGE);
   EXPECT_TRUE(chunk->InYoungGeneration());
-  chunk->ClearFlag(MemoryChunk::TO_PAGE);
+  chunk->ClearFlagNonExecutable(MemoryChunk::TO_PAGE);
   EXPECT_FALSE(chunk->InYoungGeneration());
 }
 
@@ -141,9 +126,9 @@ TEST_F(SpacesTest, WriteBarrierInYoungGenerationFromSpace) {
   memset(&memory, 0, kSizeOfMemoryChunk);
   MemoryChunk* chunk = reinterpret_cast<MemoryChunk*>(&memory);
   EXPECT_FALSE(chunk->InYoungGeneration());
-  chunk->SetFlag(MemoryChunk::FROM_PAGE);
+  chunk->SetFlagNonExecutable(MemoryChunk::FROM_PAGE);
   EXPECT_TRUE(chunk->InYoungGeneration());
-  chunk->ClearFlag(MemoryChunk::FROM_PAGE);
+  chunk->ClearFlagNonExecutable(MemoryChunk::FROM_PAGE);
   EXPECT_FALSE(chunk->InYoungGeneration());
 }
 

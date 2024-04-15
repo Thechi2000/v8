@@ -9,6 +9,7 @@
 #include "src/base/bit-field.h"
 #include "src/common/globals.h"
 #include "src/objects/code.h"
+#include "src/objects/fixed-array.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/instance-type-checker.h"
 #include "src/objects/internal-index.h"
@@ -90,14 +91,13 @@ enum InstanceType : uint16_t;
   V(SyntheticModule)                   \
   V(ThinString)                        \
   V(TransitionArray)                   \
-  IF_WASM(V, WasmApiFunctionRef)       \
   IF_WASM(V, WasmArray)                \
   IF_WASM(V, WasmCapiFunctionData)     \
   IF_WASM(V, WasmContinuationObject)   \
   IF_WASM(V, WasmExportedFunctionData) \
   IF_WASM(V, WasmFunctionData)         \
+  IF_WASM(V, WasmFuncRef)              \
   IF_WASM(V, WasmInstanceObject)       \
-  IF_WASM(V, WasmInternalFunction)     \
   IF_WASM(V, WasmJSFunctionData)       \
   IF_WASM(V, WasmResumeData)           \
   IF_WASM(V, WasmStruct)               \

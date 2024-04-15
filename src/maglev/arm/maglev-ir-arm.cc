@@ -153,6 +153,28 @@ void InlinedAllocation::GenerateCode(MaglevAssembler* masm,
   }
 }
 
+void ArgumentsLength::SetValueLocationConstraints() { DefineAsRegister(this); }
+
+void ArgumentsLength::GenerateCode(MaglevAssembler* masm,
+                                   const ProcessingState& state) {
+  Register argc = ToRegister(result());
+  __ ldr(argc, MemOperand(fp, StandardFrameConstants::kArgCOffset));
+  __ sub(argc, argc, Operand(1));  // Remove receiver.
+}
+
+void RestLength::SetValueLocationConstraints() { DefineAsRegister(this); }
+
+void RestLength::GenerateCode(MaglevAssembler* masm,
+                              const ProcessingState& state) {
+  Register length = ToRegister(result());
+  Label done;
+  __ ldr(length, MemOperand(fp, StandardFrameConstants::kArgCOffset));
+  __ sub(length, length, Operand(formal_parameter_count() + 1), SetCC);
+  __ b(kGreaterThanEqual, &done);
+  __ Move(length, 0);
+  __ bind(&done);
+}
+
 int CheckedObjectToIndex::MaxCallStackArgs() const { return 0; }
 
 void Int32AddWithOverflow::SetValueLocationConstraints() {
@@ -715,7 +737,7 @@ void CheckJSDataViewBounds::GenerateCode(MaglevAssembler* masm,
   __ LoadBoundedSizeFromObject(byte_length, object,
                                JSDataView::kRawByteLengthOffset);
 
-  int element_size = ExternalArrayElementSize(element_type_);
+  int element_size = compiler::ExternalArrayElementSize(element_type_);
   if (element_size > 1) {
     __ sub(byte_length, byte_length, Operand(element_size - 1), SetCC);
     __ EmitEagerDeoptIf(mi, DeoptimizeReason::kOutOfBounds, this);

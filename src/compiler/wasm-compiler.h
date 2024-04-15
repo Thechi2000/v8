@@ -99,12 +99,6 @@ MaybeHandle<Code> CompileWasmToJSWrapper(Isolate* isolate,
                                          int expected_arity,
                                          wasm::Suspend suspend);
 
-// Compiles a stub with JS linkage that serves as an adapter for function
-// objects constructed via {WebAssembly.Function}. It performs a round-trip
-// simulating a JS-to-Wasm-to-JS coercion of parameter and return values.
-MaybeHandle<Code> CompileJSToJSWrapper(Isolate*, const wasm::FunctionSig*,
-                                       const wasm::WasmModule* module);
-
 enum CWasmEntryParameters {
   kCodeEntry,
   kObjectRef,
@@ -317,10 +311,9 @@ class WasmGraphBuilder {
   Node* ReturnCallRef(const wasm::FunctionSig* sig, base::Vector<Node*> args,
                       CheckForNull null_check, wasm::WasmCodePosition position);
 
-  void CompareToInternalFunctionAtIndex(Node* func_ref, uint32_t function_index,
-                                        Node** success_control,
-                                        Node** failure_control,
-                                        bool is_last_case);
+  void CompareToFuncRefAtIndex(Node* func_ref, uint32_t function_index,
+                               Node** success_control, Node** failure_control,
+                               bool is_last_case);
 
   // BrOnNull returns the control for the null and non-null case.
   std::tuple<Node*, Node*> BrOnNull(Node* ref_object, wasm::ValueType type);
@@ -705,14 +698,6 @@ class WasmGraphBuilder {
                      IsReturnCall continuation,
                      wasm::WasmCodePosition position);
 
-  // Load the trusted data if the given object is a WasmInstanceObject.
-  // Otherwise return the value unmodified.
-  // This is used when calling via WasmInternalFunction where the "ref" is
-  // either an instance object or a WasmApiFunctionRef.
-  // TODO(14499): Refactor WasmInternalFunction to avoid this conditional
-  // indirect load.
-  Node* LoadTrustedDataFromMaybeInstanceObject(Node* maybe_instance_object);
-
   Node* BuildF32CopySign(Node* left, Node* right);
   Node* BuildF64CopySign(Node* left, Node* right);
 
@@ -844,8 +829,6 @@ class WasmGraphBuilder {
 
   Node* BuildMultiReturnFixedArrayFromIterable(const wasm::FunctionSig* sig,
                                                Node* iterable, Node* context);
-
-  Node* BuildLoadCodeEntrypointViaCodePointer(Node* object, int offset);
 
   Node* BuildLoadCallTargetFromExportedFunctionData(Node* function_data);
 

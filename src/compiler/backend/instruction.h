@@ -570,6 +570,7 @@ class LocationOperand : public InstructionOperand {
       case MachineRepresentation::kTagged:
       case MachineRepresentation::kCompressedPointer:
       case MachineRepresentation::kCompressed:
+      case MachineRepresentation::kProtectedPointer:
       case MachineRepresentation::kSandboxedPointer:
         return true;
       case MachineRepresentation::kBit:
@@ -579,9 +580,8 @@ class LocationOperand : public InstructionOperand {
         return false;
       case MachineRepresentation::kMapWord:
       case MachineRepresentation::kIndirectPointer:
-        break;
+        UNREACHABLE();
     }
-    UNREACHABLE();
   }
 
   // Return true if the locations can be moved to one another.
@@ -1461,13 +1461,13 @@ class StateValueList {
 
 class FrameStateDescriptor : public ZoneObject {
  public:
-  FrameStateDescriptor(Zone* zone, FrameStateType type,
-                       BytecodeOffset bailout_id,
-                       OutputFrameStateCombine state_combine,
-                       size_t parameters_count, size_t locals_count,
-                       size_t stack_count,
-                       MaybeHandle<SharedFunctionInfo> shared_info,
-                       FrameStateDescriptor* outer_state = nullptr);
+  FrameStateDescriptor(
+      Zone* zone, FrameStateType type, BytecodeOffset bailout_id,
+      OutputFrameStateCombine state_combine, size_t parameters_count,
+      size_t locals_count, size_t stack_count,
+      MaybeHandle<SharedFunctionInfo> shared_info,
+      FrameStateDescriptor* outer_state = nullptr,
+      uint32_t wasm_liftoff_frame_size = std::numeric_limits<uint32_t>::max());
 
   FrameStateType type() const { return type_; }
   BytecodeOffset bailout_id() const { return bailout_id_; }

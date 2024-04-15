@@ -323,12 +323,6 @@ void MainAllocator::FreeLinearAllocationArea() {
   Verify();
 #endif  // DEBUG
 
-  base::Optional<CodePageHeaderModificationScope> optional_scope;
-  if (identity() == CODE_SPACE) {
-    optional_scope.emplace(
-        "FreeLinearAllocationArea writes to the page header.");
-  }
-
   MemoryChunkMetadata::UpdateHighWaterMark(top());
   allocator_policy_->FreeLinearAllocationArea();
 }
@@ -407,11 +401,6 @@ void MainAllocator::Verify() const {
 bool MainAllocator::EnsureAllocationForTesting(int size_in_bytes,
                                                AllocationAlignment alignment,
                                                AllocationOrigin origin) {
-  base::Optional<CodePageHeaderModificationScope> optional_scope;
-  if (identity() == CODE_SPACE) {
-    optional_scope.emplace("Slow allocation path writes to the page header.");
-  }
-
   return EnsureAllocation(size_in_bytes, alignment, origin);
 }
 
@@ -622,6 +611,10 @@ void PagedNewSpaceAllocatorPolicy::FreeLinearAllocationArea() {
 bool PagedSpaceAllocatorPolicy::EnsureAllocation(int size_in_bytes,
                                                  AllocationAlignment alignment,
                                                  AllocationOrigin origin) {
+  if (allocator_->identity() == NEW_SPACE) {
+    DCHECK(allocator_->is_main_thread());
+    space_heap()->StartMinorMSIncrementalMarkingIfNeeded();
+  }
   if ((allocator_->identity() != NEW_SPACE) && !allocator_->in_gc()) {
     // Start incremental marking before the actual allocation, this allows the
     // allocation function to mark the object black when incremental marking is
@@ -629,11 +622,6 @@ bool PagedSpaceAllocatorPolicy::EnsureAllocation(int size_in_bytes,
     space_heap()->StartIncrementalMarkingIfAllocationLimitIsReached(
         allocator_->local_heap(), space_heap()->GCFlagsForIncrementalMarking(),
         kGCCallbackScheduleIdleGarbageCollection);
-  }
-  if (allocator_->identity() == NEW_SPACE &&
-      space_heap()->incremental_marking()->IsStopped()) {
-    DCHECK(allocator_->is_main_thread());
-    space_heap()->StartMinorMSIncrementalMarkingIfNeeded();
   }
 
   // We don't know exactly how much filler we need to align until space is

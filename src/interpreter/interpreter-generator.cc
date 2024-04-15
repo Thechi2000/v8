@@ -612,6 +612,28 @@ IGNITION_HANDLER(GetKeyedProperty, InterpreterAssembler) {
   Dispatch();
 }
 
+// GetEnumeratedKeyedProperty <object> <enum_index> <cache_type> <slot>
+//
+// Calls the EnumeratedKeyedLoadIC at FeedBackVector slot <slot> for <object>
+// and the key in the accumulator. The key is coming from the each target of a
+// for-in loop.
+IGNITION_HANDLER(GetEnumeratedKeyedProperty, InterpreterAssembler) {
+  TNode<Object> object = LoadRegisterAtOperandIndex(0);
+  TNode<Object> name = GetAccumulator();
+  TNode<TaggedIndex> enum_index =
+      SmiToTaggedIndex(CAST(LoadRegisterAtOperandIndex(1)));
+  TNode<Object> cache_type = LoadRegisterAtOperandIndex(2);
+  TNode<TaggedIndex> slot = BytecodeOperandIdxTaggedIndex(3);
+  TNode<HeapObject> feedback_vector = LoadFeedbackVector();
+  TNode<Context> context = GetContext();
+
+  TVARIABLE(Object, var_result);
+  var_result = CallBuiltin(Builtin::kEnumeratedKeyedLoadIC, context, object,
+                           name, enum_index, cache_type, slot, feedback_vector);
+  SetAccumulator(var_result.value());
+  Dispatch();
+}
+
 class InterpreterSetNamedPropertyAssembler : public InterpreterAssembler {
  public:
   InterpreterSetNamedPropertyAssembler(CodeAssemblerState* state,
@@ -2229,6 +2251,46 @@ IGNITION_HANDLER(JumpIfJSReceiverConstant, InterpreterAssembler) {
   Dispatch();
 }
 
+// JumpIfForInDone <imm> <index> <cache_length>
+//
+// Jump by the number of bytes represented by an immediate operand if the end of
+// the enumerable properties has been reached.
+IGNITION_HANDLER(JumpIfForInDone, InterpreterAssembler) {
+  TNode<Object> index = LoadRegisterAtOperandIndex(1);
+  TNode<Object> cache_length = LoadRegisterAtOperandIndex(2);
+
+  // Check if {index} is at {cache_length} already.
+  Label if_done(this), if_not_done(this), end(this);
+  Branch(TaggedEqual(index, cache_length), &if_done, &if_not_done);
+
+  BIND(&if_done);
+  TNode<IntPtrT> relative_jump = Signed(BytecodeOperandUImmWord(0));
+  Jump(relative_jump);
+
+  BIND(&if_not_done);
+  Dispatch();
+}
+
+// JumpIfForInDoneConstant <idx> <index> <cache_length>
+//
+// Jump by the number of bytes in the Smi in the |idx| entry in the constant
+// pool if the end of the enumerable properties has been reached.
+IGNITION_HANDLER(JumpIfForInDoneConstant, InterpreterAssembler) {
+  TNode<Object> index = LoadRegisterAtOperandIndex(1);
+  TNode<Object> cache_length = LoadRegisterAtOperandIndex(2);
+
+  // Check if {index} is at {cache_length} already.
+  Label if_done(this), if_not_done(this), end(this);
+  Branch(TaggedEqual(index, cache_length), &if_done, &if_not_done);
+
+  BIND(&if_done);
+  TNode<IntPtrT> relative_jump = LoadAndUntagConstantPoolEntryAtOperandIndex(0);
+  Jump(relative_jump);
+
+  BIND(&if_not_done);
+  Dispatch();
+}
+
 // JumpLoop <imm> <loop_depth>
 //
 // Jump by the number of bytes represented by the immediate operand |imm|. Also
@@ -3040,30 +3102,6 @@ IGNITION_HANDLER(ForInNext, InterpreterAssembler) {
   }
 }
 
-// ForInContinue <index> <cache_length>
-//
-// Returns false if the end of the enumerable properties has been reached.
-IGNITION_HANDLER(ForInContinue, InterpreterAssembler) {
-  TNode<Object> index = LoadRegisterAtOperandIndex(0);
-  TNode<Object> cache_length = LoadRegisterAtOperandIndex(1);
-
-  // Check if {index} is at {cache_length} already.
-  Label if_true(this), if_false(this), end(this);
-  Branch(TaggedEqual(index, cache_length), &if_true, &if_false);
-  BIND(&if_true);
-  {
-    SetAccumulator(FalseConstant());
-    Goto(&end);
-  }
-  BIND(&if_false);
-  {
-    SetAccumulator(TrueConstant());
-    Goto(&end);
-  }
-  BIND(&end);
-  Dispatch();
-}
-
 // ForInStep <index>
 //
 // Increments the loop counter in register |index| and stores the result
@@ -3072,7 +3110,7 @@ IGNITION_HANDLER(ForInStep, InterpreterAssembler) {
   TNode<Smi> index = CAST(LoadRegisterAtOperandIndex(0));
   TNode<Smi> one = SmiConstant(1);
   TNode<Smi> result = SmiAdd(index, one);
-  SetAccumulator(result);
+  StoreRegisterAtOperandIndex(result, 0);
   Dispatch();
 }
 

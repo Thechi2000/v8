@@ -1663,7 +1663,7 @@ MaybeHandle<Object> ValueDeserializer::ReadObjectInternal() {
       if (version_ >= 15) return ReadSharedObject();
       // If the data doesn't support shared values because it is from an older
       // version, treat the tag as unknown.
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     default:
       // Before there was an explicit tag for host objects, all unknown tags
       // were delegated to the host.
@@ -2194,8 +2194,15 @@ MaybeHandle<JSArrayBufferView> ValueDeserializer::ReadJSArrayBufferView(
     external_array_type = kExternal##Type##Array; \
     element_size = sizeof(ctype);                 \
     break;
-      TYPED_ARRAYS(TYPED_ARRAY_CASE)
+      TYPED_ARRAYS_BASE(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+    case ArrayBufferViewTag::kFloat16Array: {
+      if (i::v8_flags.js_float16array) {
+        external_array_type = kExternalFloat16Array;
+        element_size = sizeof(uint16_t);
+      }
+      break;
+    }
   }
   if (element_size == 0 || byte_offset % element_size != 0 ||
       byte_length % element_size != 0) {

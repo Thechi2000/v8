@@ -562,6 +562,7 @@ class V8_EXPORT Isolate {
     kWasmTypeReflection = 137,
     kWasmExnRef = 138,
     kWasmTypedFuncRef = 139,
+    kInvalidatedStringWrapperToPrimitiveProtector = 140,
 
     // If you add new values here, you'll also need to update Chromium's:
     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
@@ -1655,7 +1656,7 @@ class V8_EXPORT Isolate {
    * heap.  GC is not invoked prior to iterating, therefore there is no
    * guarantee that visited objects are still alive.
    */
-  V8_DEPRECATE_SOON("Will be removed without replacement. crbug.com/v8/14172")
+  V8_DEPRECATED("Will be removed without replacement. crbug.com/v8/14172")
   void VisitExternalResources(ExternalResourceVisitor* visitor);
 
   /**

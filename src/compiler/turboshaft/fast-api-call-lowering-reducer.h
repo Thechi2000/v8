@@ -23,7 +23,7 @@ class FastApiCallLoweringReducer : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE(FastApiCallLowering)
 
-  OpIndex REDUCE(FastApiCall)(OpIndex data_argument,
+  OpIndex REDUCE(FastApiCall)(V<FrameState> frame_state, OpIndex data_argument,
                               base::Vector<const OpIndex> arguments,
                               const FastApiCallParameters* parameters) {
     const auto& c_functions = parameters->c_functions;
@@ -33,6 +33,7 @@ class FastApiCallLoweringReducer : public Next {
     const auto& resolution_result = parameters->resolution_result;
 
     Label<> handle_error(this);
+    Label<Word32, Object> done(this);
 
     OpIndex callee;
     base::SmallVector<OpIndex, 16> args;
@@ -60,63 +61,84 @@ class FastApiCallLoweringReducer : public Next {
           c_functions[0].address, ExternalReference::FAST_C_CALL));
     }
 
-    MachineSignature::Builder builder(
-        __ graph_zone(), 1, c_arg_count + (c_signature->HasOptions() ? 1 : 0));
-    builder.AddReturn(MachineType::TypeForCType(c_signature->ReturnInfo()));
-    for (int i = 0; i < c_arg_count; ++i) {
-      CTypeInfo type = c_signature->ArgumentInfo(i);
-      MachineType machine_type =
-          type.GetSequenceType() == CTypeInfo::SequenceType::kScalar
-              ? MachineType::TypeForCType(type)
-              : MachineType::AnyTagged();
-      builder.AddParam(machine_type);
+    // While adapting the arguments, we might have noticed an inconsistency that
+    // lead to unconditionally jumping to {handle_error}. If this happens, then
+    // we don't emit the call.
+    if (V8_LIKELY(!__ generating_unreachable_operations())) {
+      MachineSignature::Builder builder(
+          __ graph_zone(), 1,
+          c_arg_count + (c_signature->HasOptions() ? 1 : 0));
+      builder.AddReturn(MachineType::TypeForCType(c_signature->ReturnInfo()));
+      for (int i = 0; i < c_arg_count; ++i) {
+        CTypeInfo type = c_signature->ArgumentInfo(i);
+        MachineType machine_type =
+            type.GetSequenceType() == CTypeInfo::SequenceType::kScalar
+                ? MachineType::TypeForCType(type)
+                : MachineType::AnyTagged();
+        builder.AddParam(machine_type);
+      }
+
+      OpIndex stack_slot;
+      if (c_signature->HasOptions()) {
+        const int kAlign = alignof(v8::FastApiCallbackOptions);
+        const int kSize = sizeof(v8::FastApiCallbackOptions);
+        // If this check fails, you've probably added new fields to
+        // v8::FastApiCallbackOptions, which means you'll need to write code
+        // that initializes and reads from them too.
+        static_assert(kSize == sizeof(uintptr_t) * 3);
+        stack_slot = __ StackSlot(kSize, kAlign);
+
+        // fallback = 0
+        __ StoreOffHeap(stack_slot, __ Word32Constant(0),
+                        MemoryRepresentation::Int32(),
+                        offsetof(v8::FastApiCallbackOptions, fallback));
+        // data = data_argument
+        OpIndex data_argument_to_pass = __ AdaptLocalArgument(data_argument);
+        __ StoreOffHeap(stack_slot, data_argument_to_pass,
+                        MemoryRepresentation::UintPtr(),
+                        offsetof(v8::FastApiCallbackOptions, data));
+        // wasm_memory = 0
+        __ StoreOffHeap(stack_slot, __ IntPtrConstant(0),
+                        MemoryRepresentation::UintPtr(),
+                        offsetof(v8::FastApiCallbackOptions, wasm_memory));
+
+        args.push_back(stack_slot);
+        builder.AddParam(MachineType::Pointer());
+      }
+
+      // Build the actual call.
+      const TSCallDescriptor* call_descriptor = TSCallDescriptor::Create(
+          Linkage::GetSimplifiedCDescriptor(__ graph_zone(), builder.Build(),
+                                            CallDescriptor::kNeedsFrameState),
+          CanThrow::kNo, __ graph_zone());
+      OpIndex c_call_result = WrapFastCall(call_descriptor, callee, frame_state,
+                                           base::VectorOf(args));
+
+      Label<> trigger_exception(this);
+      V<WordPtr> threw_exception =
+          __ Load(__ LoadRootRegister(), LoadOp::Kind::RawAligned(),
+                  MemoryRepresentation::UintPtr(),
+                  IsolateData::fast_c_call_threw_exception_offset());
+      GOTO_IF(__ WordPtrEqual(threw_exception, 1), trigger_exception);
+
+      V<Object> fast_call_result =
+          ConvertReturnValue(c_signature, c_call_result);
+
+      if (c_signature->HasOptions()) {
+        DCHECK(stack_slot.valid());
+        V<Word32> error = __ LoadOffHeap(
+            stack_slot, offsetof(v8::FastApiCallbackOptions, fallback),
+            MemoryRepresentation::Int32());
+        GOTO_IF(error, handle_error);
+      }
+      GOTO(done, FastApiCallOp::kSuccessValue, fast_call_result);
+      BIND(trigger_exception);
+      __ template CallRuntime<
+          typename RuntimeCallDescriptor::PropagateException>(
+          isolate_, frame_state, __ NoContextConstant(), {});
+
+      GOTO(done, FastApiCallOp::kFailureValue, __ TagSmi(0));
     }
-
-    OpIndex stack_slot;
-    if (c_signature->HasOptions()) {
-      const int kAlign = alignof(v8::FastApiCallbackOptions);
-      const int kSize = sizeof(v8::FastApiCallbackOptions);
-      // If this check fails, you've probably added new fields to
-      // v8::FastApiCallbackOptions, which means you'll need to write code
-      // that initializes and reads from them too.
-      static_assert(kSize == sizeof(uintptr_t) * 3);
-      stack_slot = __ StackSlot(kSize, kAlign);
-
-      // fallback = 0
-      __ StoreOffHeap(stack_slot, __ Word32Constant(0),
-                      MemoryRepresentation::Int32(),
-                      offsetof(v8::FastApiCallbackOptions, fallback));
-      // data = data_argument
-      OpIndex data_argument_to_pass = __ AdaptLocalArgument(data_argument);
-      __ StoreOffHeap(stack_slot, data_argument_to_pass,
-                      MemoryRepresentation::UintPtr(),
-                      offsetof(v8::FastApiCallbackOptions, data));
-      // wasm_memory = 0
-      __ StoreOffHeap(stack_slot, __ IntPtrConstant(0),
-                      MemoryRepresentation::UintPtr(),
-                      offsetof(v8::FastApiCallbackOptions, wasm_memory));
-
-      args.push_back(stack_slot);
-      builder.AddParam(MachineType::Pointer());
-    }
-
-    // Build the actual call.
-    const TSCallDescriptor* call_descriptor = TSCallDescriptor::Create(
-        Linkage::GetSimplifiedCDescriptor(__ graph_zone(), builder.Build()),
-        CanThrow::kNo, __ graph_zone());
-    OpIndex c_call_result =
-        WrapFastCall(call_descriptor, callee, base::VectorOf(args));
-    V<Object> fast_call_result = ConvertReturnValue(c_signature, c_call_result);
-
-    Label<Word32, Object> done(this);
-    if (c_signature->HasOptions()) {
-      DCHECK(stack_slot.valid());
-      V<Word32> error = __ LoadOffHeap(
-          stack_slot, offsetof(v8::FastApiCallbackOptions, fallback),
-          MemoryRepresentation::Int32());
-      GOTO_IF(error, handle_error);
-    }
-    GOTO(done, FastApiCallOp::kSuccessValue, fast_call_result);
 
     if (BIND(handle_error)) {
       // We pass Tagged<Smi>(0) as the value here, although this should never be
@@ -189,37 +211,36 @@ class FastApiCallLoweringReducer : public Next {
     return {callee, arg};
   }
 
+  template <typename T>
+  V<T> Checked(V<Tuple<T, Word32>> result, Label<>& otherwise) {
+    V<Word32> result_state = __ template Projection<1>(result);
+    GOTO_IF_NOT(__ Word32Equal(result_state, TryChangeOp::kSuccessValue),
+                otherwise);
+    return __ template Projection<0>(result);
+  }
+
   OpIndex AdaptFastCallArgument(OpIndex argument, CTypeInfo arg_type,
                                 Label<>& handle_error) {
     switch (arg_type.GetSequenceType()) {
       case CTypeInfo::SequenceType::kScalar: {
-        auto CheckSuccess = [&](OpIndex result, Label<>& otherwise) {
-          V<Word32> result_state = __ template Projection<Word32>(result, 1);
-          GOTO_IF_NOT(__ Word32Equal(result_state, TryChangeOp::kSuccessValue),
-                      otherwise);
-        };
         uint8_t flags = static_cast<uint8_t>(arg_type.GetFlags());
         if (flags & static_cast<uint8_t>(CTypeInfo::Flags::kEnforceRangeBit)) {
           switch (arg_type.GetType()) {
             case CTypeInfo::Type::kInt32: {
-              OpIndex result = __ TryTruncateFloat64ToInt32(argument);
-              CheckSuccess(result, handle_error);
-              return __ template Projection<Word32>(result, 0);
+              auto result = __ TryTruncateFloat64ToInt32(argument);
+              return Checked(result, handle_error);
             }
             case CTypeInfo::Type::kUint32: {
-              OpIndex result = __ TryTruncateFloat64ToUint32(argument);
-              CheckSuccess(result, handle_error);
-              return __ template Projection<Word32>(result, 0);
+              auto result = __ TryTruncateFloat64ToUint32(argument);
+              return Checked(result, handle_error);
             }
             case CTypeInfo::Type::kInt64: {
-              OpIndex result = __ TryTruncateFloat64ToInt64(argument);
-              CheckSuccess(result, handle_error);
-              return __ template Projection<Word64>(result, 0);
+              auto result = __ TryTruncateFloat64ToInt64(argument);
+              return Checked(result, handle_error);
             }
             case CTypeInfo::Type::kUint64: {
-              OpIndex result = __ TryTruncateFloat64ToUint64(argument);
-              CheckSuccess(result, handle_error);
-              return __ template Projection<Word64>(result, 0);
+              auto result = __ TryTruncateFloat64ToUint64(argument);
+              return Checked(result, handle_error);
             }
             default: {
               GOTO(handle_error);
@@ -584,6 +605,7 @@ class FastApiCallLoweringReducer : public Next {
   }
 
   OpIndex WrapFastCall(const TSCallDescriptor* descriptor, OpIndex callee,
+                       V<FrameState> frame_state,
                        base::Vector<const OpIndex> arguments) {
     // CPU profiler support.
     OpIndex target_address = __ ExternalConstant(
@@ -600,6 +622,7 @@ class FastApiCallLoweringReducer : public Next {
           __ LoadOffHeap(js_execution_assert, MemoryRepresentation::Int8());
       IF_NOT(LIKELY(__ Word32Equal(old_value, 1))) {
         // We expect that JS execution is enabled, otherwise assert.
+        __ Comment("JS execution is disabled");
         __ Unreachable();
       }
     }
@@ -607,7 +630,7 @@ class FastApiCallLoweringReducer : public Next {
                     MemoryRepresentation::Int8());
 
     // Create the fast call.
-    OpIndex result = __ Call(callee, OpIndex::Invalid(), arguments, descriptor);
+    OpIndex result = __ Call(callee, frame_state, arguments, descriptor);
 
     // Reenable JS exeuction.
     __ StoreOffHeap(js_execution_assert, __ Word32Constant(1),

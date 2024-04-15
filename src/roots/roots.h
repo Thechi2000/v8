@@ -141,6 +141,7 @@ class RootVisitor;
   IF_WASM(V, Map, wasm_exported_function_data_map,                             \
           WasmExportedFunctionDataMap)                                         \
   IF_WASM(V, Map, wasm_internal_function_map, WasmInternalFunctionMap)         \
+  IF_WASM(V, Map, wasm_func_ref_map, WasmFuncRefMap)                           \
   IF_WASM(V, Map, wasm_js_function_data_map, WasmJSFunctionDataMap)            \
   IF_WASM(V, Map, wasm_null_map, WasmNullMap)                                  \
   IF_WASM(V, Map, wasm_resume_data_map, WasmResumeDataMap)                     \
@@ -153,9 +154,11 @@ class RootVisitor;
   V(Map, weak_cell_map, WeakCellMap)                                           \
   V(Map, external_pointer_array_map, ExternalPointerArrayMap)                  \
   V(Map, trusted_fixed_array_map, TrustedFixedArrayMap)                        \
+  V(Map, trusted_weak_fixed_array_map, TrustedWeakFixedArrayMap)               \
   V(Map, trusted_byte_array_map, TrustedByteArrayMap)                          \
   V(Map, protected_fixed_array_map, ProtectedFixedArrayMap)                    \
   V(Map, interpreter_data_map, InterpreterDataMap)                             \
+  V(Map, shared_function_info_wrapper_map, SharedFunctionInfoWrapperMap)       \
   /* String maps */                                                            \
   V(Map, seq_two_byte_string_map, SeqTwoByteStringMap)                         \
   V(Map, cons_two_byte_string_map, ConsTwoByteStringMap)                       \
@@ -248,6 +251,8 @@ class RootVisitor;
 #define TRUSTED_ROOT_LIST(V)                                              \
   V(TrustedByteArray, empty_trusted_byte_array, EmptyTrustedByteArray)    \
   V(TrustedFixedArray, empty_trusted_fixed_array, EmptyTrustedFixedArray) \
+  V(TrustedWeakFixedArray, empty_trusted_weak_fixed_array,                \
+    EmptyTrustedWeakFixedArray)                                           \
   V(ProtectedFixedArray, empty_protected_fixed_array, EmptyProtectedFixedArray)
 
 // Mutable roots that are known to be immortal immovable, for which we can
@@ -282,6 +287,8 @@ class RootVisitor;
   V(PropertyCell, promise_then_protector, PromiseThenProtector)                \
   V(PropertyCell, set_iterator_protector, SetIteratorProtector)                \
   V(PropertyCell, string_iterator_protector, StringIteratorProtector)          \
+  V(PropertyCell, string_wrapper_to_primitive_protector,                       \
+    StringWrapperToPrimitiveProtector)                                         \
   V(PropertyCell, number_string_not_regexp_like_protector,                     \
     NumberStringNotRegexpLikeProtector)                                        \
   /* Caches */                                                                 \
@@ -417,10 +424,11 @@ class RootVisitor;
   WELL_KNOWN_SYMBOL_LIST_GENERATOR(SYMBOL_ROOT_LIST_ADAPTER, V)
 
 // Produces (Na,e, name, CamelCase) entries
-#define NAME_FOR_PROTECTOR_ROOT_LIST(V)                            \
-  INTERNALIZED_STRING_FOR_PROTECTOR_LIST_GENERATOR(                \
-      INTERNALIZED_STRING_LIST_ADAPTER, V)                         \
-  SYMBOL_FOR_PROTECTOR_LIST_GENERATOR(SYMBOL_ROOT_LIST_ADAPTER, V) \
+#define NAME_FOR_PROTECTOR_ROOT_LIST(V)                                   \
+  INTERNALIZED_STRING_FOR_PROTECTOR_LIST_GENERATOR(                       \
+      INTERNALIZED_STRING_LIST_ADAPTER, V)                                \
+  SYMBOL_FOR_PROTECTOR_LIST_GENERATOR(SYMBOL_ROOT_LIST_ADAPTER, V)        \
+  PUBLIC_SYMBOL_FOR_PROTECTOR_LIST_GENERATOR(SYMBOL_ROOT_LIST_ADAPTER, V) \
   WELL_KNOWN_SYMBOL_FOR_PROTECTOR_LIST_GENERATOR(SYMBOL_ROOT_LIST_ADAPTER, V)
 
 // Adapts one ACCESSOR_INFO_LIST_GENERATOR entry to the ROOT_LIST-compatible

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/builtins/builtins-inl.h"
 #include "src/builtins/data-view-ops.h"
 #include "src/common/assert-scope.h"
 #include "src/common/message-template.h"
@@ -131,16 +132,21 @@ Tagged<Object> ThrowWasmError(Isolate* isolate, MessageTemplate message,
 }  // namespace
 
 RUNTIME_FUNCTION(Runtime_WasmGenericWasmToJSObject) {
-  HandleScope scope(isolate);
+  SealHandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
-  Handle<Object> value(args[0], isolate);
-  if (IsWasmInternalFunction(*value)) {
-    Handle<WasmInternalFunction> internal =
-        Handle<WasmInternalFunction>::cast(value);
-    return *WasmInternalFunction::GetOrCreateExternal(internal);
+  Tagged<Object> value = args[0];
+  if (IsWasmFuncRef(value)) {
+    Tagged<WasmInternalFunction> internal =
+        WasmFuncRef::cast(value)->internal(isolate);
+    Tagged<JSFunction> external;
+    if (internal->try_get_external(&external)) return external;
+    // Slow path:
+    HandleScope scope(isolate);
+    return *WasmInternalFunction::GetOrCreateExternal(
+        handle(internal, isolate));
   }
-  if (IsWasmNull(*value)) return ReadOnlyRoots(isolate).null_value();
-  return *value;
+  if (IsWasmNull(value)) return ReadOnlyRoots(isolate).null_value();
+  return value;
 }
 
 // Takes a JS object and a wasm type as Smi. Type checks the object against the
@@ -165,15 +171,12 @@ RUNTIME_FUNCTION(Runtime_WasmGenericJSToWasmObject) {
     type = wasm::ValueType::RefMaybeNull(canonical_index, type.nullability());
   }
   const char* error_message;
-  {
-    Handle<Object> result;
-    if (JSToWasmObject(isolate, value, type, &error_message)
-            .ToHandle(&result)) {
-      return *result;
-    }
+  Handle<Object> result;
+  if (!JSToWasmObject(isolate, value, type, &error_message).ToHandle(&result)) {
+    return isolate->Throw(*isolate->factory()->NewTypeError(
+        MessageTemplate::kWasmTrapJSTypeError));
   }
-  return isolate->Throw(
-      *isolate->factory()->NewTypeError(MessageTemplate::kWasmTrapJSTypeError));
+  return *result;
 }
 
 // Takes a JS object and a wasm type as Smi. Type checks the object against the
@@ -446,15 +449,13 @@ namespace {
 void ReplaceWrapper(Isolate* isolate,
                     Handle<WasmTrustedInstanceData> trusted_instance_data,
                     int function_index, Handle<Code> wrapper_code) {
-  Handle<WasmInternalFunction> internal =
-      WasmTrustedInstanceData::GetWasmInternalFunction(
-          isolate, trusted_instance_data, function_index)
-          .ToHandleChecked();
-  Handle<JSFunction> exported_function =
-      WasmInternalFunction::GetOrCreateExternal(internal);
-  exported_function->set_code(*wrapper_code);
+  Tagged<WasmFuncRef> func_ref;
+  CHECK(trusted_instance_data->try_get_func_ref(function_index, &func_ref));
+  Tagged<JSFunction> external_function;
+  CHECK(func_ref->internal(isolate)->try_get_external(&external_function));
+  external_function->set_code(*wrapper_code);
   Tagged<WasmExportedFunctionData> function_data =
-      exported_function->shared()->wasm_exported_function_data();
+      external_function->shared()->wasm_exported_function_data();
   function_data->set_wrapper_code(*wrapper_code);
 }
 }  // namespace
@@ -480,11 +481,9 @@ RUNTIME_FUNCTION(Runtime_WasmCompileWrapper) {
 
   // The start function is not guaranteed to be registered as
   // an exported function (although it is called as one).
-  // If there is no entry for the start function,
-  // the tier-up is abandoned.
-  if (WasmTrustedInstanceData::GetWasmInternalFunction(isolate, trusted_data,
-                                                       function_index)
-          .is_null()) {
+  // If there is no entry for the start function, the tier-up is abandoned.
+  Tagged<WasmFuncRef> func_ref;
+  if (!trusted_data->try_get_func_ref(function_index, &func_ref)) {
     DCHECK_EQ(function_index, module->start_function_index);
     return ReadOnlyRoots(isolate).undefined_value();
   }
@@ -499,7 +498,7 @@ RUNTIME_FUNCTION(Runtime_WasmCompileWrapper) {
           isolate, sig, canonical_sig_index, module, imported);
 
   // Replace the wrapper for the function that triggered the tier-up.
-  // This is to verify that the wrapper is replaced, even if the function
+  // This is to ensure that the wrapper is replaced, even if the function
   // is implicitly exported and is not part of the export_table.
   ReplaceWrapper(isolate, trusted_data, function_index, wrapper_code);
 
@@ -525,31 +524,6 @@ RUNTIME_FUNCTION(Runtime_IsWasmExternalFunction) {
       WasmExternalFunction::IsWasmExternalFunction(args[0]));
 }
 
-RUNTIME_FUNCTION(Runtime_TierUpJSToJSWrapper) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(2, args.length());
-  Handle<WasmApiFunctionRef> ref(WasmApiFunctionRef::cast(args[0]), isolate);
-  Handle<WasmFunctionData> function_data(WasmFunctionData::cast(args[1]),
-                                         isolate);
-
-  DCHECK(isolate->context().is_null());
-  isolate->set_context(ref->native_context());
-
-  std::unique_ptr<wasm::ValueType[]> reps;
-  wasm::FunctionSig sig =
-      wasm::SerializedSignatureHelper::DeserializeSignature(ref->sig(), &reps);
-
-  Handle<Code> wrapper =
-      compiler::CompileJSToJSWrapper(isolate, &sig, nullptr).ToHandleChecked();
-
-  Handle<JSFunction> exported_function =
-      WasmInternalFunction::GetOrCreateExternal(
-          handle(function_data->internal(), isolate));
-  exported_function->set_code(*wrapper);
-  function_data->set_wrapper_code(*wrapper);
-  return ReadOnlyRoots(isolate).undefined_value();
-}
-
 RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
@@ -563,7 +537,7 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
       wasm::SerializedSignatureHelper::DeserializeSignature(ref->sig(), &reps);
   Handle<Object> origin = handle(ref->call_origin(), isolate);
 
-  if (IsWasmInternalFunction(*origin)) {
+  if (IsWasmFuncRef(*origin)) {
     // The tierup for `WasmInternalFunction is special, as there is no instance.
     size_t expected_arity = sig.parameter_count() - ref->suspend();
     wasm::ImportCallKind kind = wasm::kDefaultImportCallKind;
@@ -584,10 +558,11 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
 
     // We have to install the optimized wrapper as `code`, as the generated
     // code may move. `call_target` would become stale then.
-    Handle<WasmInternalFunction>::cast(origin)->set_code(
-        *wasm_to_js_wrapper_code);
-    // Reset a possibly existing generic wrapper in the call target.
-    Handle<WasmInternalFunction>::cast(origin)->init_call_target(isolate, 0);
+    Handle<WasmInternalFunction> internal_function{
+        WasmFuncRef::cast(*origin)->internal(isolate), isolate};
+    ref->set_code(*wasm_to_js_wrapper_code);
+    internal_function->set_call_target(
+        Builtins::EntryOf(Builtin::kWasmToOnHeapWasmToJsTrampoline, isolate));
     return ReadOnlyRoots(isolate).undefined_value();
   }
 
@@ -660,7 +635,8 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
         result.func_index, result.code_desc, result.frame_slot_count,
         result.tagged_parameter_slots,
         result.protected_instructions_data.as_vector(),
-        result.source_positions.as_vector(), GetCodeKind(result),
+        result.source_positions.as_vector(),
+        result.inlining_positions.as_vector(), GetCodeKind(result),
         wasm::ExecutionTier::kNone, wasm::kNotForDebugging);
     wasm_code = native_module->PublishCode(std::move(compiled_code));
     isolate->counters()->wasm_generated_code_size()->Increment(
@@ -718,9 +694,18 @@ RUNTIME_FUNCTION(Runtime_WasmTriggerTierUp) {
     DCHECK_EQ(trusted_data, frame_finder.frame()->trusted_instance_data());
 
     if (V8_UNLIKELY(v8_flags.wasm_sync_tier_up)) {
-      wasm::TierUpNowForTesting(isolate, trusted_data, func_index);
+      if (!trusted_data->module_object()->native_module()->HasCodeWithTier(
+              func_index, wasm::ExecutionTier::kTurbofan)) {
+        wasm::TierUpNowForTesting(isolate, trusted_data, func_index);
+      }
+      // We call this function when the tiering budget runs out, so reset that
+      // budget to appropriately delay the next call.
+      int array_index =
+          wasm::declared_function_index(trusted_data->module(), func_index);
+      trusted_data->tiering_budget_array()[array_index] =
+          v8_flags.wasm_tiering_budget;
     } else {
-      wasm::TriggerTierUp(trusted_data, func_index);
+      wasm::TriggerTierUp(isolate, trusted_data, func_index);
     }
   }
 
@@ -819,7 +804,7 @@ RUNTIME_FUNCTION(Runtime_WasmRefFunc) {
       WasmTrustedInstanceData::cast(args[0]), isolate);
   uint32_t function_index = args.positive_smi_value_at(1);
 
-  return *WasmTrustedInstanceData::GetOrCreateWasmInternalFunction(
+  return *WasmTrustedInstanceData::GetOrCreateFuncRef(
       isolate, trusted_instance_data, function_index);
 }
 
@@ -827,6 +812,7 @@ RUNTIME_FUNCTION(Runtime_WasmInternalFunctionCreateExternal) {
   ClearThreadInWasmScope flag_scope(isolate);
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
+  // TODO(14564): Pass WasmFuncRef here instead of WasmInternalFunction.
   Handle<WasmInternalFunction> internal(WasmInternalFunction::cast(args[0]),
                                         isolate);
   return *WasmInternalFunction::GetOrCreateExternal(internal);
@@ -1533,10 +1519,16 @@ RUNTIME_FUNCTION(Runtime_WasmStringNewSegmentWtf8) {
 
   Address source =
       trusted_instance_data->data_segment_starts()->get(segment_index) + offset;
-  RETURN_RESULT_OR_FAILURE(
-      isolate,
-      isolate->factory()->NewStringFromUtf8(
-          {reinterpret_cast<const uint8_t*>(source), length}, variant));
+  MaybeHandle<String> result = isolate->factory()->NewStringFromUtf8(
+      {reinterpret_cast<const uint8_t*>(source), length}, variant);
+  if (variant == unibrow::Utf8Variant::kUtf8NoTrap) {
+    DCHECK(!isolate->has_exception());
+    // Only instructions from the stringref proposal can set variant
+    // kUtf8NoTrap, so WasmNull is appropriate here.
+    if (result.is_null()) return *isolate->factory()->wasm_null();
+    return *result.ToHandleChecked();
+  }
+  RETURN_RESULT_OR_FAILURE(isolate, result);
 }
 
 namespace {

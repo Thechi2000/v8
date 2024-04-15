@@ -302,7 +302,7 @@ class PoolTest : public                                     //
   PoolTest& operator=(const PoolTest&) = delete;
 
   static void FreeProcessWidePtrComprCageForTesting() {
-    IsolateAllocator::FreeProcessWidePtrComprCageForTesting();
+    IsolateGroup::ReleaseGlobal();
   }
 
   static void DoMixinSetUp() {
@@ -318,7 +318,7 @@ class PoolTest : public                                     //
     // Reinitialize the process-wide pointer cage so it can pick up the
     // TrackingPageAllocator.
     // The pointer cage must be destroyed before the sandbox.
-    IsolateAllocator::FreeProcessWidePtrComprCageForTesting();
+    FreeProcessWidePtrComprCageForTesting();
 #ifdef V8_ENABLE_SANDBOX
     // Reinitialze the sandbox so it uses the TrackingPageAllocator.
     GetProcessWideSandbox()->TearDown();
@@ -326,7 +326,7 @@ class PoolTest : public                                     //
     CHECK(GetProcessWideSandbox()->Initialize(
         tracking_page_allocator_, kSandboxMinimumSize, use_guard_regions));
 #endif
-    IsolateAllocator::InitializeOncePerProcess();
+    IsolateGroup::InitializeOncePerProcess();
 #endif
   }
 
@@ -334,7 +334,7 @@ class PoolTest : public                                     //
 #ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
     // Free the process-wide cage reservation, otherwise the pages won't be
     // freed until process teardown.
-    IsolateAllocator::FreeProcessWidePtrComprCageForTesting();
+    FreeProcessWidePtrComprCageForTesting();
 #endif
 #ifdef V8_ENABLE_SANDBOX
     GetProcessWideSandbox()->TearDown();
@@ -383,23 +383,24 @@ TEST_F(PoolTest, UnmapOnTeardown) {
       allocator()->AllocatePage(MemoryAllocator::AllocationMode::kRegular,
                                 static_cast<PagedSpace*>(heap()->old_space()),
                                 Executability::NOT_EXECUTABLE);
+  Address chunk_address = page->ChunkAddress();
   EXPECT_NE(nullptr, page);
   const size_t page_size = tracking_page_allocator()->AllocatePageSize();
-  tracking_page_allocator()->CheckPagePermissions(
-      page->ChunkAddress(), page_size, PageAllocator::kReadWrite);
+  tracking_page_allocator()->CheckPagePermissions(chunk_address, page_size,
+                                                  PageAllocator::kReadWrite);
 
   allocator()->Free(MemoryAllocator::FreeMode::kPool, page);
-  tracking_page_allocator()->CheckPagePermissions(
-      page->ChunkAddress(), page_size, PageAllocator::kReadWrite);
+  tracking_page_allocator()->CheckPagePermissions(chunk_address, page_size,
+                                                  PageAllocator::kReadWrite);
   pool()->ReleasePooledChunks();
 #ifdef V8_COMPRESS_POINTERS
   // In this mode Isolate uses bounded page allocator which allocates pages
   // inside prereserved region. Thus these pages are kept reserved until
   // the Isolate dies.
   tracking_page_allocator()->CheckPagePermissions(
-      page->ChunkAddress(), page_size, PageAllocator::kNoAccess, false);
+      chunk_address, page_size, PageAllocator::kNoAccess, false);
 #else
-  tracking_page_allocator()->CheckIsFree(page->ChunkAddress(), page_size);
+  tracking_page_allocator()->CheckIsFree(chunk_address, page_size);
 #endif  // V8_COMPRESS_POINTERS
 }
 #endif  // !V8_OS_FUCHSIA && !V8_ENABLE_SANDBOX

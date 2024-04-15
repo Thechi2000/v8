@@ -123,6 +123,7 @@ v8_source_set("cppgc_unittests_sources") {
 
   sources = [
     "heap/cppgc/allocation-unittest.cc",
+    "heap/cppgc/caged-heap-unittest.cc",
     "heap/cppgc/compactor-unittest.cc",
     "heap/cppgc/concurrent-marking-unittest.cc",
     "heap/cppgc/concurrent-sweeper-unittest.cc",
@@ -515,12 +516,10 @@ v8_source_set("v8_unittests_sources") {
       "compiler/compiler-unittest.cc",
       "compiler/constant-folding-reducer-unittest.cc",
       "compiler/control-equivalence-unittest.cc",
-      "compiler/control-flow-optimizer-unittest.cc",
       "compiler/csa-load-elimination-unittest.cc",
       "compiler/dead-code-elimination-unittest.cc",
       "compiler/decompression-optimizer-unittest.cc",
       "compiler/diamond-unittest.cc",
-      "compiler/effect-control-linearizer-unittest.cc",
       "compiler/frame-unittest.cc",
       "compiler/function-tester.cc",
       "compiler/function-tester.h",
@@ -574,6 +573,7 @@ v8_source_set("v8_unittests_sources") {
       "compiler/turboshaft/reducer-test.h",
       "compiler/turboshaft/simplified-lowering-reducer-unittest.cc",
       "compiler/turboshaft/snapshot-table-unittest.cc",
+      "compiler/turboshaft/store-store-elimination-reducer-unittest.cc",
       "compiler/turboshaft/turboshaft-typer-unittest.cc",
       "compiler/turboshaft/turboshaft-types-unittest.cc",
       "compiler/typed-optimization-unittest.cc",
@@ -720,7 +720,10 @@ v8_source_set("v8_unittests_sources") {
       "assembler/macro-assembler-x64-unittest.cc",
     ]
     if (v8_enable_turbofan) {
-      sources += [ "compiler/x64/instruction-selector-x64-unittest.cc" ]
+      sources += [
+        "compiler/x64/instruction-selector-x64-unittest.cc",
+        "compiler/x64/turboshaft-instruction-selector-x64-unittest.cc",
+      ]
     }
     if (v8_enable_webassembly) {
       sources += [ "wasm/trap-handler-native-unittest.cc" ]
@@ -800,12 +803,21 @@ v8_source_set("v8_unittests_sources") {
     sources += [
       "fuzztest-adapter.h",
       "fuzztest-init-adapter.h",
+      "regexp/regexp-fuzzer.cc",
+      "regexp/regexp-grammar.h",
     ]
 
     deps += [
       "//third_party/abseil-cpp:absl_full",
       "//third_party/fuzztest:fuzztest",
     ]
+
+    if (!is_win) {
+      # TODO(https://crbug.com/40941204): Using jsoncpp doesn't work on
+      # Windows.
+      sources += [ "json/json-unittest.cc" ]
+      deps += [ "//third_party/jsoncpp:jsoncpp" ]
+    }
   }
 
   if (v8_enable_webassembly) {

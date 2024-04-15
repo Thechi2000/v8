@@ -23,11 +23,24 @@
     Asm().ControlFlowHelper_Bind(label);                                  \
     (::v8::internal::compiler::turboshaft::detail::SuppressUnusedWarning( \
         CONCAT(is_bound_, __LINE__)))
-#define LOOP(loop_label, ...) \
+#define BIND_LOOP(loop_label, ...) \
   for(auto [CONCAT(run_loop_, __LINE__), ##__VA_ARGS__] =                      \
     Asm().ControlFlowHelper_BindLoop(loop_label); CONCAT(run_loop_, __LINE__); \
         Asm().ControlFlowHelper_EndLoop(loop_label),                           \
         CONCAT(run_loop_, __LINE__) = false)
+
+#define WHILE(...)                                                            \
+    for (auto [CONCAT(run_loop_, __LINE__), loop_header_xx, loop_exit_xx]     \
+              = Asm().ControlFlowHelper_While([&]() {                         \
+           return __VA_ARGS__;                                                \
+         });                                                                  \
+         CONCAT(run_loop_, __LINE__);                                         \
+         Asm().ControlFlowHelper_EndWhileLoop(loop_header_xx, loop_exit_xx),  \
+              CONCAT(run_loop_, __LINE__) = false)
+
+#define BREAK Asm().ControlFlowHelper_Goto(loop_exit_xx, {})
+#define CONTINUE Asm().ControlFlowHelper_Goto(loop_header_xx, {})
+
 #define GOTO(label, ...)                             \
   Asm().ControlFlowHelper_Goto(label, {__VA_ARGS__})
 #define GOTO_IF(cond, label, ...)                            \
@@ -40,7 +53,14 @@
 // warning with Pragmas. Clang and GCC helpfully disagree on where the warning
 // is (on the if or the else), so they need separate macros.
 #if defined(__clang__)
+#if defined(V8_OS_ANDROID) && defined(V8_TARGET_ARCH_ARM64)
+// TODO(nicohartmann@, chromium:332329850): Temporarily disabling
+// FORCE_UNROLL_LOOP on arm64 android to work around clang failing to unroll a
+// loop (crbug.com/332329850).
+#define FORCE_UNROLL_LOOP
+#else
 #define FORCE_UNROLL_LOOP _Pragma("clang loop unroll(full)")
+#endif
 #define SUPPRESSED_DANGLING_ELSE_WARNING_IF(...) if (__VA_ARGS__)
 #define SUPPRESSED_DANGLING_ELSE_WARNING_ELSE                             \
   _Pragma("GCC diagnostic push")                                          \
@@ -104,14 +124,14 @@
   CONCAT(CHECK_Reduce, operation) =                                           \
       (::v8::internal::compiler::turboshaft::detail::SuppressUnusedWarning(   \
            std::is_same_v<operation##Op, operation##Op>),                     \
-       OpIndex{});                                                            \
+       decltype(CONCAT(CHECK_Reduce, operation)){});                          \
   template <class... Args>                                                    \
   decltype(CONCAT(CHECK_Reduce, operation)) Reduce##operation(Args... args) { \
     if (v8_flags.turboshaft_trace_intermediate_reductions) {                  \
       base::SmallVector<OperationStorageSlot, 32> storage;                    \
       operation##Op* op = CreateOperation<operation##Op>(storage, args...);   \
       PrintF("%*s", Asm().intermediate_tracing_depth(), "");                  \
-      std::cout << "[" << ReducerName() << "]: reducing " << *op << "\n";       \
+      std::cout << "[" << ReducerName() << "]: reducing " << *op << "\n";     \
     }                                                                         \
     Asm().intermediate_tracing_depth()++;                                     \
     decltype(CONCAT(CHECK_Reduce, operation)) result =                        \
@@ -125,14 +145,14 @@
   CONCAT(CHECK_ReduceInputGraph, operation) =                                  \
       (::v8::internal::compiler::turboshaft::detail::SuppressUnusedWarning(    \
            std::is_same_v<operation##Op, operation##Op>),                      \
-       OpIndex{});                                                             \
+       decltype(CONCAT(CHECK_ReduceInputGraph, operation)){});                 \
   decltype(CONCAT(                                                             \
       CHECK_ReduceInputGraph,                                                  \
       operation)) ReduceInputGraph##operation(OpIndex ig_index,                \
                                               const operation##Op& op) {       \
     if (v8_flags.turboshaft_trace_intermediate_reductions) {                   \
       PrintF("%*s", Asm().intermediate_tracing_depth(), "");                   \
-      std::cout << "[" << ReducerName() << "]: @input-reducing " << op << "\n"; \
+      std::cout << "[" << ReducerName() << "]: @input-reducing " << op << "\n";\
     }                                                                          \
     Asm().intermediate_tracing_depth()++;                                      \
     decltype(CONCAT(CHECK_ReduceInputGraph, operation)) result =               \

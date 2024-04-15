@@ -16,7 +16,6 @@
 #include "src/base/flags.h"
 #include "src/base/hashmap.h"
 #include "src/base/pointer-with-payload.h"
-#include "src/base/v8-fallthrough.h"
 #include "src/codegen/bailout-reason.h"
 #include "src/common/globals.h"
 #include "src/common/message-template.h"
@@ -2437,7 +2436,7 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseProperty(
         }
         return expression;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
 
     default:
       prop_info->name = ParsePropertyName();
@@ -3191,7 +3190,7 @@ ParserBase<Impl>::ParseYieldExpression() {
         // a regular yield, given only one look-ahead token.
         if (!delegating) break;
         // Delegating yields require an RHS; fall through.
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       default:
         expression = ParseAssignmentExpressionCoverGrammar();
         break;
@@ -4211,8 +4210,8 @@ void ParserBase<Impl>::ParseVariableDeclarations(
       // using [no LineTerminator here] [lookahead ≠ await] BindingList[?In,
       // ?Yield, ?Await, ~Pattern] ;
       Consume(Token::kUsing);
-      DCHECK_NE(var_context, kStatement);
       DCHECK(v8_flags.js_explicit_resource_management);
+      DCHECK_NE(var_context, kStatement);
       DCHECK(is_using_allowed());
       DCHECK(peek() != Token::kAwait);
       DCHECK(!scanner()->HasLineTerminatorBeforeNext());
@@ -4483,7 +4482,7 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseClassDeclaration(
   // so rewrite it as such.
 
   int class_token_pos = position();
-  IdentifierT name = impl()->NullIdentifier();
+  IdentifierT name = impl()->EmptyIdentifierString();
   bool is_strict_reserved = Token::IsStrictReservedWord(peek());
   IdentifierT variable_name = impl()->NullIdentifier();
   if (default_export &&
@@ -4924,7 +4923,7 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseClassExpression(
     Scope* outer_scope) {
   Consume(Token::kClass);
   int class_token_pos = position();
-  IdentifierT name = impl()->NullIdentifier();
+  IdentifierT name = impl()->EmptyIdentifierString();
   bool is_strict_reserved_name = false;
   Scanner::Location class_name_location = Scanner::Location::invalid();
   if (peek_any_identifier()) {
@@ -4941,7 +4940,7 @@ template <typename Impl>
 typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseClassLiteral(
     Scope* outer_scope, IdentifierT name, Scanner::Location class_name_location,
     bool name_is_strict_reserved, int class_token_pos) {
-  bool is_anonymous = impl()->IsNull(name);
+  bool is_anonymous = impl()->IsEmptyIdentifier(name);
 
   // All parts of a ClassDeclaration and ClassExpression are strict code.
   if (!impl()->HasCheckedSyntax() && !is_anonymous) {
@@ -5589,7 +5588,7 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseStatement(
             MessageTemplate::kAsyncFunctionInSingleStatementContext);
         return impl()->NullStatement();
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     default:
       return ParseExpressionOrLabelledStatement(labels, own_labels,
                                                 allow_function);

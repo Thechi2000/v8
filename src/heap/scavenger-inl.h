@@ -14,6 +14,7 @@
 #include "src/heap/objects-visiting-inl.h"
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/heap/scavenger.h"
+#include "src/objects/js-objects.h"
 #include "src/objects/map.h"
 #include "src/objects/objects-body-descriptors-inl.h"
 #include "src/objects/objects-inl.h"
@@ -84,7 +85,7 @@ void Scavenger::PageMemoryFence(Tagged<MaybeObject> object) {
   // with  page initialization.
   Tagged<HeapObject> heap_object;
   if (object.GetHeapObject(&heap_object)) {
-    MemoryChunkMetadata::FromHeapObject(heap_object)->SynchronizedHeapLoad();
+    MemoryChunk::FromHeapObject(heap_object)->SynchronizedLoad();
   }
 #endif
 }
@@ -407,7 +408,7 @@ SlotCallbackResult Scavenger::EvacuateObject(THeapObjectSlot slot,
             map, slot, String::unchecked_cast(source), size,
             ObjectFields::kDataOnly);
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     default:
       return EvacuateObjectDefault(map, slot, source, size,
                                    Map::ObjectFieldsFrom(visitor_id));
@@ -543,7 +544,10 @@ int ScavengeVisitor::VisitJSArrayBuffer(Tagged<Map> map,
 
 int ScavengeVisitor::VisitJSApiObject(Tagged<Map> map,
                                       Tagged<JSObject> object) {
-  return VisitJSObject(map, object);
+  int size = JSAPIObjectWithEmbedderSlots::BodyDescriptor::SizeOf(map, object);
+  JSAPIObjectWithEmbedderSlots::BodyDescriptor::IterateBody(map, object, size,
+                                                            this);
+  return size;
 }
 
 int ScavengeVisitor::VisitEphemeronHashTable(Tagged<Map> map,

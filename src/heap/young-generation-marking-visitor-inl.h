@@ -13,6 +13,7 @@
 #include "src/heap/objects-visiting.h"
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/heap/young-generation-marking-visitor.h"
+#include "src/objects/js-objects.h"
 
 namespace v8 {
 namespace internal {
@@ -50,11 +51,11 @@ YoungGenerationMarkingVisitor<marking_mode>::~YoungGenerationMarkingVisitor() {
 }
 
 template <YoungGenerationMarkingVisitationMode marking_mode>
-template <typename T>
+template <typename T, typename TBodyDescriptor>
 int YoungGenerationMarkingVisitor<marking_mode>::
     VisitEmbedderTracingSubClassWithEmbedderTracing(Tagged<Map> map,
                                                     Tagged<T> object) {
-  const int size = VisitJSObjectSubclass(map, object);
+  const int size = VisitJSObjectSubclass<T, TBodyDescriptor>(map, object);
   if (!marking_worklists_local_.SupportsExtractWrapper()) return size;
   MarkingWorklists::Local::WrapperSnapshot wrapper_snapshot;
   const bool valid_snapshot =
@@ -76,7 +77,8 @@ int YoungGenerationMarkingVisitor<marking_mode>::VisitJSArrayBuffer(
 template <YoungGenerationMarkingVisitationMode marking_mode>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitJSApiObject(
     Tagged<Map> map, Tagged<JSObject> object) {
-  return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
+  return VisitEmbedderTracingSubClassWithEmbedderTracing<
+      JSObject, JSAPIObjectWithEmbedderSlots::BodyDescriptor>(map, object);
 }
 
 template <YoungGenerationMarkingVisitationMode marking_mode>
@@ -190,7 +192,7 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::VisitObjectViaSlot(
   }
 
 #ifdef THREAD_SANITIZER
-  MemoryChunkMetadata::FromHeapObject(heap_object)->SynchronizedHeapLoad();
+  MemoryChunk::FromHeapObject(heap_object)->SynchronizedLoad();
 #endif  // THREAD_SANITIZER
 
   if (!Heap::InYoungGeneration(heap_object)) {
@@ -228,16 +230,17 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::VisitObjectViaSlot(
 #ifdef V8_MINORMS_STRING_SHORTCUTTING
 template <YoungGenerationMarkingVisitationMode marking_mode>
 V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::ShortCutStrings(
-    HeapObjectSlot slot, HeapObject* heap_object) {
+    HeapObjectSlot slot, Tagged<HeapObject>* heap_object) {
   DCHECK_EQ(YoungGenerationMarkingVisitationMode::kParallel, marking_mode);
   if (shortcut_strings_) {
     DCHECK(V8_STATIC_ROOTS_BOOL);
 #if V8_STATIC_ROOTS_BOOL
-    ObjectSlot map_slot = heap_object->map_slot();
+    ObjectSlot map_slot = (*heap_object)->map_slot();
     Address map_address = map_slot.load_map().ptr();
     if (map_address == StaticReadOnlyRoot::kThinOneByteStringMap ||
         map_address == StaticReadOnlyRoot::kThinTwoByteStringMap) {
-      DCHECK_EQ(heap_object->map(ObjectVisitorWithCageBases::cage_base())
+      DCHECK_EQ((*heap_object)
+                    ->map(ObjectVisitorWithCageBases::cage_base())
                     ->visitor_id(),
                 VisitorId::kVisitThinString);
       *heap_object = ThinString::cast(*heap_object)->actual();
@@ -250,7 +253,8 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::ShortCutStrings(
                map_address == StaticReadOnlyRoot::kConsTwoByteStringMap) {
       // Not all ConsString are short cut candidates.
       const VisitorId visitor_id =
-          heap_object->map(ObjectVisitorWithCageBases::cage_base())
+          (*heap_object)
+              ->map(ObjectVisitorWithCageBases::cage_base())
               ->visitor_id();
       if (visitor_id == VisitorId::kVisitShortcutCandidate) {
         Tagged<ConsString> string = ConsString::cast(*heap_object);

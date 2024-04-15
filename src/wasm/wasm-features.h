@@ -15,7 +15,6 @@
 
 // Features that are always enabled and do not have a flag.
 #define FOREACH_WASM_NON_FLAG_FEATURE(V)             \
-  V(eh, "exception handling opcodes")                \
   V(reftypes, "reference type opcodes")              \
   V(simd, "SIMD opcodes")                            \
   V(threads, "thread opcodes")                       \
@@ -92,6 +91,7 @@ enum class CompileTimeImport {
   kJsString,
   kTextEncoder,
   kTextDecoder,
+  kStringConstants,
 };
 
 inline std::ostream& operator<<(std::ostream& os, CompileTimeImport imp) {

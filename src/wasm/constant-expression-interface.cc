@@ -105,7 +105,8 @@ void ConstantExpressionInterface::RefNull(FullDecoder* decoder, ValueType type,
                                           Value* result) {
   if (!generate_value()) return;
   result->runtime_value =
-      WasmValue(type == kWasmExternRef || type == kWasmNullExternRef
+      WasmValue((IsSubtypeOf(type, kWasmExternRef, decoder->module_) ||
+                 IsSubtypeOf(type, kWasmExnRef, decoder->module_))
                     ? Handle<Object>::cast(isolate_->factory()->null_value())
                     : Handle<Object>::cast(isolate_->factory()->wasm_null()),
                 type);
@@ -120,10 +121,9 @@ void ConstantExpressionInterface::RefFunc(FullDecoder* decoder,
   }
   if (!generate_value()) return;
   ValueType type = ValueType::Ref(module_->functions[function_index].sig_index);
-  Handle<WasmInternalFunction> internal =
-      WasmTrustedInstanceData::GetOrCreateWasmInternalFunction(
-          isolate_, trusted_instance_data_, function_index);
-  result->runtime_value = WasmValue(internal, type);
+  Handle<WasmFuncRef> func_ref = WasmTrustedInstanceData::GetOrCreateFuncRef(
+      isolate_, trusted_instance_data_, function_index);
+  result->runtime_value = WasmValue(func_ref, type);
 }
 
 void ConstantExpressionInterface::GlobalGet(FullDecoder* decoder, Value* result,
@@ -202,7 +202,7 @@ WasmValue DefaultValueForType(ValueType type, Isolate* isolate) {
     case kRefNull:
       return WasmValue(
           type == kWasmExternRef || type == kWasmNullExternRef ||
-                  type == kWasmExnRef
+                  type == kWasmExnRef || type == kWasmNullExnRef
               ? Handle<Object>::cast(isolate->factory()->null_value())
               : Handle<Object>::cast(isolate->factory()->wasm_null()),
           type);

@@ -342,11 +342,12 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
 
   V8_EXPORT_PRIVATE static V8_WARN_UNUSED_RESULT MaybeHandle<JSObject> New(
       Handle<JSFunction> constructor, Handle<JSReceiver> new_target,
-      Handle<AllocationSite> site);
+      Handle<AllocationSite> site,
+      NewJSObjectType = NewJSObjectType::kNoAPIWrapper);
 
-  static MaybeHandle<JSObject> NewWithMap(Isolate* isolate,
-                                          Handle<Map> initial_map,
-                                          Handle<AllocationSite> site);
+  static MaybeHandle<JSObject> NewWithMap(
+      Isolate* isolate, Handle<Map> initial_map, Handle<AllocationSite> site,
+      NewJSObjectType = NewJSObjectType::kNoAPIWrapper);
 
   // 9.1.12 ObjectCreate ( proto [ , internalSlotsList ] )
   // Notice: This is NOT 19.1.2.2 Object.create ( O, Properties )
@@ -906,6 +907,14 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
                     kMaxEmbedderFields * kEmbedderDataSlotSizeInTaggedSlots <=
                 kMaxInstanceSize);
 
+  static constexpr int kMaxJSApiObjectInObjectProperties =
+      (kMaxInstanceSize - kHeaderSize - kCppHeapPointerSlotSize) >>
+      kTaggedSizeLog2;
+  static constexpr int kMaxJSApiObjectEmbedderFields =
+      (kMaxFirstInobjectPropertyOffset - kHeaderSize -
+       kCppHeapPointerSlotSize) /
+      kEmbedderDataSlotSize;
+
   class BodyDescriptor;
 
   class FastBodyDescriptor;
@@ -976,6 +985,17 @@ class JSObjectWithEmbedderSlots
   TQ_OBJECT_CONSTRUCTORS(JSObjectWithEmbedderSlots)
 };
 
+// An abstract superclass for JSObjects that may contain EmbedderDataSlots and
+// are used as API wrapper objects.
+class JSAPIObjectWithEmbedderSlots
+    : public TorqueGeneratedJSAPIObjectWithEmbedderSlots<
+          JSAPIObjectWithEmbedderSlots, JSObject> {
+ public:
+  class BodyDescriptor;
+
+  TQ_OBJECT_CONSTRUCTORS(JSAPIObjectWithEmbedderSlots)
+};
+
 // An abstract superclass for JSObjects that may have elements while having an
 // empty fixed array as elements backing store. It doesn't carry any
 // functionality but allows function classes to be identified in the type
@@ -992,13 +1012,37 @@ class JSCustomElementsObject
 // access. It doesn't carry any functionality but allows function classes to be
 // identified in the type system.
 // These may also contain EmbedderDataSlots, but can't currently inherit from
-// JSObjectWithEmbedderSlots due to instance_type constraints.
+// JSAPIObjectWithEmbedderSlots due to instance_type constraints.
 class JSSpecialObject
     : public TorqueGeneratedJSSpecialObject<JSSpecialObject,
                                             JSCustomElementsObject> {
  public:
-  static_assert(kHeaderSize == JSObject::kHeaderSize);
   TQ_OBJECT_CONSTRUCTORS(JSSpecialObject)
+};
+
+// Helper union that doesn't actually exist as type. Use by value.
+class JSApiWrapper {
+ public:
+  V8_INLINE explicit JSApiWrapper(Tagged<JSObject> object);
+
+  template <ExternalPointerTag tag>
+  V8_INLINE void SetCppHeapWrappable(IsolateForPointerCompression isolate,
+                                     void*);
+  V8_INLINE void SetCppHeapWrappable(IsolateForPointerCompression isolate,
+                                     void*, ExternalPointerTag tag);
+  template <ExternalPointerTag tag>
+  V8_INLINE void* GetCppHeapWrappable(
+      IsolateForPointerCompression isolate) const;
+  V8_INLINE void* GetCppHeapWrappable(IsolateForPointerCompression isolate,
+                                      ExternalPointerTag tag) const;
+
+ private:
+  static_assert(JSAPIObjectWithEmbedderSlots::kCppHeapWrappableOffset ==
+                JSSpecialObject::kCppHeapWrappableOffset);
+  static constexpr int kCppHeapWrappableOffset =
+      JSAPIObjectWithEmbedderSlots::kCppHeapWrappableOffset;
+
+  Tagged<JSObject> object_;
 };
 
 // JSAccessorPropertyDescriptor is just a JSObject with a specific initial
