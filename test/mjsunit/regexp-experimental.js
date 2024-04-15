@@ -115,3 +115,5 @@ Test(/ab(?<=a(?<!(b))b)(c)/, 'abc', ['abc', undefined, 'c'], 0);
 // Global and Sticky flags are not yet supported in combination with lookbehinds
 AssertUnsupported(/ab(?<=b)c/g);
 AssertUnsupported(/ab(?<=b)c/y);
+
+Test(/(((((a?)+)+)+)+)b/, ('a'.repeat(10000000)), null, 0)
