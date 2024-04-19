@@ -6,6 +6,7 @@
 
 #include "src/base/strings.h"
 #include "src/regexp/experimental/experimental.h"
+#include "src/zone/zone-containers.h"
 #include "src/zone/zone-list-inl.h"
 
 namespace v8 {
@@ -371,7 +372,8 @@ class BytecodeAssembler {
 class FilterGroupsCompileVisitor final : private RegExpVisitor {
  public:
   static void CompileFilter(Zone* zone, RegExpTree* tree,
-                            BytecodeAssembler& assembler) {
+                            BytecodeAssembler& assembler,
+                            const ZoneMap<int, int>& quantifier_id_remapping) {
     /* To filter out groups that were not matched in the last iteration of a
      * quantifier, the regexp's AST is compiled using a special sets of
      * instructions: `FILTER_GROUP`, `FILTER_QUANTIFIER` and `FILTER_CHILD`.
@@ -385,7 +387,8 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
      * The regexp's AST is traversed in breadth-first mode, compiling one node
      * at a time, while saving its children in a queue. */
 
-    FilterGroupsCompileVisitor visitor(assembler, zone);
+    FilterGroupsCompileVisitor visitor(assembler, zone,
+                                       quantifier_id_remapping);
 
     tree->Accept(&visitor, nullptr);
 
@@ -401,10 +404,12 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
   }
 
  private:
-  FilterGroupsCompileVisitor(BytecodeAssembler& assembler, Zone* zone)
+  FilterGroupsCompileVisitor(BytecodeAssembler& assembler, Zone* zone,
+                             const ZoneMap<int, int>& quantifier_id_remapping)
       : zone_(zone),
         assembler_(assembler),
         nodes_(zone_),
+        quantifier_id_remapping_(quantifier_id_remapping),
         compile_capture_or_quant_(false) {}
 
   void* VisitDisjunction(RegExpDisjunction* node, void*) override {
@@ -444,10 +449,14 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
 
   void* VisitQuantifier(RegExpQuantifier* node, void*) override {
     if (compile_capture_or_quant_) {
-      assembler_.FilterQuantifier(node->index());
+      assembler_.FilterQuantifier(quantifier_id_remapping_.at(node->index()));
       compile_capture_or_quant_ = false;
       node->body()->Accept(this, nullptr);
     } else {
+      if (node->CaptureRegisters().is_empty()) {
+        return nullptr;
+      }
+
       nodes_.emplace_back(node);
       assembler_.FilterChild(nodes_.back().label);
     }
@@ -499,6 +508,8 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
   BytecodeAssembler& assembler_;
   ZoneLinkedList<BFEntry> nodes_;
 
+  const ZoneMap<int, int>& quantifier_id_remapping_;
+
   // Whether we can compile a capture group or quantifier. This is set to true
   // after popping an element from the queue, and false after having compiled
   // one. When false, encountered capture groups and quantifiers are pushed on
@@ -525,7 +536,8 @@ class CompileVisitor : private RegExpVisitor {
     compiler.assembler_.SetRegisterToCp(1);
     compiler.assembler_.Accept();
 
-    FilterGroupsCompileVisitor::CompileFilter(zone, tree, compiler.assembler_);
+    FilterGroupsCompileVisitor::CompileFilter(
+        zone, tree, compiler.assembler_, compiler.quantifier_id_remapping_);
 
     // To handle captureless lookbehinds, we run independent automata for each
     // lookbehind in lockstep with the main expression. To do so, we compile
@@ -562,6 +574,7 @@ class CompileVisitor : private RegExpVisitor {
   explicit CompileVisitor(Zone* zone)
       : zone_(zone),
         lookbehinds_(zone),
+        quantifier_id_remapping_(zone),
         assembler_(zone),
         inside_lookaround_(false) {}
 
@@ -886,7 +899,10 @@ class CompileVisitor : private RegExpVisitor {
     // still need the `SET_QUANTIFIER_TO_CLOCK` for the Nfa to be able to
     // correctly determine the number of quantifiers.
     if (node->max() == 0) {
-      assembler_.SetQuantifierToClock(node->index());
+      if (!node->CaptureRegisters().is_empty()) {
+        assembler_.SetQuantifierToClock(RemapQuantifier(node->index()));
+      }
+
       return nullptr;
     }
 
@@ -899,7 +915,10 @@ class CompileVisitor : private RegExpVisitor {
     // Later, and if node->min() == 0, we don't have to clear registers before
     // the first optional repetition.
     auto emit_body = [&]() {
-      assembler_.SetQuantifierToClock(node->index());
+      if (!node->CaptureRegisters().is_empty()) {
+        assembler_.SetQuantifierToClock(RemapQuantifier(node->index()));
+      }
+
       node->body()->Accept(this, nullptr);
     };
 
@@ -1017,12 +1036,23 @@ class CompileVisitor : private RegExpVisitor {
     return nullptr;
   }
 
+  int RemapQuantifier(int id) {
+    if (!quantifier_id_remapping_.contains(id)) {
+      quantifier_id_remapping_[id] =
+          static_cast<int>(quantifier_id_remapping_.size());
+    }
+
+    return quantifier_id_remapping_[id];
+  }
+
  private:
   Zone* zone_;
 
   // Stores the AST of the lookbehinds encountered in a queue. They are compiled
   // after the main expression, in breadth-first order.
   ZoneLinkedList<RegExpLookaround*> lookbehinds_;
+
+  ZoneMap<int, int> quantifier_id_remapping_;
 
   BytecodeAssembler assembler_;
   bool inside_lookaround_;
