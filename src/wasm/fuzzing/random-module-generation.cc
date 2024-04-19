@@ -5,14 +5,21 @@
 #include "src/wasm/fuzzing/random-module-generation.h"
 
 #include <algorithm>
+#include <array>
 
+#include "src/base/small-vector.h"
 #include "src/base/utils/random-number-generator.h"
-#include "src/base/v8-fallthrough.h"
-#include "src/base/vector.h"
 #include "src/wasm/function-body-decoder.h"
 #include "src/wasm/wasm-module-builder.h"
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-opcodes-inl.h"
+
+// This whole compilation unit should only be included in non-official builds to
+// reduce binary size (it's a testing-only implementation which lives in src/ so
+// that the GenerateRandomWasmModule runtime function can use it).
+#ifdef OFFICIAL_BUILD
+#error Exclude this compilation unit in official builds.
+#endif
 
 namespace v8::internal::wasm::fuzzing {
 
@@ -28,6 +35,7 @@ constexpr int kMaxReturns = 15;
 constexpr int kMaxExceptions = 4;
 constexpr int kMaxTableSize = 32;
 constexpr int kMaxTables = 4;
+constexpr int kMaxMemories = 4;
 constexpr int kMaxArraySize = 20;
 constexpr int kMaxPassiveDataSegments = 2;
 constexpr uint32_t kMaxRecursionDepth = 64;
@@ -56,6 +64,42 @@ struct StringImports {
   uint32_t array_i16;
   uint32_t array_i8;
 };
+
+// Creates an array out of the arguments without hardcoding the exact number of
+// arguments.
+template <typename... T>
+constexpr auto CreateArray(T... elements) {
+  std::array result = {elements...};
+  return result;
+}
+
+// Concatenate arrays into one array in compile-time.
+template <typename T, size_t... N>
+constexpr auto ConcatArrays(std::array<T, N>... array) {
+  constexpr size_t kNumArrays = sizeof...(array);
+  std::array<T*, kNumArrays> kArrays = {&array[0]...};
+  constexpr size_t kLengths[kNumArrays] = {array.size()...};
+  constexpr size_t kSumOfLengths = (... + array.size());
+
+  std::array<T, kSumOfLengths> result = {0};
+  size_t result_index = 0;
+  for (size_t arr = 0; arr < kNumArrays; arr++) {
+    for (size_t pos = 0; pos < kLengths[arr]; pos++) {
+      result[result_index++] = kArrays[arr][pos];
+    }
+  }
+  return result;
+}
+
+template <bool predicate, typename T, size_t kSize1, size_t kSize2>
+constexpr auto AppendArrayIf(std::array<T, kSize1> array1,
+                             std::array<T, kSize2> array2) {
+  if constexpr (!predicate) {
+    return array1;
+  } else {
+    return ConcatArrays(array1, array2);
+  }
+}
 
 class DataRange {
   // data_ is used for general random values for fuzzing.
@@ -158,72 +202,105 @@ bool DataRange::get() {
   return get<uint8_t>() % 2;
 }
 
-enum NumericTypes { kIncludeNumericTypes, kExcludeNumericTypes };
-enum PackedTypes { kIncludePackedTypes, kExcludePackedTypes };
-enum Generics {
-  kAlwaysIncludeAllGenerics,
-  kExcludeSomeGenericsWhenTypeIsNonNullable
+enum IncludeNumericTypes {
+  kIncludeNumericTypes = true,
+  kExcludeNumericTypes = false
 };
-enum IncludeS128 { kIncludeS128 = 1, kExcludeS128 = 0 };
+enum IncludePackedTypes {
+  kIncludePackedTypes = true,
+  kExcludePackedTypes = false
+};
+enum IncludeAllGenerics {
+  kIncludeAllGenerics = true,
+  kExcludeSomeGenerics = false
+};
+enum IncludeS128 { kIncludeS128 = true, kExcludeS128 = false };
 
+// Chooses one `ValueType` randomly based on `options` and the enums specified
+// above.
+template <WasmModuleGenerationOptions options>
 ValueType GetValueTypeHelper(DataRange* data, uint32_t num_nullable_types,
                              uint32_t num_non_nullable_types,
-                             NumericTypes include_numeric_types,
-                             PackedTypes include_packed_types,
-                             Generics include_generics,
+                             IncludeNumericTypes include_numeric_types,
+                             IncludePackedTypes include_packed_types,
+                             IncludeAllGenerics include_all_generics,
                              IncludeS128 include_s128 = kIncludeS128) {
-  std::vector<ValueType> types;
-  // Non wasm-gc types.
-  if (include_numeric_types == kIncludeNumericTypes) {
+  // Create and fill a vector of potential types to choose from.
+  base::SmallVector<ValueType, 32> types;
+
+  // Numeric non-wasmGC types.
+  if (include_numeric_types) {
     // Many "general-purpose" instructions return i32, so give that a higher
     // probability (such as 3x).
     types.insert(types.end(),
                  {kWasmI32, kWasmI32, kWasmI32, kWasmI64, kWasmF32, kWasmF64});
-    if (include_s128 == kIncludeS128) types.push_back(kWasmS128);
-    if (include_packed_types == kIncludePackedTypes) {
-      types.insert(types.end(), {kWasmI8, kWasmI16});
+
+    // SIMD type.
+    if (ShouldGenerateSIMD(options) && include_s128) {
+      types.push_back(kWasmS128);
     }
   }
-  // Decide if the return type will be nullable or not.
-  const bool nullable = data->get<bool>();
 
-  types.insert(types.end(), {kWasmI31Ref, kWasmFuncRef});
-  if (nullable) {
-    types.insert(types.end(),
-                 {kWasmNullRef, kWasmNullExternRef, kWasmNullFuncRef});
-  }
-  if (nullable || include_generics == kAlwaysIncludeAllGenerics) {
-    types.insert(types.end(), {kWasmStructRef, kWasmArrayRef, kWasmAnyRef,
-                               kWasmEqRef, kWasmExternRef});
+  // The MVP types: apart from numeric types, contains only the non-nullable
+  // funcRef. We don't add externRef, because for externRef globals we generate
+  // initialiser expressions where we need wasmGC types. Also, externRef is not
+  // really useful for the MVP fuzzer, as there is nothing that we could
+  // generate.
+  types.push_back(kWasmFuncRef);
+
+  // WasmGC types (including user-defined types).
+  // Decide if the return type will be nullable or not.
+  const bool nullable =
+      ShouldGenerateWasmGC(options) ? data->get<bool>() : false;
+
+  if (ShouldGenerateWasmGC(options)) {
+    types.push_back(kWasmI31Ref);
+
+    if (include_numeric_types && include_packed_types) {
+      types.insert(types.end(), {kWasmI8, kWasmI16});
+    }
+
+    if (nullable) {
+      types.insert(types.end(),
+                   {kWasmNullRef, kWasmNullExternRef, kWasmNullFuncRef});
+    }
+    if (nullable || include_all_generics) {
+      types.insert(types.end(), {kWasmStructRef, kWasmArrayRef, kWasmAnyRef,
+                                 kWasmEqRef, kWasmExternRef});
+    }
   }
 
   // The last index of user-defined types allowed is different based on the
-  // nullability of the output.
+  // nullability of the output. User-defined types are function signatures or
+  // structs and arrays (in case of wasmGC).
   const uint32_t num_user_defined_types =
       nullable ? num_nullable_types : num_non_nullable_types;
 
   // Conceptually, user-defined types are added to the end of the list. Pick a
   // random one among them.
-  uint32_t id = data->get<uint8_t>() % (types.size() + num_user_defined_types);
+  uint32_t chosen_id =
+      data->get<uint8_t>() % (types.size() + num_user_defined_types);
 
   Nullability nullability = nullable ? kNullable : kNonNullable;
 
-  if (id >= types.size()) {
+  if (chosen_id >= types.size()) {
     // Return user-defined type.
-    return ValueType::RefMaybeNull(id - static_cast<uint32_t>(types.size()),
-                                   nullability);
+    return ValueType::RefMaybeNull(
+        chosen_id - static_cast<uint32_t>(types.size()), nullability);
   }
   // If returning a reference type, fix its nullability according to {nullable}.
-  if (types[id].is_reference()) {
-    return ValueType::RefMaybeNull(types[id].heap_type(), nullability);
+  if (types[chosen_id].is_reference()) {
+    return ValueType::RefMaybeNull(types[chosen_id].heap_type(), nullability);
   }
   // Otherwise, just return the picked type.
-  return types[id];
+  return types[chosen_id];
 }
 
+template <WasmModuleGenerationOptions options>
 ValueType GetValueType(DataRange* data, uint32_t num_types) {
-  return GetValueTypeHelper(data, num_types, num_types, kIncludeNumericTypes,
-                            kExcludePackedTypes, kAlwaysIncludeAllGenerics);
+  return GetValueTypeHelper<options>(data, num_types, num_types,
+                                     kIncludeNumericTypes, kExcludePackedTypes,
+                                     kIncludeAllGenerics);
 }
 
 void GeneratePassiveDataSegment(DataRange* range, WasmModuleBuilder* builder) {
@@ -253,7 +330,8 @@ uint32_t GenerateRefTypeElementSegment(DataRange* range,
   return builder->AddElementSegment(std::move(segment));
 }
 
-class WasmGenerator {
+template <WasmModuleGenerationOptions options>
+class BodyGen {
   template <WasmOpcode Op, ValueKind... Args>
   void op(DataRange* data) {
     Generate<Args...>(data);
@@ -262,7 +340,7 @@ class WasmGenerator {
 
   class V8_NODISCARD BlockScope {
    public:
-    BlockScope(WasmGenerator* gen, WasmOpcode block_type,
+    BlockScope(BodyGen* gen, WasmOpcode block_type,
                base::Vector<const ValueType> param_types,
                base::Vector<const ValueType> result_types,
                base::Vector<const ValueType> br_types, bool emit_end = true)
@@ -302,7 +380,7 @@ class WasmGenerator {
     }
 
    private:
-    WasmGenerator* const gen_;
+    BodyGen* const gen_;
     bool emit_end_;
   };
 
@@ -319,7 +397,11 @@ class WasmGenerator {
 
   template <ValueKind T>
   void block(DataRange* data) {
-    block({}, base::VectorOf({ValueType::Primitive(T)}), data);
+    if constexpr (T == kVoid) {
+      block({}, {}, data);
+    } else {
+      block({}, base::VectorOf({ValueType::Primitive(T)}), data);
+    }
   }
 
   void loop(base::Vector<const ValueType> param_types,
@@ -331,7 +413,11 @@ class WasmGenerator {
 
   template <ValueKind T>
   void loop(DataRange* data) {
-    loop({}, base::VectorOf({ValueType::Primitive(T)}), data);
+    if constexpr (T == kVoid) {
+      loop({}, {}, data);
+    } else {
+      loop({}, base::VectorOf({ValueType::Primitive(T)}), data);
+    }
   }
 
   void finite_loop(base::Vector<const ValueType> param_types,
@@ -379,7 +465,11 @@ class WasmGenerator {
 
   template <ValueKind T>
   void finite_loop(DataRange* data) {
-    finite_loop({}, base::VectorOf({ValueType::Primitive(T)}), data);
+    if constexpr (T == kVoid) {
+      finite_loop({}, {}, data);
+    } else {
+      finite_loop({}, base::VectorOf({ValueType::Primitive(T)}), data);
+    }
   }
 
   enum IfType { kIf, kIfElse };
@@ -572,7 +662,7 @@ class WasmGenerator {
           if_({}, {}, kIf, data);
           return;
         }
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       case 4:
         if_(param_types, return_types, kIfElse, data);
         return;
@@ -838,13 +928,19 @@ class WasmGenerator {
     // Generate the index and the arguments, if any.
     Generate<kI32, arg_kinds...>(data);
 
+    // Format of the instruction (supports multi-memory):
+    // memory_op (align | 0x40) memory_index offset
     if (WasmOpcodes::IsPrefixOpcode(static_cast<WasmOpcode>(memory_op >> 8))) {
       DCHECK(memory_op >> 8 == kAtomicPrefix || memory_op >> 8 == kSimdPrefix);
       builder_->EmitWithPrefix(memory_op);
     } else {
       builder_->Emit(memory_op);
     }
-    builder_->EmitU32V(align);
+    builder_->EmitU32V(align | 0x40);
+    // Get random memory index.
+    uint8_t memory_index =
+        data->get<uint8_t>() % builder_->builder()->NumMemories();
+    builder_->EmitU32V(memory_index);
     builder_->EmitU32V(offset);
   }
 
@@ -900,7 +996,7 @@ class WasmGenerator {
   }
 
   void drop(DataRange* data) {
-    Generate(GetValueType(
+    Generate(GetValueType<options>(
                  data, static_cast<uint32_t>(functions_.size() +
                                              structs_.size() + arrays_.size())),
              data);
@@ -1173,7 +1269,10 @@ class WasmGenerator {
     builder_->EmitWithU8(kExprMemorySize, 0);
   }
 
-  void grow_memory(DataRange* data);
+  void grow_memory(DataRange* data) {
+    Generate<kI32>(data);
+    builder_->EmitWithU8(kExprMemoryGrow, 0);
+  }
 
   void ref_null(HeapType type, DataRange* data) {
     builder_->EmitWithI32V(kExprRefNull, type.code());
@@ -1265,7 +1364,7 @@ class WasmGenerator {
             builder_->EmitU32V(data_index);
             break;
           }
-          V8_FALLTHROUGH;  // To array.new.
+          [[fallthrough]];  // To array.new.
         }
         case kExprArrayNew:
           Generate(element_type.Unpacked(), data);
@@ -1758,7 +1857,7 @@ class WasmGenerator {
                   source_is_nullable ? kNullable : kNonNullable);
       const bool target_is_nullable =
           source_is_nullable && break_type.is_nullable() && data->get<bool>();
-      builder_->EmitWithPrefix(kExprBrOnCastGeneric);
+      builder_->EmitWithPrefix(kExprBrOnCast);
       builder_->EmitU32V(source_is_nullable + (target_is_nullable << 1));
       builder_->EmitU32V(block_index);
       builder_->EmitI32V(source_type.code());             // source type
@@ -1777,7 +1876,7 @@ class WasmGenerator {
           (!break_type.is_nullable() || data->get<bool>());
       HeapType target_type = choose_sub_type(source_type, data);
 
-      builder_->EmitWithPrefix(kExprBrOnCastFailGeneric);
+      builder_->EmitWithPrefix(kExprBrOnCastFail);
       builder_->EmitU32V(source_is_nullable + (target_is_nullable << 1));
       builder_->EmitU32V(block_index);
       builder_->EmitI32V(source_type.code());
@@ -1969,12 +2068,13 @@ class WasmGenerator {
     call_string_import(string_imports_.decodeStringFromUTF8Array);
   }
 
-  using GenerateFn = void (WasmGenerator::*const)(DataRange*);
-  using GenerateFnWithHeap = bool (WasmGenerator::*const)(HeapType, DataRange*,
-                                                          Nullability);
+  using GenerateFn = void (BodyGen::*)(DataRange*);
+  using GenerateFnWithHeap = bool (BodyGen::*)(HeapType, DataRange*,
+                                               Nullability);
 
   template <size_t N>
-  void GenerateOneOf(GenerateFn (&alternatives)[N], DataRange* data) {
+  void GenerateOneOf(const std::array<GenerateFn, N>& alternatives,
+                     DataRange* data) {
     static_assert(N < std::numeric_limits<uint8_t>::max(),
                   "Too many alternatives. Use a bigger type if needed.");
     const auto which = data->get<uint8_t>();
@@ -1983,11 +2083,11 @@ class WasmGenerator {
     (this->*alternate)(data);
   }
 
-  // Returns true if it had succesfully generated the reference
-  // and false otherwise.
+  // Returns true if it had succesfully generated a randomly chosen expression
+  // from the `alternatives`.
   template <size_t N>
-  bool GenerateOneOf(GenerateFnWithHeap (&alternatives)[N], HeapType type,
-                     DataRange* data, Nullability nullability) {
+  bool GenerateOneOf(const std::array<GenerateFnWithHeap, N>& alternatives,
+                     HeapType type, DataRange* data, Nullability nullability) {
     static_assert(N < std::numeric_limits<uint8_t>::max(),
                   "Too many alternatives. Use a bigger type if needed.");
 
@@ -2019,7 +2119,7 @@ class WasmGenerator {
   }
 
   struct GeneratorRecursionScope {
-    explicit GeneratorRecursionScope(WasmGenerator* gen) : gen(gen) {
+    explicit GeneratorRecursionScope(BodyGen* gen) : gen(gen) {
       ++gen->recursion_depth;
       DCHECK_LE(gen->recursion_depth, kMaxRecursionDepth);
     }
@@ -2027,16 +2127,16 @@ class WasmGenerator {
       DCHECK_GT(gen->recursion_depth, 0);
       --gen->recursion_depth;
     }
-    WasmGenerator* gen;
+    BodyGen* gen;
   };
 
  public:
-  WasmGenerator(WasmFunctionBuilder* fn, const std::vector<uint32_t>& functions,
-                const std::vector<ValueType>& globals,
-                const std::vector<uint8_t>& mutable_globals,
-                const std::vector<uint32_t>& structs,
-                const std::vector<uint32_t>& arrays,
-                const StringImports& strings, DataRange* data)
+  BodyGen(WasmFunctionBuilder* fn, const std::vector<uint32_t>& functions,
+          const std::vector<ValueType>& globals,
+          const std::vector<uint8_t>& mutable_globals,
+          const std::vector<uint32_t>& structs,
+          const std::vector<uint32_t>& arrays, const StringImports& strings,
+          DataRange* data)
       : builder_(fn),
         functions_(functions),
         globals_(globals),
@@ -2055,15 +2155,855 @@ class WasmGenerator {
     uint32_t num_types = static_cast<uint32_t>(
         functions_.size() + structs_.size() + arrays_.size());
     for (ValueType& local : locals_) {
-      local = GetValueType(data, num_types);
+      local = GetValueType<options>(data, num_types);
       fn->AddLocal(local);
     }
   }
 
-  void Generate(ValueType type, DataRange* data);
+  // Generator functions.
+  // Implementation detail: We define non-template Generate*TYPE*() functions
+  // instead of templatized Generate<TYPE>(). This is because we cannot define
+  // the templatized Generate<TYPE>() functions:
+  //  - outside of the class body without specializing the template of the
+  //  `BodyGen` (results in partial template specialization error);
+  //  - inside of the class body (gcc complains about explicit specialization in
+  //  non-namespace scope).
 
-  template <ValueKind T>
-  void Generate(DataRange* data);
+  void GenerateVoid(DataRange* data) {
+    GeneratorRecursionScope rec_scope(this);
+    if (recursion_limit_reached() || data->size() == 0) return;
+
+    constexpr auto mvp_alternatives =
+        CreateArray(&BodyGen::sequence<kVoid, kVoid>,
+                    &BodyGen::sequence<kVoid, kVoid, kVoid, kVoid>,
+                    &BodyGen::sequence<kVoid, kVoid, kVoid, kVoid, kVoid, kVoid,
+                                       kVoid, kVoid>,
+                    &BodyGen::block<kVoid>,           //
+                    &BodyGen::loop<kVoid>,            //
+                    &BodyGen::finite_loop<kVoid>,     //
+                    &BodyGen::if_<kVoid, kIf>,        //
+                    &BodyGen::if_<kVoid, kIfElse>,    //
+                    &BodyGen::br,                     //
+                    &BodyGen::br_if<kVoid>,           //
+                    &BodyGen::br_on_null<kVoid>,      //
+                    &BodyGen::br_on_non_null<kVoid>,  //
+                    &BodyGen::br_table<kVoid>,        //
+                    &BodyGen::return_op,              //
+
+                    &BodyGen::memop<kExprI32StoreMem, kI32>,
+                    &BodyGen::memop<kExprI32StoreMem8, kI32>,
+                    &BodyGen::memop<kExprI32StoreMem16, kI32>,
+                    &BodyGen::memop<kExprI64StoreMem, kI64>,
+                    &BodyGen::memop<kExprI64StoreMem8, kI64>,
+                    &BodyGen::memop<kExprI64StoreMem16, kI64>,
+                    &BodyGen::memop<kExprI64StoreMem32, kI64>,
+                    &BodyGen::memop<kExprF32StoreMem, kF32>,
+                    &BodyGen::memop<kExprF64StoreMem, kF64>,
+                    &BodyGen::memop<kExprI32AtomicStore, kI32>,
+                    &BodyGen::memop<kExprI32AtomicStore8U, kI32>,
+                    &BodyGen::memop<kExprI32AtomicStore16U, kI32>,
+                    &BodyGen::memop<kExprI64AtomicStore, kI64>,
+                    &BodyGen::memop<kExprI64AtomicStore8U, kI64>,
+                    &BodyGen::memop<kExprI64AtomicStore16U, kI64>,
+                    &BodyGen::memop<kExprI64AtomicStore32U, kI64>,
+
+                    &BodyGen::drop,
+
+                    &BodyGen::call<kVoid>,           //
+                    &BodyGen::call_indirect<kVoid>,  //
+                    &BodyGen::call_ref<kVoid>,       //
+
+                    &BodyGen::set_local,         //
+                    &BodyGen::set_global,        //
+                    &BodyGen::throw_or_rethrow,  //
+                    &BodyGen::try_block<kVoid>,  //
+
+                    &BodyGen::table_set,    //
+                    &BodyGen::table_fill,   //
+                    &BodyGen::table_copy);  //
+
+    auto constexpr simd_alternatives =
+        CreateArray(&BodyGen::memop<kExprS128StoreMem, kS128>,
+                    &BodyGen::simd_lane_memop<kExprS128Store8Lane, 16, kS128>,
+                    &BodyGen::simd_lane_memop<kExprS128Store16Lane, 8, kS128>,
+                    &BodyGen::simd_lane_memop<kExprS128Store32Lane, 4, kS128>,
+                    &BodyGen::simd_lane_memop<kExprS128Store64Lane, 2, kS128>);
+
+    auto constexpr wasmGC_alternatives =
+        CreateArray(&BodyGen::struct_set,        //
+                    &BodyGen::array_set,         //
+                    &BodyGen::array_copy,        //
+                    &BodyGen::array_fill,        //
+                    &BodyGen::array_init_data,   //
+                    &BodyGen::array_init_elem);  //
+
+    constexpr auto alternatives = AppendArrayIf<ShouldGenerateWasmGC(options)>(
+        AppendArrayIf<ShouldGenerateSIMD(options)>(mvp_alternatives,
+                                                   simd_alternatives),
+        wasmGC_alternatives);
+    GenerateOneOf(alternatives, data);
+  }
+
+  void GenerateI32(DataRange* data) {
+    GeneratorRecursionScope rec_scope(this);
+    if (recursion_limit_reached() || data->size() <= 1) {
+      // Rather than evenly distributing values across the full 32-bit range,
+      // distribute them evenly over the possible bit lengths. In particular,
+      // for values used as indices into something else, smaller values are
+      // more likely to be useful.
+      uint8_t size = 1 + (data->getPseudoRandom<uint8_t>() & 31);
+      uint32_t mask = kMaxUInt32 >> (32 - size);
+      builder_->EmitI32Const(data->getPseudoRandom<uint32_t>() & mask);
+      return;
+    }
+
+    constexpr auto mvp_alternatives = CreateArray(
+        &BodyGen::i32_const<1>,  //
+        &BodyGen::i32_const<2>,  //
+        &BodyGen::i32_const<3>,  //
+        &BodyGen::i32_const<4>,  //
+
+        &BodyGen::sequence<kI32, kVoid>,         //
+        &BodyGen::sequence<kVoid, kI32>,         //
+        &BodyGen::sequence<kVoid, kI32, kVoid>,  //
+
+        &BodyGen::op<kExprI32Eqz, kI32>,        //
+        &BodyGen::op<kExprI32Eq, kI32, kI32>,   //
+        &BodyGen::op<kExprI32Ne, kI32, kI32>,   //
+        &BodyGen::op<kExprI32LtS, kI32, kI32>,  //
+        &BodyGen::op<kExprI32LtU, kI32, kI32>,  //
+        &BodyGen::op<kExprI32GeS, kI32, kI32>,  //
+        &BodyGen::op<kExprI32GeU, kI32, kI32>,  //
+
+        &BodyGen::op<kExprI64Eqz, kI64>,        //
+        &BodyGen::op<kExprI64Eq, kI64, kI64>,   //
+        &BodyGen::op<kExprI64Ne, kI64, kI64>,   //
+        &BodyGen::op<kExprI64LtS, kI64, kI64>,  //
+        &BodyGen::op<kExprI64LtU, kI64, kI64>,  //
+        &BodyGen::op<kExprI64GeS, kI64, kI64>,  //
+        &BodyGen::op<kExprI64GeU, kI64, kI64>,  //
+
+        &BodyGen::op<kExprF32Eq, kF32, kF32>,
+        &BodyGen::op<kExprF32Ne, kF32, kF32>,
+        &BodyGen::op<kExprF32Lt, kF32, kF32>,
+        &BodyGen::op<kExprF32Ge, kF32, kF32>,
+
+        &BodyGen::op<kExprF64Eq, kF64, kF64>,
+        &BodyGen::op<kExprF64Ne, kF64, kF64>,
+        &BodyGen::op<kExprF64Lt, kF64, kF64>,
+        &BodyGen::op<kExprF64Ge, kF64, kF64>,
+
+        &BodyGen::op<kExprI32Add, kI32, kI32>,
+        &BodyGen::op<kExprI32Sub, kI32, kI32>,
+        &BodyGen::op<kExprI32Mul, kI32, kI32>,
+
+        &BodyGen::op<kExprI32DivS, kI32, kI32>,
+        &BodyGen::op<kExprI32DivU, kI32, kI32>,
+        &BodyGen::op<kExprI32RemS, kI32, kI32>,
+        &BodyGen::op<kExprI32RemU, kI32, kI32>,
+
+        &BodyGen::op<kExprI32And, kI32, kI32>,
+        &BodyGen::op<kExprI32Ior, kI32, kI32>,
+        &BodyGen::op<kExprI32Xor, kI32, kI32>,
+        &BodyGen::op<kExprI32Shl, kI32, kI32>,
+        &BodyGen::op<kExprI32ShrU, kI32, kI32>,
+        &BodyGen::op<kExprI32ShrS, kI32, kI32>,
+        &BodyGen::op<kExprI32Ror, kI32, kI32>,
+        &BodyGen::op<kExprI32Rol, kI32, kI32>,
+
+        &BodyGen::op<kExprI32Clz, kI32>,     //
+        &BodyGen::op<kExprI32Ctz, kI32>,     //
+        &BodyGen::op<kExprI32Popcnt, kI32>,  //
+
+        &BodyGen::op<kExprI32ConvertI64, kI64>,
+        &BodyGen::op<kExprI32SConvertF32, kF32>,
+        &BodyGen::op<kExprI32UConvertF32, kF32>,
+        &BodyGen::op<kExprI32SConvertF64, kF64>,
+        &BodyGen::op<kExprI32UConvertF64, kF64>,
+        &BodyGen::op<kExprI32ReinterpretF32, kF32>,
+
+        &BodyGen::op_with_prefix<kExprI32SConvertSatF32, kF32>,
+        &BodyGen::op_with_prefix<kExprI32UConvertSatF32, kF32>,
+        &BodyGen::op_with_prefix<kExprI32SConvertSatF64, kF64>,
+        &BodyGen::op_with_prefix<kExprI32UConvertSatF64, kF64>,
+
+        &BodyGen::block<kI32>,           //
+        &BodyGen::loop<kI32>,            //
+        &BodyGen::finite_loop<kI32>,     //
+        &BodyGen::if_<kI32, kIfElse>,    //
+        &BodyGen::br_if<kI32>,           //
+        &BodyGen::br_on_null<kI32>,      //
+        &BodyGen::br_on_non_null<kI32>,  //
+        &BodyGen::br_table<kI32>,        //
+
+        &BodyGen::memop<kExprI32LoadMem>,        //
+        &BodyGen::memop<kExprI32LoadMem8S>,      //
+        &BodyGen::memop<kExprI32LoadMem8U>,      //
+        &BodyGen::memop<kExprI32LoadMem16S>,     //
+        &BodyGen::memop<kExprI32LoadMem16U>,     //
+        &BodyGen::memop<kExprI32AtomicLoad>,     //
+        &BodyGen::memop<kExprI32AtomicLoad8U>,   //
+        &BodyGen::memop<kExprI32AtomicLoad16U>,  //
+
+        &BodyGen::atomic_op<kExprI32AtomicAdd, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicSub, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicAnd, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicOr, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicXor, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicExchange, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicCompareExchange, kI32, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicAdd8U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicSub8U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicAnd8U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicOr8U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicXor8U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicExchange8U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicCompareExchange8U, kI32, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicAdd16U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicSub16U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicAnd16U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicOr16U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicXor16U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicExchange16U, kI32, kI32>,
+        &BodyGen::atomic_op<kExprI32AtomicCompareExchange16U, kI32, kI32, kI32>,
+
+        &BodyGen::current_memory,  //
+        &BodyGen::grow_memory,     //
+
+        &BodyGen::get_local<kI32>,                    //
+        &BodyGen::tee_local<kI32>,                    //
+        &BodyGen::get_global<kI32>,                   //
+        &BodyGen::op<kExprSelect, kI32, kI32, kI32>,  //
+        &BodyGen::select_with_type<kI32>,             //
+
+        &BodyGen::call<kI32>,           //
+        &BodyGen::call_indirect<kI32>,  //
+        &BodyGen::call_ref<kI32>,       //
+        &BodyGen::try_block<kI32>,      //
+
+        &BodyGen::table_size,   //
+        &BodyGen::table_grow);  //
+
+    auto constexpr simd_alternatives =
+        CreateArray(&BodyGen::op_with_prefix<kExprV128AnyTrue, kS128>,
+                    &BodyGen::op_with_prefix<kExprI8x16AllTrue, kS128>,
+                    &BodyGen::op_with_prefix<kExprI8x16BitMask, kS128>,
+                    &BodyGen::op_with_prefix<kExprI16x8AllTrue, kS128>,
+                    &BodyGen::op_with_prefix<kExprI16x8BitMask, kS128>,
+                    &BodyGen::op_with_prefix<kExprI32x4AllTrue, kS128>,
+                    &BodyGen::op_with_prefix<kExprI32x4BitMask, kS128>,
+                    &BodyGen::op_with_prefix<kExprI64x2AllTrue, kS128>,
+                    &BodyGen::op_with_prefix<kExprI64x2BitMask, kS128>,
+                    &BodyGen::simd_lane_op<kExprI8x16ExtractLaneS, 16, kS128>,
+                    &BodyGen::simd_lane_op<kExprI8x16ExtractLaneU, 16, kS128>,
+                    &BodyGen::simd_lane_op<kExprI16x8ExtractLaneS, 8, kS128>,
+                    &BodyGen::simd_lane_op<kExprI16x8ExtractLaneU, 8, kS128>,
+                    &BodyGen::simd_lane_op<kExprI32x4ExtractLane, 4, kS128>);
+
+    auto constexpr wasmGC_alternatives =
+        CreateArray(&BodyGen::i31_get,                     //
+                                                           //
+                    &BodyGen::struct_get<kI32>,            //
+                    &BodyGen::array_get<kI32>,             //
+                    &BodyGen::array_len,                   //
+                                                           //
+                    &BodyGen::ref_is_null,                 //
+                    &BodyGen::ref_eq,                      //
+                    &BodyGen::ref_test<kExprRefTest>,      //
+                    &BodyGen::ref_test<kExprRefTestNull>,  //
+                                                           //
+                    &BodyGen::string_test,                 //
+                    &BodyGen::string_charcodeat,           //
+                    &BodyGen::string_codepointat,          //
+                    &BodyGen::string_length,               //
+                    &BodyGen::string_equals,               //
+                    &BodyGen::string_compare,              //
+                    &BodyGen::string_intocharcodearray,    //
+                    &BodyGen::string_intoutf8array,        //
+                    &BodyGen::string_measureutf8);         //
+
+    constexpr auto alternatives = AppendArrayIf<ShouldGenerateWasmGC(options)>(
+        AppendArrayIf<ShouldGenerateSIMD(options)>(mvp_alternatives,
+                                                   simd_alternatives),
+        wasmGC_alternatives);
+    GenerateOneOf(alternatives, data);
+  }
+
+  void GenerateI64(DataRange* data) {
+    GeneratorRecursionScope rec_scope(this);
+    if (recursion_limit_reached() || data->size() <= 1) {
+      builder_->EmitI64Const(data->getPseudoRandom<int64_t>());
+      return;
+    }
+
+    constexpr auto mvp_alternatives = CreateArray(
+        &BodyGen::i64_const<1>,  //
+        &BodyGen::i64_const<2>,  //
+        &BodyGen::i64_const<3>,  //
+        &BodyGen::i64_const<4>,  //
+        &BodyGen::i64_const<5>,  //
+        &BodyGen::i64_const<6>,  //
+        &BodyGen::i64_const<7>,  //
+        &BodyGen::i64_const<8>,  //
+
+        &BodyGen::sequence<kI64, kVoid>,         //
+        &BodyGen::sequence<kVoid, kI64>,         //
+        &BodyGen::sequence<kVoid, kI64, kVoid>,  //
+
+        &BodyGen::op<kExprI64Add, kI64, kI64>,
+        &BodyGen::op<kExprI64Sub, kI64, kI64>,
+        &BodyGen::op<kExprI64Mul, kI64, kI64>,
+
+        &BodyGen::op<kExprI64DivS, kI64, kI64>,
+        &BodyGen::op<kExprI64DivU, kI64, kI64>,
+        &BodyGen::op<kExprI64RemS, kI64, kI64>,
+        &BodyGen::op<kExprI64RemU, kI64, kI64>,
+
+        &BodyGen::op<kExprI64And, kI64, kI64>,
+        &BodyGen::op<kExprI64Ior, kI64, kI64>,
+        &BodyGen::op<kExprI64Xor, kI64, kI64>,
+        &BodyGen::op<kExprI64Shl, kI64, kI64>,
+        &BodyGen::op<kExprI64ShrU, kI64, kI64>,
+        &BodyGen::op<kExprI64ShrS, kI64, kI64>,
+        &BodyGen::op<kExprI64Ror, kI64, kI64>,
+        &BodyGen::op<kExprI64Rol, kI64, kI64>,
+
+        &BodyGen::op<kExprI64Clz, kI64>,     //
+        &BodyGen::op<kExprI64Ctz, kI64>,     //
+        &BodyGen::op<kExprI64Popcnt, kI64>,  //
+
+        &BodyGen::op_with_prefix<kExprI64SConvertSatF32, kF32>,
+        &BodyGen::op_with_prefix<kExprI64UConvertSatF32, kF32>,
+        &BodyGen::op_with_prefix<kExprI64SConvertSatF64, kF64>,
+        &BodyGen::op_with_prefix<kExprI64UConvertSatF64, kF64>,
+
+        &BodyGen::block<kI64>,           //
+        &BodyGen::loop<kI64>,            //
+        &BodyGen::finite_loop<kI64>,     //
+        &BodyGen::if_<kI64, kIfElse>,    //
+        &BodyGen::br_if<kI64>,           //
+        &BodyGen::br_on_null<kI64>,      //
+        &BodyGen::br_on_non_null<kI64>,  //
+        &BodyGen::br_table<kI64>,        //
+
+        &BodyGen::memop<kExprI64LoadMem>,        //
+        &BodyGen::memop<kExprI64LoadMem8S>,      //
+        &BodyGen::memop<kExprI64LoadMem8U>,      //
+        &BodyGen::memop<kExprI64LoadMem16S>,     //
+        &BodyGen::memop<kExprI64LoadMem16U>,     //
+        &BodyGen::memop<kExprI64LoadMem32S>,     //
+        &BodyGen::memop<kExprI64LoadMem32U>,     //
+        &BodyGen::memop<kExprI64AtomicLoad>,     //
+        &BodyGen::memop<kExprI64AtomicLoad8U>,   //
+        &BodyGen::memop<kExprI64AtomicLoad16U>,  //
+        &BodyGen::memop<kExprI64AtomicLoad32U>,  //
+
+        &BodyGen::atomic_op<kExprI64AtomicAdd, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicSub, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicAnd, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicOr, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicXor, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicExchange, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicCompareExchange, kI32, kI64, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicAdd8U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicSub8U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicAnd8U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicOr8U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicXor8U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicExchange8U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicCompareExchange8U, kI32, kI64, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicAdd16U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicSub16U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicAnd16U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicOr16U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicXor16U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicExchange16U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicCompareExchange16U, kI32, kI64, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicAdd32U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicSub32U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicAnd32U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicOr32U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicXor32U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicExchange32U, kI32, kI64>,
+        &BodyGen::atomic_op<kExprI64AtomicCompareExchange32U, kI32, kI64, kI64>,
+
+        &BodyGen::get_local<kI64>,                    //
+        &BodyGen::tee_local<kI64>,                    //
+        &BodyGen::get_global<kI64>,                   //
+        &BodyGen::op<kExprSelect, kI64, kI64, kI32>,  //
+        &BodyGen::select_with_type<kI64>,             //
+
+        &BodyGen::call<kI64>,           //
+        &BodyGen::call_indirect<kI64>,  //
+        &BodyGen::call_ref<kI64>,       //
+        &BodyGen::try_block<kI64>);     //
+
+    auto constexpr simd_alternatives =
+        CreateArray(&BodyGen::simd_lane_op<kExprI64x2ExtractLane, 2, kS128>);
+
+    auto constexpr wasmGC_alternatives =
+        CreateArray(&BodyGen::struct_get<kI64>,  //
+                    &BodyGen::array_get<kI64>);  //
+
+    constexpr auto alternatives = AppendArrayIf<ShouldGenerateWasmGC(options)>(
+        AppendArrayIf<ShouldGenerateSIMD(options)>(mvp_alternatives,
+                                                   simd_alternatives),
+        wasmGC_alternatives);
+    GenerateOneOf(alternatives, data);
+  }
+
+  void GenerateF32(DataRange* data) {
+    GeneratorRecursionScope rec_scope(this);
+    if (recursion_limit_reached() || data->size() <= sizeof(float)) {
+      builder_->EmitF32Const(data->getPseudoRandom<float>());
+      return;
+    }
+
+    constexpr auto mvp_alternatives = CreateArray(
+        &BodyGen::sequence<kF32, kVoid>, &BodyGen::sequence<kVoid, kF32>,
+        &BodyGen::sequence<kVoid, kF32, kVoid>,
+
+        &BodyGen::op<kExprF32Abs, kF32>,             //
+        &BodyGen::op<kExprF32Neg, kF32>,             //
+        &BodyGen::op<kExprF32Ceil, kF32>,            //
+        &BodyGen::op<kExprF32Floor, kF32>,           //
+        &BodyGen::op<kExprF32Trunc, kF32>,           //
+        &BodyGen::op<kExprF32NearestInt, kF32>,      //
+        &BodyGen::op<kExprF32Sqrt, kF32>,            //
+        &BodyGen::op<kExprF32Add, kF32, kF32>,       //
+        &BodyGen::op<kExprF32Sub, kF32, kF32>,       //
+        &BodyGen::op<kExprF32Mul, kF32, kF32>,       //
+        &BodyGen::op<kExprF32Div, kF32, kF32>,       //
+        &BodyGen::op<kExprF32Min, kF32, kF32>,       //
+        &BodyGen::op<kExprF32Max, kF32, kF32>,       //
+        &BodyGen::op<kExprF32CopySign, kF32, kF32>,  //
+
+        &BodyGen::op<kExprF32SConvertI32, kI32>,
+        &BodyGen::op<kExprF32UConvertI32, kI32>,
+        &BodyGen::op<kExprF32SConvertI64, kI64>,
+        &BodyGen::op<kExprF32UConvertI64, kI64>,
+        &BodyGen::op<kExprF32ConvertF64, kF64>,
+        &BodyGen::op<kExprF32ReinterpretI32, kI32>,
+
+        &BodyGen::block<kF32>,           //
+        &BodyGen::loop<kF32>,            //
+        &BodyGen::finite_loop<kF32>,     //
+        &BodyGen::if_<kF32, kIfElse>,    //
+        &BodyGen::br_if<kF32>,           //
+        &BodyGen::br_on_null<kF32>,      //
+        &BodyGen::br_on_non_null<kF32>,  //
+        &BodyGen::br_table<kF32>,        //
+
+        &BodyGen::memop<kExprF32LoadMem>,
+
+        &BodyGen::get_local<kF32>,                    //
+        &BodyGen::tee_local<kF32>,                    //
+        &BodyGen::get_global<kF32>,                   //
+        &BodyGen::op<kExprSelect, kF32, kF32, kI32>,  //
+        &BodyGen::select_with_type<kF32>,             //
+
+        &BodyGen::call<kF32>,           //
+        &BodyGen::call_indirect<kF32>,  //
+        &BodyGen::call_ref<kF32>,       //
+        &BodyGen::try_block<kF32>);     //
+
+    auto constexpr simd_alternatives =
+        CreateArray(&BodyGen::simd_lane_op<kExprF32x4ExtractLane, 4, kS128>);
+
+    auto constexpr wasmGC_alternatives =
+        CreateArray(&BodyGen::struct_get<kF32>,  //
+                    &BodyGen::array_get<kF32>);  //
+
+    constexpr auto alternatives = AppendArrayIf<ShouldGenerateWasmGC(options)>(
+        AppendArrayIf<ShouldGenerateSIMD(options)>(mvp_alternatives,
+                                                   simd_alternatives),
+        wasmGC_alternatives);
+    GenerateOneOf(alternatives, data);
+  }
+
+  void GenerateF64(DataRange* data) {
+    GeneratorRecursionScope rec_scope(this);
+    if (recursion_limit_reached() || data->size() <= sizeof(double)) {
+      builder_->EmitF64Const(data->getPseudoRandom<double>());
+      return;
+    }
+
+    constexpr auto mvp_alternatives = CreateArray(
+        &BodyGen::sequence<kF64, kVoid>, &BodyGen::sequence<kVoid, kF64>,
+        &BodyGen::sequence<kVoid, kF64, kVoid>,
+
+        &BodyGen::op<kExprF64Abs, kF64>,             //
+        &BodyGen::op<kExprF64Neg, kF64>,             //
+        &BodyGen::op<kExprF64Ceil, kF64>,            //
+        &BodyGen::op<kExprF64Floor, kF64>,           //
+        &BodyGen::op<kExprF64Trunc, kF64>,           //
+        &BodyGen::op<kExprF64NearestInt, kF64>,      //
+        &BodyGen::op<kExprF64Sqrt, kF64>,            //
+        &BodyGen::op<kExprF64Add, kF64, kF64>,       //
+        &BodyGen::op<kExprF64Sub, kF64, kF64>,       //
+        &BodyGen::op<kExprF64Mul, kF64, kF64>,       //
+        &BodyGen::op<kExprF64Div, kF64, kF64>,       //
+        &BodyGen::op<kExprF64Min, kF64, kF64>,       //
+        &BodyGen::op<kExprF64Max, kF64, kF64>,       //
+        &BodyGen::op<kExprF64CopySign, kF64, kF64>,  //
+
+        &BodyGen::op<kExprF64SConvertI32, kI32>,
+        &BodyGen::op<kExprF64UConvertI32, kI32>,
+        &BodyGen::op<kExprF64SConvertI64, kI64>,
+        &BodyGen::op<kExprF64UConvertI64, kI64>,
+        &BodyGen::op<kExprF64ConvertF32, kF32>,
+        &BodyGen::op<kExprF64ReinterpretI64, kI64>,
+
+        &BodyGen::block<kF64>,           //
+        &BodyGen::loop<kF64>,            //
+        &BodyGen::finite_loop<kF64>,     //
+        &BodyGen::if_<kF64, kIfElse>,    //
+        &BodyGen::br_if<kF64>,           //
+        &BodyGen::br_on_null<kF64>,      //
+        &BodyGen::br_on_non_null<kF64>,  //
+        &BodyGen::br_table<kF64>,        //
+
+        &BodyGen::memop<kExprF64LoadMem>,
+
+        &BodyGen::get_local<kF64>,                    //
+        &BodyGen::tee_local<kF64>,                    //
+        &BodyGen::get_global<kF64>,                   //
+        &BodyGen::op<kExprSelect, kF64, kF64, kI32>,  //
+        &BodyGen::select_with_type<kF64>,             //
+
+        &BodyGen::call<kF64>,           //
+        &BodyGen::call_indirect<kF64>,  //
+        &BodyGen::call_ref<kF64>,       //
+        &BodyGen::try_block<kF64>);     //
+
+    auto constexpr simd_alternatives =
+        CreateArray(&BodyGen::simd_lane_op<kExprF64x2ExtractLane, 2, kS128>);
+
+    auto constexpr wasmGC_alternatives =
+        CreateArray(&BodyGen::struct_get<kF64>,  //
+                    &BodyGen::array_get<kF64>);  //
+
+    constexpr auto alternatives = AppendArrayIf<ShouldGenerateWasmGC(options)>(
+        AppendArrayIf<ShouldGenerateSIMD(options)>(mvp_alternatives,
+                                                   simd_alternatives),
+        wasmGC_alternatives);
+    GenerateOneOf(alternatives, data);
+  }
+
+  void GenerateS128(DataRange* data) {
+    CHECK(ShouldGenerateSIMD(options));
+    GeneratorRecursionScope rec_scope(this);
+    has_simd_ = true;
+    if (recursion_limit_reached() || data->size() <= sizeof(int32_t)) {
+      // TODO(v8:8460): v128.const is not implemented yet, and we need a way to
+      // "bottom-out", so use a splat to generate this.
+      builder_->EmitI32Const(0);
+      builder_->EmitWithPrefix(kExprI8x16Splat);
+      return;
+    }
+
+    constexpr auto alternatives = CreateArray(
+        &BodyGen::simd_const,
+        &BodyGen::simd_lane_op<kExprI8x16ReplaceLane, 16, kS128, kI32>,
+        &BodyGen::simd_lane_op<kExprI16x8ReplaceLane, 8, kS128, kI32>,
+        &BodyGen::simd_lane_op<kExprI32x4ReplaceLane, 4, kS128, kI32>,
+        &BodyGen::simd_lane_op<kExprI64x2ReplaceLane, 2, kS128, kI64>,
+        &BodyGen::simd_lane_op<kExprF32x4ReplaceLane, 4, kS128, kF32>,
+        &BodyGen::simd_lane_op<kExprF64x2ReplaceLane, 2, kS128, kF64>,
+
+        &BodyGen::op_with_prefix<kExprI8x16Splat, kI32>,
+        &BodyGen::op_with_prefix<kExprI8x16Eq, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16Ne, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16LtS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16LtU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16GtS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16GtU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16LeS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16LeU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16GeS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16GeU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16Abs, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16Neg, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16Shl, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI8x16ShrS, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI8x16ShrU, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI8x16Add, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16AddSatS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16AddSatU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16Sub, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16SubSatS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16SubSatU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16MinS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16MinU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16MaxS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16MaxU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16RoundingAverageU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16Popcnt, kS128>,
+
+        &BodyGen::op_with_prefix<kExprI16x8Splat, kI32>,
+        &BodyGen::op_with_prefix<kExprI16x8Eq, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8Ne, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8LtS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8LtU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8GtS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8GtU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8LeS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8LeU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8GeS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8GeU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8Abs, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8Neg, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8Shl, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI16x8ShrS, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI16x8ShrU, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI16x8Add, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8AddSatS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8AddSatU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8Sub, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8SubSatS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8SubSatU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8Mul, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8MinS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8MinU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8MaxS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8MaxU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8RoundingAverageU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8ExtMulLowI8x16S, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8ExtMulLowI8x16U, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8ExtMulHighI8x16S, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8ExtMulHighI8x16U, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8Q15MulRSatS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8ExtAddPairwiseI8x16S, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8ExtAddPairwiseI8x16U, kS128>,
+
+        &BodyGen::op_with_prefix<kExprI32x4Splat, kI32>,
+        &BodyGen::op_with_prefix<kExprI32x4Eq, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4Ne, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4LtS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4LtU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4GtS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4GtU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4LeS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4LeU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4GeS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4GeU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4Abs, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4Neg, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4Shl, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI32x4ShrS, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI32x4ShrU, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI32x4Add, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4Sub, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4Mul, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4MinS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4MinU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4MaxS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4MaxU, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4DotI16x8S, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4ExtMulLowI16x8S, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4ExtMulLowI16x8U, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4ExtMulHighI16x8S, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4ExtMulHighI16x8U, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4ExtAddPairwiseI16x8S, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4ExtAddPairwiseI16x8U, kS128>,
+
+        &BodyGen::op_with_prefix<kExprI64x2Splat, kI64>,
+        &BodyGen::op_with_prefix<kExprI64x2Eq, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2Ne, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2LtS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2GtS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2LeS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2GeS, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2Abs, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2Neg, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2Shl, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI64x2ShrS, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI64x2ShrU, kS128, kI32>,
+        &BodyGen::op_with_prefix<kExprI64x2Add, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2Sub, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2Mul, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2ExtMulLowI32x4S, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2ExtMulLowI32x4U, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2ExtMulHighI32x4S, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2ExtMulHighI32x4U, kS128, kS128>,
+
+        &BodyGen::op_with_prefix<kExprF32x4Splat, kF32>,
+        &BodyGen::op_with_prefix<kExprF32x4Eq, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Ne, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Lt, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Gt, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Le, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Ge, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Abs, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Neg, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Sqrt, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Add, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Sub, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Mul, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Div, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Min, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Max, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Pmin, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Pmax, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Ceil, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Floor, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Trunc, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4NearestInt, kS128>,
+
+        &BodyGen::op_with_prefix<kExprF64x2Splat, kF64>,
+        &BodyGen::op_with_prefix<kExprF64x2Eq, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Ne, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Lt, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Gt, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Le, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Ge, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Abs, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Neg, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Sqrt, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Add, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Sub, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Mul, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Div, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Min, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Max, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Pmin, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Pmax, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Ceil, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Floor, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Trunc, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2NearestInt, kS128>,
+
+        &BodyGen::op_with_prefix<kExprF64x2PromoteLowF32x4, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2ConvertLowI32x4S, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2ConvertLowI32x4U, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4DemoteF64x2Zero, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4TruncSatF64x2SZero, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4TruncSatF64x2UZero, kS128>,
+
+        &BodyGen::op_with_prefix<kExprI64x2SConvertI32x4Low, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2SConvertI32x4High, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2UConvertI32x4Low, kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2UConvertI32x4High, kS128>,
+
+        &BodyGen::op_with_prefix<kExprI32x4SConvertF32x4, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4UConvertF32x4, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4SConvertI32x4, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4UConvertI32x4, kS128>,
+
+        &BodyGen::op_with_prefix<kExprI8x16SConvertI16x8, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16UConvertI16x8, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8SConvertI32x4, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8UConvertI32x4, kS128, kS128>,
+
+        &BodyGen::op_with_prefix<kExprI16x8SConvertI8x16Low, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8SConvertI8x16High, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8UConvertI8x16Low, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8UConvertI8x16High, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4SConvertI16x8Low, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4SConvertI16x8High, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4UConvertI16x8Low, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4UConvertI16x8High, kS128>,
+
+        &BodyGen::op_with_prefix<kExprS128Not, kS128>,
+        &BodyGen::op_with_prefix<kExprS128And, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprS128AndNot, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprS128Or, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprS128Xor, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprS128Select, kS128, kS128, kS128>,
+
+        &BodyGen::simd_shuffle,
+        &BodyGen::op_with_prefix<kExprI8x16Swizzle, kS128, kS128>,
+
+        &BodyGen::memop<kExprS128LoadMem>,                         //
+        &BodyGen::memop<kExprS128Load8x8S>,                        //
+        &BodyGen::memop<kExprS128Load8x8U>,                        //
+        &BodyGen::memop<kExprS128Load16x4S>,                       //
+        &BodyGen::memop<kExprS128Load16x4U>,                       //
+        &BodyGen::memop<kExprS128Load32x2S>,                       //
+        &BodyGen::memop<kExprS128Load32x2U>,                       //
+        &BodyGen::memop<kExprS128Load8Splat>,                      //
+        &BodyGen::memop<kExprS128Load16Splat>,                     //
+        &BodyGen::memop<kExprS128Load32Splat>,                     //
+        &BodyGen::memop<kExprS128Load64Splat>,                     //
+        &BodyGen::memop<kExprS128Load32Zero>,                      //
+        &BodyGen::memop<kExprS128Load64Zero>,                      //
+        &BodyGen::simd_lane_memop<kExprS128Load8Lane, 16, kS128>,  //
+        &BodyGen::simd_lane_memop<kExprS128Load16Lane, 8, kS128>,  //
+        &BodyGen::simd_lane_memop<kExprS128Load32Lane, 4, kS128>,  //
+        &BodyGen::simd_lane_memop<kExprS128Load64Lane, 2, kS128>,  //
+
+        &BodyGen::op_with_prefix<kExprI8x16RelaxedSwizzle, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI8x16RelaxedLaneSelect, kS128, kS128,
+                                 kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8RelaxedLaneSelect, kS128, kS128,
+                                 kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4RelaxedLaneSelect, kS128, kS128,
+                                 kS128>,
+        &BodyGen::op_with_prefix<kExprI64x2RelaxedLaneSelect, kS128, kS128,
+                                 kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Qfma, kS128, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4Qfms, kS128, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Qfma, kS128, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2Qfms, kS128, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4RelaxedMin, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF32x4RelaxedMax, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2RelaxedMin, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprF64x2RelaxedMax, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4RelaxedTruncF32x4S, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4RelaxedTruncF32x4U, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4RelaxedTruncF64x2SZero, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4RelaxedTruncF64x2UZero, kS128>,
+        &BodyGen::op_with_prefix<kExprI16x8DotI8x16I7x16S, kS128, kS128>,
+        &BodyGen::op_with_prefix<kExprI32x4DotI8x16I7x16AddS, kS128, kS128,
+                                 kS128>);
+
+    GenerateOneOf(alternatives, data);
+  }
+
+  void Generate(ValueType type, DataRange* data) {
+    switch (type.kind()) {
+      case kVoid:
+        return GenerateVoid(data);
+      case kI32:
+        return GenerateI32(data);
+      case kI64:
+        return GenerateI64(data);
+      case kF32:
+        return GenerateF32(data);
+      case kF64:
+        return GenerateF64(data);
+      case kS128:
+        return GenerateS128(data);
+      case kRefNull:
+        return GenerateRef(type.heap_type(), data, kNullable);
+      case kRef:
+        return GenerateRef(type.heap_type(), data, kNonNullable);
+      default:
+        UNREACHABLE();
+    }
+  }
+
+  template <ValueKind kind>
+  constexpr void Generate(DataRange* data) {
+    switch (kind) {
+      case kVoid:
+        return GenerateVoid(data);
+      case kI32:
+        return GenerateI32(data);
+      case kI64:
+        return GenerateI64(data);
+      case kF32:
+        return GenerateF32(data);
+      case kF64:
+        return GenerateF64(data);
+      case kS128:
+        return GenerateS128(data);
+      default:
+        // For kRefNull and kRef we need the HeapType which we can get from the
+        // ValueType.
+        UNREACHABLE();
+    }
+  }
 
   template <ValueKind T1, ValueKind T2, ValueKind... Ts>
   void Generate(DataRange* data) {
@@ -2077,16 +3017,345 @@ class WasmGenerator {
     Generate<T2, Ts...>(data);
   }
 
-  void GenerateRef(DataRange* data);
-
   void GenerateRef(HeapType type, DataRange* data,
-                   Nullability nullability = kNullable);
+                   Nullability nullability = kNullable) {
+    base::Optional<GeneratorRecursionScope> rec_scope;
+    if (nullability) {
+      rec_scope.emplace(this);
+    }
 
-  std::vector<ValueType> GenerateTypes(DataRange* data);
-  void Generate(base::Vector<const ValueType> types, DataRange* data);
-  void ConsumeAndGenerate(base::Vector<const ValueType> parameter_types,
+    if (recursion_limit_reached() || data->size() == 0) {
+      if (nullability == kNullable) {
+        ref_null(type, data);
+        return;
+      }
+      // It is ok not to return here because the non-nullable types are not
+      // recursive by construction, so the depth is limited already.
+    }
+
+    constexpr auto alternatives_indexed_type =
+        CreateArray(&BodyGen::new_object,       //
+                    &BodyGen::get_local_ref,    //
+                    &BodyGen::array_get_ref,    //
+                    &BodyGen::struct_get_ref,   //
+                    &BodyGen::ref_cast,         //
+                    &BodyGen::ref_as_non_null,  //
+                    &BodyGen::br_on_cast);      //
+
+    constexpr auto alternatives_func_any =
+        CreateArray(&BodyGen::table_get,           //
+                    &BodyGen::get_local_ref,       //
+                    &BodyGen::array_get_ref,       //
+                    &BodyGen::struct_get_ref,      //
+                    &BodyGen::ref_cast,            //
+                    &BodyGen::any_convert_extern,  //
+                    &BodyGen::ref_as_non_null,     //
+                    &BodyGen::br_on_cast);         //
+
+    constexpr auto alternatives_other =
+        CreateArray(&BodyGen::array_get_ref,    //
+                    &BodyGen::get_local_ref,    //
+                    &BodyGen::struct_get_ref,   //
+                    &BodyGen::ref_cast,         //
+                    &BodyGen::ref_as_non_null,  //
+                    &BodyGen::br_on_cast);      //
+
+    switch (type.representation()) {
+      // For abstract types, sometimes generate one of their subtypes.
+      case HeapType::kAny: {
+        // Weighted according to the types in the module:
+        // If there are D data types and F function types, the relative
+        // frequencies for dataref is D, for funcref F, and for i31ref and
+        // falling back to anyref 2.
+        const uint8_t num_data_types =
+            static_cast<uint8_t>(structs_.size() + arrays_.size());
+        const uint8_t emit_i31ref = 2;
+        const uint8_t fallback_to_anyref = 2;
+        uint8_t random = data->get<uint8_t>() %
+                         (num_data_types + emit_i31ref + fallback_to_anyref);
+        // We have to compute this first so in case GenerateOneOf fails
+        // we will continue to fall back on an alternative that is guaranteed
+        // to generate a value of the wanted type.
+        // In order to know which alternative to fall back to in case
+        // GenerateOneOf failed, the random variable is recomputed.
+        if (random >= num_data_types + emit_i31ref) {
+          if (GenerateOneOf(alternatives_func_any, type, data, nullability)) {
+            return;
+          }
+          random = data->get<uint8_t>() % (num_data_types + emit_i31ref);
+        }
+        if (random < structs_.size()) {
+          GenerateRef(HeapType(HeapType::kStruct), data, nullability);
+        } else if (random < num_data_types) {
+          GenerateRef(HeapType(HeapType::kArray), data, nullability);
+        } else {
+          GenerateRef(HeapType(HeapType::kI31), data, nullability);
+        }
+        return;
+      }
+      case HeapType::kArray: {
+        constexpr uint8_t fallback_to_dataref = 1;
+        uint8_t random =
+            data->get<uint8_t>() % (arrays_.size() + fallback_to_dataref);
+        // Try generating one of the alternatives and continue to the rest of
+        // the methods in case it fails.
+        if (random >= arrays_.size()) {
+          if (GenerateOneOf(alternatives_other, type, data, nullability))
+            return;
+          random = data->get<uint8_t>() % arrays_.size();
+        }
+        uint32_t index = arrays_[random];
+        DCHECK(builder_->builder()->IsArrayType(index));
+        GenerateRef(HeapType(index), data, nullability);
+        return;
+      }
+      case HeapType::kStruct: {
+        constexpr uint8_t fallback_to_dataref = 2;
+        uint8_t random =
+            data->get<uint8_t>() % (structs_.size() + fallback_to_dataref);
+        // Try generating one of the alternatives
+        // and continue to the rest of the methods in case it fails.
+        if (random >= structs_.size()) {
+          if (GenerateOneOf(alternatives_other, type, data, nullability)) {
+            return;
+          }
+          random = data->get<uint8_t>() % structs_.size();
+        }
+        uint32_t index = structs_[random];
+        DCHECK(builder_->builder()->IsStructType(index));
+        GenerateRef(HeapType(index), data, nullability);
+        return;
+      }
+      case HeapType::kEq: {
+        const uint8_t num_types = arrays_.size() + structs_.size();
+        const uint8_t emit_i31ref = 2;
+        constexpr uint8_t fallback_to_eqref = 1;
+        uint8_t random = data->get<uint8_t>() %
+                         (num_types + emit_i31ref + fallback_to_eqref);
+        // Try generating one of the alternatives
+        // and continue to the rest of the methods in case it fails.
+        if (random >= num_types + emit_i31ref) {
+          if (GenerateOneOf(alternatives_other, type, data, nullability)) {
+            return;
+          }
+          random = data->get<uint8_t>() % (num_types + emit_i31ref);
+        }
+        if (random < num_types) {
+          // Using `HeapType(random)` here relies on the assumption that struct
+          // and array types come before signatures.
+          DCHECK(builder_->builder()->IsArrayType(random) ||
+                 builder_->builder()->IsStructType(random));
+          GenerateRef(HeapType(random), data, nullability);
+        } else {
+          GenerateRef(HeapType(HeapType::kI31), data, nullability);
+        }
+        return;
+      }
+      case HeapType::kFunc: {
+        uint32_t random = data->get<uint8_t>() % (functions_.size() + 1);
+        /// Try generating one of the alternatives
+        // and continue to the rest of the methods in case it fails.
+        if (random >= functions_.size()) {
+          if (GenerateOneOf(alternatives_func_any, type, data, nullability)) {
+            return;
+          }
+          random = data->get<uint8_t>() % functions_.size();
+        }
+        uint32_t signature_index = functions_[random];
+        DCHECK(builder_->builder()->IsSignature(signature_index));
+        GenerateRef(HeapType(signature_index), data, nullability);
+        return;
+      }
+      case HeapType::kI31: {
+        // Try generating one of the alternatives
+        // and continue to the rest of the methods in case it fails.
+        if (data->get<bool>() &&
+            GenerateOneOf(alternatives_other, type, data, nullability)) {
+          return;
+        }
+        Generate(kWasmI32, data);
+        builder_->EmitWithPrefix(kExprRefI31);
+        return;
+      }
+      case HeapType::kExn: {
+        // TODO(manoskouk): Can we somehow come up with a nontrivial exnref?
+        ref_null(type, data);
+        if (nullability == kNonNullable) {
+          builder_->Emit(kExprRefAsNonNull);
+        }
+        return;
+      }
+      case HeapType::kExtern: {
+        uint8_t choice = data->get<uint8_t>();
+        if (choice < 25) {
+          // ~10% chance of extern.convert_any.
+          GenerateRef(HeapType(HeapType::kAny), data);
+          builder_->EmitWithPrefix(kExprExternConvertAny);
+          if (nullability == kNonNullable) {
+            builder_->Emit(kExprRefAsNonNull);
+          }
+          return;
+        }
+        // ~80% chance of string.
+        if (choice < 230 && ShouldGenerateWasmGC(options)) {
+          uint8_t subchoice = choice % 7;
+          switch (subchoice) {
+            case 0:
+              return string_cast(data);
+            case 1:
+              return string_fromcharcode(data);
+            case 2:
+              return string_fromcodepoint(data);
+            case 3:
+              return string_concat(data);
+            case 4:
+              return string_substring(data);
+            case 5:
+              return string_fromcharcodearray(data);
+            case 6:
+              return string_fromutf8array(data);
+          }
+        }
+        // ~10% chance of fallthrough.
+        [[fallthrough]];
+      }
+      case HeapType::kNoExtern:
+      case HeapType::kNoFunc:
+      case HeapType::kNone:
+      case HeapType::kNoExn:
+        ref_null(type, data);
+        if (nullability == kNonNullable) {
+          builder_->Emit(kExprRefAsNonNull);
+        }
+        return;
+      default:
+        // Indexed type (i.e. user-defined type).
+        DCHECK(type.is_index());
+        if (ShouldGenerateWasmGC(options) &&
+            type.ref_index() == string_imports_.array_i8 &&
+            data->get<uint8_t>() < 32) {
+          // 1/8th chance, fits the number of remaining alternatives (7) well.
+          return string_toutf8array(data);
+        }
+        GenerateOneOf(alternatives_indexed_type, type, data, nullability);
+        return;
+    }
+    UNREACHABLE();
+  }
+
+  void GenerateRef(DataRange* data) {
+    constexpr HeapType::Representation top_types[] = {
+        HeapType::kAny,
+        HeapType::kFunc,
+        HeapType::kExtern,
+    };
+    HeapType::Representation type =
+        top_types[data->get<uint8_t>() % arraysize(top_types)];
+    GenerateRef(HeapType(type), data);
+  }
+
+  std::vector<ValueType> GenerateTypes(DataRange* data) {
+    std::vector<ValueType> types;
+    int num_params = int{data->get<uint8_t>()} % (kMaxParameters + 1);
+    for (int i = 0; i < num_params; ++i) {
+      types.push_back(GetValueType<options>(
+          data, static_cast<uint32_t>(functions_.size() + structs_.size() +
+                                      arrays_.size())));
+    }
+    return types;
+  }
+
+  void Generate(base::Vector<const ValueType> types, DataRange* data) {
+    // Maybe emit a multi-value block with the expected return type. Use a
+    // non-default value to indicate block generation to avoid recursion when we
+    // reach the end of the data.
+    bool generate_block = data->get<uint8_t>() % 32 == 1;
+    if (generate_block) {
+      GeneratorRecursionScope rec_scope(this);
+      if (!recursion_limit_reached()) {
+        const auto param_types = GenerateTypes(data);
+        Generate(base::VectorOf(param_types), data);
+        any_block(base::VectorOf(param_types), types, data);
+        return;
+      }
+    }
+
+    if (types.size() == 0) {
+      Generate(kWasmVoid, data);
+      return;
+    }
+    if (types.size() == 1) {
+      Generate(types[0], data);
+      return;
+    }
+
+    // Split the types in two halves and recursively generate each half.
+    // Each half is non empty to ensure termination.
+    size_t split_index = data->get<uint8_t>() % (types.size() - 1) + 1;
+    base::Vector<const ValueType> lower_half = types.SubVector(0, split_index);
+    base::Vector<const ValueType> upper_half =
+        types.SubVector(split_index, types.size());
+    DataRange first_range = data->split();
+    Generate(lower_half, &first_range);
+    Generate(upper_half, data);
+  }
+
+  // Emit code to match an arbitrary signature.
+  // TODO(11954): Add the missing reference type conversion/upcasting.
+  void ConsumeAndGenerate(base::Vector<const ValueType> param_types,
                           base::Vector<const ValueType> return_types,
-                          DataRange* data);
+                          DataRange* data) {
+    // This numeric conversion logic consists of picking exactly one
+    // index in the return values and dropping all the values that come
+    // before that index. Then we convert the value from that index to the
+    // wanted type. If we don't find any value we generate it.
+    auto primitive = [](ValueType t) -> bool {
+      switch (t.kind()) {
+        case kI32:
+        case kI64:
+        case kF32:
+        case kF64:
+          return true;
+        default:
+          return false;
+      }
+    };
+
+    if (return_types.size() == 0 || param_types.size() == 0 ||
+        !primitive(return_types[0])) {
+      for (unsigned i = 0; i < param_types.size(); i++) {
+        builder_->Emit(kExprDrop);
+      }
+      Generate(return_types, data);
+      return;
+    }
+
+    int bottom_primitives = 0;
+
+    while (static_cast<int>(param_types.size()) > bottom_primitives &&
+           primitive(param_types[bottom_primitives])) {
+      bottom_primitives++;
+    }
+    int return_index =
+        bottom_primitives > 0 ? (data->get<uint8_t>() % bottom_primitives) : -1;
+    for (int i = static_cast<int>(param_types.size() - 1); i > return_index;
+         --i) {
+      builder_->Emit(kExprDrop);
+    }
+    for (int i = return_index; i > 0; --i) {
+      Convert(param_types[i], param_types[i - 1]);
+      builder_->EmitI32Const(0);
+      builder_->Emit(kExprSelect);
+    }
+    DCHECK(!return_types.empty());
+    if (return_index >= 0) {
+      Convert(param_types[0], return_types[0]);
+      Generate(return_types + 1, data);
+    } else {
+      Generate(return_types, data);
+    }
+  }
+
   bool HasSimd() { return has_simd_; }
 
   void InitializeNonDefaultableLocals(DataRange* data) {
@@ -2121,1177 +3390,374 @@ class WasmGenerator {
   }
 };
 
-template <>
-void WasmGenerator::block<kVoid>(DataRange* data) {
-  block({}, {}, data);
-}
-
-template <>
-void WasmGenerator::loop<kVoid>(DataRange* data) {
-  loop({}, {}, data);
-}
-
-template <>
-void WasmGenerator::finite_loop<kVoid>(DataRange* data) {
-  finite_loop({}, {}, data);
-}
-
-template <>
-void WasmGenerator::Generate<kVoid>(DataRange* data) {
-  GeneratorRecursionScope rec_scope(this);
-  if (recursion_limit_reached() || data->size() == 0) return;
-
-  constexpr GenerateFn alternatives[] = {
-      &WasmGenerator::sequence<kVoid, kVoid>,
-      &WasmGenerator::sequence<kVoid, kVoid, kVoid, kVoid>,
-      &WasmGenerator::sequence<kVoid, kVoid, kVoid, kVoid, kVoid, kVoid, kVoid,
-                               kVoid>,
-      &WasmGenerator::block<kVoid>,
-      &WasmGenerator::loop<kVoid>,
-      &WasmGenerator::finite_loop<kVoid>,
-      &WasmGenerator::if_<kVoid, kIf>,
-      &WasmGenerator::if_<kVoid, kIfElse>,
-      &WasmGenerator::br,
-      &WasmGenerator::br_if<kVoid>,
-      &WasmGenerator::br_on_null<kVoid>,
-      &WasmGenerator::br_on_non_null<kVoid>,
-      &WasmGenerator::br_table<kVoid>,
-      &WasmGenerator::return_op,
-
-      &WasmGenerator::memop<kExprI32StoreMem, kI32>,
-      &WasmGenerator::memop<kExprI32StoreMem8, kI32>,
-      &WasmGenerator::memop<kExprI32StoreMem16, kI32>,
-      &WasmGenerator::memop<kExprI64StoreMem, kI64>,
-      &WasmGenerator::memop<kExprI64StoreMem8, kI64>,
-      &WasmGenerator::memop<kExprI64StoreMem16, kI64>,
-      &WasmGenerator::memop<kExprI64StoreMem32, kI64>,
-      &WasmGenerator::memop<kExprF32StoreMem, kF32>,
-      &WasmGenerator::memop<kExprF64StoreMem, kF64>,
-      &WasmGenerator::memop<kExprI32AtomicStore, kI32>,
-      &WasmGenerator::memop<kExprI32AtomicStore8U, kI32>,
-      &WasmGenerator::memop<kExprI32AtomicStore16U, kI32>,
-      &WasmGenerator::memop<kExprI64AtomicStore, kI64>,
-      &WasmGenerator::memop<kExprI64AtomicStore8U, kI64>,
-      &WasmGenerator::memop<kExprI64AtomicStore16U, kI64>,
-      &WasmGenerator::memop<kExprI64AtomicStore32U, kI64>,
-      &WasmGenerator::memop<kExprS128StoreMem, kS128>,
-      &WasmGenerator::simd_lane_memop<kExprS128Store8Lane, 16, kS128>,
-      &WasmGenerator::simd_lane_memop<kExprS128Store16Lane, 8, kS128>,
-      &WasmGenerator::simd_lane_memop<kExprS128Store32Lane, 4, kS128>,
-      &WasmGenerator::simd_lane_memop<kExprS128Store64Lane, 2, kS128>,
-
-      &WasmGenerator::drop,
-
-      &WasmGenerator::call<kVoid>,
-      &WasmGenerator::call_indirect<kVoid>,
-      &WasmGenerator::call_ref<kVoid>,
-
-      &WasmGenerator::set_local,
-      &WasmGenerator::set_global,
-      &WasmGenerator::throw_or_rethrow,
-      &WasmGenerator::try_block<kVoid>,
-
-      &WasmGenerator::struct_set,
-      &WasmGenerator::array_set,
-      &WasmGenerator::array_copy,
-      &WasmGenerator::array_fill,
-      &WasmGenerator::array_init_data,
-      &WasmGenerator::array_init_elem,
-
-      &WasmGenerator::table_set,
-      &WasmGenerator::table_fill,
-      &WasmGenerator::table_copy};
-
-  GenerateOneOf(alternatives, data);
-}
-
-template <>
-void WasmGenerator::Generate<kI32>(DataRange* data) {
-  GeneratorRecursionScope rec_scope(this);
-  if (recursion_limit_reached() || data->size() <= 1) {
-    // Rather than evenly distributing values across the full 32-bit range,
-    // distribute them evenly over the possible bit lengths. In particular,
-    // for values used as indices into something else, smaller values are
-    // more likely to be useful.
-    uint8_t size = 1 + (data->getPseudoRandom<uint8_t>() & 31);
-    uint32_t mask = kMaxUInt32 >> (32 - size);
-    builder_->EmitI32Const(data->getPseudoRandom<uint32_t>() & mask);
-    return;
-  }
-
-  constexpr GenerateFn alternatives[] = {
-      &WasmGenerator::i32_const<1>,
-      &WasmGenerator::i32_const<2>,
-      &WasmGenerator::i32_const<3>,
-      &WasmGenerator::i32_const<4>,
-
-      &WasmGenerator::sequence<kI32, kVoid>,
-      &WasmGenerator::sequence<kVoid, kI32>,
-      &WasmGenerator::sequence<kVoid, kI32, kVoid>,
-
-      &WasmGenerator::op<kExprI32Eqz, kI32>,
-      &WasmGenerator::op<kExprI32Eq, kI32, kI32>,
-      &WasmGenerator::op<kExprI32Ne, kI32, kI32>,
-      &WasmGenerator::op<kExprI32LtS, kI32, kI32>,
-      &WasmGenerator::op<kExprI32LtU, kI32, kI32>,
-      &WasmGenerator::op<kExprI32GeS, kI32, kI32>,
-      &WasmGenerator::op<kExprI32GeU, kI32, kI32>,
-
-      &WasmGenerator::op<kExprI64Eqz, kI64>,
-      &WasmGenerator::op<kExprI64Eq, kI64, kI64>,
-      &WasmGenerator::op<kExprI64Ne, kI64, kI64>,
-      &WasmGenerator::op<kExprI64LtS, kI64, kI64>,
-      &WasmGenerator::op<kExprI64LtU, kI64, kI64>,
-      &WasmGenerator::op<kExprI64GeS, kI64, kI64>,
-      &WasmGenerator::op<kExprI64GeU, kI64, kI64>,
-
-      &WasmGenerator::op<kExprF32Eq, kF32, kF32>,
-      &WasmGenerator::op<kExprF32Ne, kF32, kF32>,
-      &WasmGenerator::op<kExprF32Lt, kF32, kF32>,
-      &WasmGenerator::op<kExprF32Ge, kF32, kF32>,
-
-      &WasmGenerator::op<kExprF64Eq, kF64, kF64>,
-      &WasmGenerator::op<kExprF64Ne, kF64, kF64>,
-      &WasmGenerator::op<kExprF64Lt, kF64, kF64>,
-      &WasmGenerator::op<kExprF64Ge, kF64, kF64>,
-
-      &WasmGenerator::op<kExprI32Add, kI32, kI32>,
-      &WasmGenerator::op<kExprI32Sub, kI32, kI32>,
-      &WasmGenerator::op<kExprI32Mul, kI32, kI32>,
-
-      &WasmGenerator::op<kExprI32DivS, kI32, kI32>,
-      &WasmGenerator::op<kExprI32DivU, kI32, kI32>,
-      &WasmGenerator::op<kExprI32RemS, kI32, kI32>,
-      &WasmGenerator::op<kExprI32RemU, kI32, kI32>,
-
-      &WasmGenerator::op<kExprI32And, kI32, kI32>,
-      &WasmGenerator::op<kExprI32Ior, kI32, kI32>,
-      &WasmGenerator::op<kExprI32Xor, kI32, kI32>,
-      &WasmGenerator::op<kExprI32Shl, kI32, kI32>,
-      &WasmGenerator::op<kExprI32ShrU, kI32, kI32>,
-      &WasmGenerator::op<kExprI32ShrS, kI32, kI32>,
-      &WasmGenerator::op<kExprI32Ror, kI32, kI32>,
-      &WasmGenerator::op<kExprI32Rol, kI32, kI32>,
-
-      &WasmGenerator::op<kExprI32Clz, kI32>,
-      &WasmGenerator::op<kExprI32Ctz, kI32>,
-      &WasmGenerator::op<kExprI32Popcnt, kI32>,
-
-      &WasmGenerator::op<kExprI32ConvertI64, kI64>,
-      &WasmGenerator::op<kExprI32SConvertF32, kF32>,
-      &WasmGenerator::op<kExprI32UConvertF32, kF32>,
-      &WasmGenerator::op<kExprI32SConvertF64, kF64>,
-      &WasmGenerator::op<kExprI32UConvertF64, kF64>,
-      &WasmGenerator::op<kExprI32ReinterpretF32, kF32>,
-
-      &WasmGenerator::op_with_prefix<kExprI32SConvertSatF32, kF32>,
-      &WasmGenerator::op_with_prefix<kExprI32UConvertSatF32, kF32>,
-      &WasmGenerator::op_with_prefix<kExprI32SConvertSatF64, kF64>,
-      &WasmGenerator::op_with_prefix<kExprI32UConvertSatF64, kF64>,
-
-      &WasmGenerator::block<kI32>,
-      &WasmGenerator::loop<kI32>,
-      &WasmGenerator::finite_loop<kI32>,
-      &WasmGenerator::if_<kI32, kIfElse>,
-      &WasmGenerator::br_if<kI32>,
-      &WasmGenerator::br_on_null<kI32>,
-      &WasmGenerator::br_on_non_null<kI32>,
-      &WasmGenerator::br_table<kI32>,
-
-      &WasmGenerator::memop<kExprI32LoadMem>,
-      &WasmGenerator::memop<kExprI32LoadMem8S>,
-      &WasmGenerator::memop<kExprI32LoadMem8U>,
-      &WasmGenerator::memop<kExprI32LoadMem16S>,
-      &WasmGenerator::memop<kExprI32LoadMem16U>,
-      &WasmGenerator::memop<kExprI32AtomicLoad>,
-      &WasmGenerator::memop<kExprI32AtomicLoad8U>,
-      &WasmGenerator::memop<kExprI32AtomicLoad16U>,
-
-      &WasmGenerator::atomic_op<kExprI32AtomicAdd, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicSub, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicAnd, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicOr, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicXor, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicExchange, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicCompareExchange, kI32, kI32,
-                                kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicAdd8U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicSub8U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicAnd8U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicOr8U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicXor8U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicExchange8U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicCompareExchange8U, kI32, kI32,
-                                kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicAdd16U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicSub16U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicAnd16U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicOr16U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicXor16U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicExchange16U, kI32, kI32>,
-      &WasmGenerator::atomic_op<kExprI32AtomicCompareExchange16U, kI32, kI32,
-                                kI32>,
-
-      &WasmGenerator::op_with_prefix<kExprV128AnyTrue, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16AllTrue, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16BitMask, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8AllTrue, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8BitMask, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4AllTrue, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4BitMask, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2AllTrue, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2BitMask, kS128>,
-      &WasmGenerator::simd_lane_op<kExprI8x16ExtractLaneS, 16, kS128>,
-      &WasmGenerator::simd_lane_op<kExprI8x16ExtractLaneU, 16, kS128>,
-      &WasmGenerator::simd_lane_op<kExprI16x8ExtractLaneS, 8, kS128>,
-      &WasmGenerator::simd_lane_op<kExprI16x8ExtractLaneU, 8, kS128>,
-      &WasmGenerator::simd_lane_op<kExprI32x4ExtractLane, 4, kS128>,
-
-      &WasmGenerator::current_memory,
-      &WasmGenerator::grow_memory,
-
-      &WasmGenerator::get_local<kI32>,
-      &WasmGenerator::tee_local<kI32>,
-      &WasmGenerator::get_global<kI32>,
-      &WasmGenerator::op<kExprSelect, kI32, kI32, kI32>,
-      &WasmGenerator::select_with_type<kI32>,
-
-      &WasmGenerator::call<kI32>,
-      &WasmGenerator::call_indirect<kI32>,
-      &WasmGenerator::call_ref<kI32>,
-      &WasmGenerator::try_block<kI32>,
-
-      &WasmGenerator::i31_get,
-
-      &WasmGenerator::struct_get<kI32>,
-      &WasmGenerator::array_get<kI32>,
-      &WasmGenerator::array_len,
-
-      &WasmGenerator::ref_is_null,
-      &WasmGenerator::ref_eq,
-      &WasmGenerator::ref_test<kExprRefTest>,
-      &WasmGenerator::ref_test<kExprRefTestNull>,
-
-      &WasmGenerator::string_test,
-      &WasmGenerator::string_charcodeat,
-      &WasmGenerator::string_codepointat,
-      &WasmGenerator::string_length,
-      &WasmGenerator::string_equals,
-      &WasmGenerator::string_compare,
-      &WasmGenerator::string_intocharcodearray,
-      &WasmGenerator::string_intoutf8array,
-      &WasmGenerator::string_measureutf8,
-
-      &WasmGenerator::table_size,
-      &WasmGenerator::table_grow};
-
-  GenerateOneOf(alternatives, data);
-}
-
-template <>
-void WasmGenerator::Generate<kI64>(DataRange* data) {
-  GeneratorRecursionScope rec_scope(this);
-  if (recursion_limit_reached() || data->size() <= 1) {
-    builder_->EmitI64Const(data->getPseudoRandom<int64_t>());
-    return;
-  }
-
-  constexpr GenerateFn alternatives[] = {
-      &WasmGenerator::i64_const<1>,
-      &WasmGenerator::i64_const<2>,
-      &WasmGenerator::i64_const<3>,
-      &WasmGenerator::i64_const<4>,
-      &WasmGenerator::i64_const<5>,
-      &WasmGenerator::i64_const<6>,
-      &WasmGenerator::i64_const<7>,
-      &WasmGenerator::i64_const<8>,
-
-      &WasmGenerator::sequence<kI64, kVoid>,
-      &WasmGenerator::sequence<kVoid, kI64>,
-      &WasmGenerator::sequence<kVoid, kI64, kVoid>,
-
-      &WasmGenerator::op<kExprI64Add, kI64, kI64>,
-      &WasmGenerator::op<kExprI64Sub, kI64, kI64>,
-      &WasmGenerator::op<kExprI64Mul, kI64, kI64>,
-
-      &WasmGenerator::op<kExprI64DivS, kI64, kI64>,
-      &WasmGenerator::op<kExprI64DivU, kI64, kI64>,
-      &WasmGenerator::op<kExprI64RemS, kI64, kI64>,
-      &WasmGenerator::op<kExprI64RemU, kI64, kI64>,
-
-      &WasmGenerator::op<kExprI64And, kI64, kI64>,
-      &WasmGenerator::op<kExprI64Ior, kI64, kI64>,
-      &WasmGenerator::op<kExprI64Xor, kI64, kI64>,
-      &WasmGenerator::op<kExprI64Shl, kI64, kI64>,
-      &WasmGenerator::op<kExprI64ShrU, kI64, kI64>,
-      &WasmGenerator::op<kExprI64ShrS, kI64, kI64>,
-      &WasmGenerator::op<kExprI64Ror, kI64, kI64>,
-      &WasmGenerator::op<kExprI64Rol, kI64, kI64>,
-
-      &WasmGenerator::op<kExprI64Clz, kI64>,
-      &WasmGenerator::op<kExprI64Ctz, kI64>,
-      &WasmGenerator::op<kExprI64Popcnt, kI64>,
-
-      &WasmGenerator::op_with_prefix<kExprI64SConvertSatF32, kF32>,
-      &WasmGenerator::op_with_prefix<kExprI64UConvertSatF32, kF32>,
-      &WasmGenerator::op_with_prefix<kExprI64SConvertSatF64, kF64>,
-      &WasmGenerator::op_with_prefix<kExprI64UConvertSatF64, kF64>,
-
-      &WasmGenerator::block<kI64>,
-      &WasmGenerator::loop<kI64>,
-      &WasmGenerator::finite_loop<kI64>,
-      &WasmGenerator::if_<kI64, kIfElse>,
-      &WasmGenerator::br_if<kI64>,
-      &WasmGenerator::br_on_null<kI64>,
-      &WasmGenerator::br_on_non_null<kI64>,
-      &WasmGenerator::br_table<kI64>,
-
-      &WasmGenerator::memop<kExprI64LoadMem>,
-      &WasmGenerator::memop<kExprI64LoadMem8S>,
-      &WasmGenerator::memop<kExprI64LoadMem8U>,
-      &WasmGenerator::memop<kExprI64LoadMem16S>,
-      &WasmGenerator::memop<kExprI64LoadMem16U>,
-      &WasmGenerator::memop<kExprI64LoadMem32S>,
-      &WasmGenerator::memop<kExprI64LoadMem32U>,
-      &WasmGenerator::memop<kExprI64AtomicLoad>,
-      &WasmGenerator::memop<kExprI64AtomicLoad8U>,
-      &WasmGenerator::memop<kExprI64AtomicLoad16U>,
-      &WasmGenerator::memop<kExprI64AtomicLoad32U>,
-
-      &WasmGenerator::atomic_op<kExprI64AtomicAdd, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicSub, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicAnd, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicOr, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicXor, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicExchange, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicCompareExchange, kI32, kI64,
-                                kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicAdd8U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicSub8U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicAnd8U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicOr8U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicXor8U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicExchange8U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicCompareExchange8U, kI32, kI64,
-                                kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicAdd16U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicSub16U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicAnd16U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicOr16U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicXor16U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicExchange16U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicCompareExchange16U, kI32, kI64,
-                                kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicAdd32U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicSub32U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicAnd32U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicOr32U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicXor32U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicExchange32U, kI32, kI64>,
-      &WasmGenerator::atomic_op<kExprI64AtomicCompareExchange32U, kI32, kI64,
-                                kI64>,
-
-      &WasmGenerator::simd_lane_op<kExprI64x2ExtractLane, 2, kS128>,
-
-      &WasmGenerator::get_local<kI64>,
-      &WasmGenerator::tee_local<kI64>,
-      &WasmGenerator::get_global<kI64>,
-      &WasmGenerator::op<kExprSelect, kI64, kI64, kI32>,
-      &WasmGenerator::select_with_type<kI64>,
-
-      &WasmGenerator::call<kI64>,
-      &WasmGenerator::call_indirect<kI64>,
-      &WasmGenerator::call_ref<kI64>,
-      &WasmGenerator::try_block<kI64>,
-
-      &WasmGenerator::struct_get<kI64>,
-      &WasmGenerator::array_get<kI64>};
-
-  GenerateOneOf(alternatives, data);
-}
-
-template <>
-void WasmGenerator::Generate<kF32>(DataRange* data) {
-  GeneratorRecursionScope rec_scope(this);
-  if (recursion_limit_reached() || data->size() <= sizeof(float)) {
-    builder_->EmitF32Const(data->getPseudoRandom<float>());
-    return;
-  }
-
-  constexpr GenerateFn alternatives[] = {
-      &WasmGenerator::sequence<kF32, kVoid>,
-      &WasmGenerator::sequence<kVoid, kF32>,
-      &WasmGenerator::sequence<kVoid, kF32, kVoid>,
-
-      &WasmGenerator::op<kExprF32Abs, kF32>,
-      &WasmGenerator::op<kExprF32Neg, kF32>,
-      &WasmGenerator::op<kExprF32Ceil, kF32>,
-      &WasmGenerator::op<kExprF32Floor, kF32>,
-      &WasmGenerator::op<kExprF32Trunc, kF32>,
-      &WasmGenerator::op<kExprF32NearestInt, kF32>,
-      &WasmGenerator::op<kExprF32Sqrt, kF32>,
-      &WasmGenerator::op<kExprF32Add, kF32, kF32>,
-      &WasmGenerator::op<kExprF32Sub, kF32, kF32>,
-      &WasmGenerator::op<kExprF32Mul, kF32, kF32>,
-      &WasmGenerator::op<kExprF32Div, kF32, kF32>,
-      &WasmGenerator::op<kExprF32Min, kF32, kF32>,
-      &WasmGenerator::op<kExprF32Max, kF32, kF32>,
-      &WasmGenerator::op<kExprF32CopySign, kF32, kF32>,
-
-      &WasmGenerator::op<kExprF32SConvertI32, kI32>,
-      &WasmGenerator::op<kExprF32UConvertI32, kI32>,
-      &WasmGenerator::op<kExprF32SConvertI64, kI64>,
-      &WasmGenerator::op<kExprF32UConvertI64, kI64>,
-      &WasmGenerator::op<kExprF32ConvertF64, kF64>,
-      &WasmGenerator::op<kExprF32ReinterpretI32, kI32>,
-
-      &WasmGenerator::block<kF32>,
-      &WasmGenerator::loop<kF32>,
-      &WasmGenerator::finite_loop<kF32>,
-      &WasmGenerator::if_<kF32, kIfElse>,
-      &WasmGenerator::br_if<kF32>,
-      &WasmGenerator::br_on_null<kF32>,
-      &WasmGenerator::br_on_non_null<kF32>,
-      &WasmGenerator::br_table<kF32>,
-
-      &WasmGenerator::memop<kExprF32LoadMem>,
-
-      &WasmGenerator::simd_lane_op<kExprF32x4ExtractLane, 4, kS128>,
-
-      &WasmGenerator::get_local<kF32>,
-      &WasmGenerator::tee_local<kF32>,
-      &WasmGenerator::get_global<kF32>,
-      &WasmGenerator::op<kExprSelect, kF32, kF32, kI32>,
-      &WasmGenerator::select_with_type<kF32>,
-
-      &WasmGenerator::call<kF32>,
-      &WasmGenerator::call_indirect<kF32>,
-      &WasmGenerator::call_ref<kF32>,
-      &WasmGenerator::try_block<kF32>,
-
-      &WasmGenerator::struct_get<kF32>,
-      &WasmGenerator::array_get<kF32>};
-
-  GenerateOneOf(alternatives, data);
-}
-
-template <>
-void WasmGenerator::Generate<kF64>(DataRange* data) {
-  GeneratorRecursionScope rec_scope(this);
-  if (recursion_limit_reached() || data->size() <= sizeof(double)) {
-    builder_->EmitF64Const(data->getPseudoRandom<double>());
-    return;
-  }
-
-  constexpr GenerateFn alternatives[] = {
-      &WasmGenerator::sequence<kF64, kVoid>,
-      &WasmGenerator::sequence<kVoid, kF64>,
-      &WasmGenerator::sequence<kVoid, kF64, kVoid>,
-
-      &WasmGenerator::op<kExprF64Abs, kF64>,
-      &WasmGenerator::op<kExprF64Neg, kF64>,
-      &WasmGenerator::op<kExprF64Ceil, kF64>,
-      &WasmGenerator::op<kExprF64Floor, kF64>,
-      &WasmGenerator::op<kExprF64Trunc, kF64>,
-      &WasmGenerator::op<kExprF64NearestInt, kF64>,
-      &WasmGenerator::op<kExprF64Sqrt, kF64>,
-      &WasmGenerator::op<kExprF64Add, kF64, kF64>,
-      &WasmGenerator::op<kExprF64Sub, kF64, kF64>,
-      &WasmGenerator::op<kExprF64Mul, kF64, kF64>,
-      &WasmGenerator::op<kExprF64Div, kF64, kF64>,
-      &WasmGenerator::op<kExprF64Min, kF64, kF64>,
-      &WasmGenerator::op<kExprF64Max, kF64, kF64>,
-      &WasmGenerator::op<kExprF64CopySign, kF64, kF64>,
-
-      &WasmGenerator::op<kExprF64SConvertI32, kI32>,
-      &WasmGenerator::op<kExprF64UConvertI32, kI32>,
-      &WasmGenerator::op<kExprF64SConvertI64, kI64>,
-      &WasmGenerator::op<kExprF64UConvertI64, kI64>,
-      &WasmGenerator::op<kExprF64ConvertF32, kF32>,
-      &WasmGenerator::op<kExprF64ReinterpretI64, kI64>,
-
-      &WasmGenerator::block<kF64>,
-      &WasmGenerator::loop<kF64>,
-      &WasmGenerator::finite_loop<kF64>,
-      &WasmGenerator::if_<kF64, kIfElse>,
-      &WasmGenerator::br_if<kF64>,
-      &WasmGenerator::br_on_null<kF64>,
-      &WasmGenerator::br_on_non_null<kF64>,
-      &WasmGenerator::br_table<kF64>,
-
-      &WasmGenerator::memop<kExprF64LoadMem>,
-
-      &WasmGenerator::simd_lane_op<kExprF64x2ExtractLane, 2, kS128>,
-
-      &WasmGenerator::get_local<kF64>,
-      &WasmGenerator::tee_local<kF64>,
-      &WasmGenerator::get_global<kF64>,
-      &WasmGenerator::op<kExprSelect, kF64, kF64, kI32>,
-      &WasmGenerator::select_with_type<kF64>,
-
-      &WasmGenerator::call<kF64>,
-      &WasmGenerator::call_indirect<kF64>,
-      &WasmGenerator::call_ref<kF64>,
-      &WasmGenerator::try_block<kF64>,
-
-      &WasmGenerator::struct_get<kF64>,
-      &WasmGenerator::array_get<kF64>};
-
-  GenerateOneOf(alternatives, data);
-}
-
-template <>
-void WasmGenerator::Generate<kS128>(DataRange* data) {
-  GeneratorRecursionScope rec_scope(this);
-  has_simd_ = true;
-  if (recursion_limit_reached() || data->size() <= sizeof(int32_t)) {
-    // TODO(v8:8460): v128.const is not implemented yet, and we need a way to
-    // "bottom-out", so use a splat to generate this.
-    builder_->EmitI32Const(0);
-    builder_->EmitWithPrefix(kExprI8x16Splat);
-    return;
-  }
-
-  constexpr GenerateFn alternatives[] = {
-      &WasmGenerator::simd_const,
-      &WasmGenerator::simd_lane_op<kExprI8x16ReplaceLane, 16, kS128, kI32>,
-      &WasmGenerator::simd_lane_op<kExprI16x8ReplaceLane, 8, kS128, kI32>,
-      &WasmGenerator::simd_lane_op<kExprI32x4ReplaceLane, 4, kS128, kI32>,
-      &WasmGenerator::simd_lane_op<kExprI64x2ReplaceLane, 2, kS128, kI64>,
-      &WasmGenerator::simd_lane_op<kExprF32x4ReplaceLane, 4, kS128, kF32>,
-      &WasmGenerator::simd_lane_op<kExprF64x2ReplaceLane, 2, kS128, kF64>,
-
-      &WasmGenerator::op_with_prefix<kExprI8x16Splat, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI8x16Eq, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16Ne, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16LtS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16LtU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16GtS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16GtU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16LeS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16LeU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16GeS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16GeU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16Abs, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16Neg, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16Shl, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI8x16ShrS, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI8x16ShrU, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI8x16Add, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16AddSatS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16AddSatU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16Sub, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16SubSatS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16SubSatU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16MinS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16MinU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16MaxS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16MaxU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16RoundingAverageU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16Popcnt, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprI16x8Splat, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI16x8Eq, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8Ne, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8LtS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8LtU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8GtS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8GtU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8LeS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8LeU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8GeS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8GeU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8Abs, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8Neg, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8Shl, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI16x8ShrS, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI16x8ShrU, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI16x8Add, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8AddSatS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8AddSatU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8Sub, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8SubSatS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8SubSatU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8Mul, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8MinS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8MinU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8MaxS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8MaxU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8RoundingAverageU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8ExtMulLowI8x16S, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8ExtMulLowI8x16U, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8ExtMulHighI8x16S, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8ExtMulHighI8x16U, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8Q15MulRSatS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8ExtAddPairwiseI8x16S, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8ExtAddPairwiseI8x16U, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprI32x4Splat, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI32x4Eq, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4Ne, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4LtS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4LtU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4GtS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4GtU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4LeS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4LeU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4GeS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4GeU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4Abs, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4Neg, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4Shl, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI32x4ShrS, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI32x4ShrU, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI32x4Add, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4Sub, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4Mul, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4MinS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4MinU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4MaxS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4MaxU, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4DotI16x8S, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4ExtMulLowI16x8S, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4ExtMulLowI16x8U, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4ExtMulHighI16x8S, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4ExtMulHighI16x8U, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4ExtAddPairwiseI16x8S, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4ExtAddPairwiseI16x8U, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprI64x2Splat, kI64>,
-      &WasmGenerator::op_with_prefix<kExprI64x2Eq, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2Ne, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2LtS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2GtS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2LeS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2GeS, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2Abs, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2Neg, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2Shl, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI64x2ShrS, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI64x2ShrU, kS128, kI32>,
-      &WasmGenerator::op_with_prefix<kExprI64x2Add, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2Sub, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2Mul, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2ExtMulLowI32x4S, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2ExtMulLowI32x4U, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2ExtMulHighI32x4S, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2ExtMulHighI32x4U, kS128, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprF32x4Splat, kF32>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Eq, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Ne, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Lt, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Gt, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Le, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Ge, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Abs, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Neg, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Sqrt, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Add, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Sub, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Mul, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Div, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Min, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Max, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Pmin, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Pmax, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Ceil, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Floor, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Trunc, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4NearestInt, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprF64x2Splat, kF64>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Eq, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Ne, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Lt, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Gt, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Le, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Ge, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Abs, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Neg, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Sqrt, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Add, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Sub, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Mul, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Div, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Min, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Max, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Pmin, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Pmax, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Ceil, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Floor, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Trunc, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2NearestInt, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprF64x2PromoteLowF32x4, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2ConvertLowI32x4S, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2ConvertLowI32x4U, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4DemoteF64x2Zero, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4TruncSatF64x2SZero, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4TruncSatF64x2UZero, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprI64x2SConvertI32x4Low, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2SConvertI32x4High, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2UConvertI32x4Low, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2UConvertI32x4High, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprI32x4SConvertF32x4, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4UConvertF32x4, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4SConvertI32x4, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4UConvertI32x4, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprI8x16SConvertI16x8, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16UConvertI16x8, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8SConvertI32x4, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8UConvertI32x4, kS128, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprI16x8SConvertI8x16Low, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8SConvertI8x16High, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8UConvertI8x16Low, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8UConvertI8x16High, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4SConvertI16x8Low, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4SConvertI16x8High, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4UConvertI16x8Low, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4UConvertI16x8High, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprS128Not, kS128>,
-      &WasmGenerator::op_with_prefix<kExprS128And, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprS128AndNot, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprS128Or, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprS128Xor, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprS128Select, kS128, kS128, kS128>,
-
-      &WasmGenerator::simd_shuffle,
-      &WasmGenerator::op_with_prefix<kExprI8x16Swizzle, kS128, kS128>,
-
-      &WasmGenerator::memop<kExprS128LoadMem>,
-      &WasmGenerator::memop<kExprS128Load8x8S>,
-      &WasmGenerator::memop<kExprS128Load8x8U>,
-      &WasmGenerator::memop<kExprS128Load16x4S>,
-      &WasmGenerator::memop<kExprS128Load16x4U>,
-      &WasmGenerator::memop<kExprS128Load32x2S>,
-      &WasmGenerator::memop<kExprS128Load32x2U>,
-      &WasmGenerator::memop<kExprS128Load8Splat>,
-      &WasmGenerator::memop<kExprS128Load16Splat>,
-      &WasmGenerator::memop<kExprS128Load32Splat>,
-      &WasmGenerator::memop<kExprS128Load64Splat>,
-      &WasmGenerator::memop<kExprS128Load32Zero>,
-      &WasmGenerator::memop<kExprS128Load64Zero>,
-      &WasmGenerator::simd_lane_memop<kExprS128Load8Lane, 16, kS128>,
-      &WasmGenerator::simd_lane_memop<kExprS128Load16Lane, 8, kS128>,
-      &WasmGenerator::simd_lane_memop<kExprS128Load32Lane, 4, kS128>,
-      &WasmGenerator::simd_lane_memop<kExprS128Load64Lane, 2, kS128>,
-
-      &WasmGenerator::op_with_prefix<kExprI8x16RelaxedSwizzle, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI8x16RelaxedLaneSelect, kS128, kS128,
-                                     kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8RelaxedLaneSelect, kS128, kS128,
-                                     kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedLaneSelect, kS128, kS128,
-                                     kS128>,
-      &WasmGenerator::op_with_prefix<kExprI64x2RelaxedLaneSelect, kS128, kS128,
-                                     kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Qfma, kS128, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4Qfms, kS128, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Qfma, kS128, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2Qfms, kS128, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4RelaxedMin, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF32x4RelaxedMax, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2RelaxedMin, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprF64x2RelaxedMax, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedTruncF32x4S, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedTruncF32x4U, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedTruncF64x2SZero, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedTruncF64x2UZero, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI16x8DotI8x16I7x16S, kS128, kS128>,
-      &WasmGenerator::op_with_prefix<kExprI32x4DotI8x16I7x16AddS, kS128, kS128,
-                                     kS128>,
-  };
-
-  GenerateOneOf(alternatives, data);
-}
-
-void WasmGenerator::grow_memory(DataRange* data) {
-  Generate<kI32>(data);
-  builder_->EmitWithU8(kExprMemoryGrow, 0);
-}
-
-void WasmGenerator::Generate(ValueType type, DataRange* data) {
-  switch (type.kind()) {
-    case kVoid:
-      return Generate<kVoid>(data);
-    case kI32:
-      return Generate<kI32>(data);
-    case kI64:
-      return Generate<kI64>(data);
-    case kF32:
-      return Generate<kF32>(data);
-    case kF64:
-      return Generate<kF64>(data);
-    case kS128:
-      return Generate<kS128>(data);
-    case kRefNull:
-      return GenerateRef(type.heap_type(), data, kNullable);
-    case kRef:
-      return GenerateRef(type.heap_type(), data, kNonNullable);
-    default:
-      UNREACHABLE();
-  }
-}
-
-void WasmGenerator::GenerateRef(DataRange* data) {
-  constexpr HeapType::Representation top_types[] = {
-      HeapType::kAny,
-      HeapType::kFunc,
-      HeapType::kExtern,
-  };
-  HeapType::Representation type =
-      top_types[data->get<uint8_t>() % arraysize(top_types)];
-  GenerateRef(HeapType(type), data);
-}
-
-void WasmGenerator::GenerateRef(HeapType type, DataRange* data,
-                                Nullability nullability) {
-  base::Optional<GeneratorRecursionScope> rec_scope;
-  if (nullability) {
-    rec_scope.emplace(this);
-  }
-
-  if (recursion_limit_reached() || data->size() == 0) {
-    if (nullability == kNullable) {
-      ref_null(type, data);
-      return;
-    }
-    // It is ok not to return here because the non-nullable types are not
-    // recursive by construction, so the depth is limited already.
-  }
-
-  constexpr GenerateFnWithHeap alternatives_indexed_type[] = {
-      &WasmGenerator::new_object,    &WasmGenerator::get_local_ref,
-      &WasmGenerator::array_get_ref, &WasmGenerator::struct_get_ref,
-      &WasmGenerator::ref_cast,      &WasmGenerator::ref_as_non_null,
-      &WasmGenerator::br_on_cast};
-
-  constexpr GenerateFnWithHeap alternatives_func_any[] = {
-      &WasmGenerator::table_get,       &WasmGenerator::get_local_ref,
-      &WasmGenerator::array_get_ref,   &WasmGenerator::struct_get_ref,
-      &WasmGenerator::ref_cast,        &WasmGenerator::any_convert_extern,
-      &WasmGenerator::ref_as_non_null, &WasmGenerator::br_on_cast};
-
-  constexpr GenerateFnWithHeap alternatives_other[] = {
-      &WasmGenerator::array_get_ref,   &WasmGenerator::get_local_ref,
-      &WasmGenerator::struct_get_ref,  &WasmGenerator::ref_cast,
-      &WasmGenerator::ref_as_non_null, &WasmGenerator::br_on_cast};
-
-  switch (type.representation()) {
-    // For abstract types, sometimes generate one of their subtypes.
-    case HeapType::kAny: {
-      // Weighted according to the types in the module:
-      // If there are D data types and F function types, the relative
-      // frequencies for dataref is D, for funcref F, and for i31ref and falling
-      // back to anyref 2.
-      const uint8_t num_data_types =
-          static_cast<uint8_t>(structs_.size() + arrays_.size());
-      const uint8_t emit_i31ref = 2;
-      const uint8_t fallback_to_anyref = 2;
-      uint8_t random = data->get<uint8_t>() %
-                       (num_data_types + emit_i31ref + fallback_to_anyref);
-      // We have to compute this first so in case GenerateOneOf fails
-      // we will continue to fall back on an alternative that is guaranteed
-      // to generate a value of the wanted type.
-      // In order to know which alternative to fall back to in case
-      // GenerateOneOf failed, the random variable is recomputed.
-      if (random >= num_data_types + emit_i31ref) {
-        if (GenerateOneOf(alternatives_func_any, type, data, nullability)) {
-          return;
-        }
-        random = data->get<uint8_t>() % (num_data_types + emit_i31ref);
-      }
-      if (random < structs_.size()) {
-        GenerateRef(HeapType(HeapType::kStruct), data, nullability);
-      } else if (random < num_data_types) {
-        GenerateRef(HeapType(HeapType::kArray), data, nullability);
-      } else {
-        GenerateRef(HeapType(HeapType::kI31), data, nullability);
-      }
-      return;
-    }
-    case HeapType::kArray: {
-      constexpr uint8_t fallback_to_dataref = 1;
-      uint8_t random =
-          data->get<uint8_t>() % (arrays_.size() + fallback_to_dataref);
-      // Try generating one of the alternatives and continue to the rest of the
-      // methods in case it fails.
-      if (random >= arrays_.size()) {
-        if (GenerateOneOf(alternatives_other, type, data, nullability)) return;
-        random = data->get<uint8_t>() % arrays_.size();
-      }
-      uint32_t index = arrays_[random];
-      DCHECK(builder_->builder()->IsArrayType(index));
-      GenerateRef(HeapType(index), data, nullability);
-      return;
-    }
-    case HeapType::kStruct: {
-      constexpr uint8_t fallback_to_dataref = 2;
-      uint8_t random =
-          data->get<uint8_t>() % (structs_.size() + fallback_to_dataref);
-      // Try generating one of the alternatives
-      // and continue to the rest of the methods in case it fails.
-      if (random >= structs_.size()) {
-        if (GenerateOneOf(alternatives_other, type, data, nullability)) {
-          return;
-        }
-        random = data->get<uint8_t>() % structs_.size();
-      }
-      uint32_t index = structs_[random];
-      DCHECK(builder_->builder()->IsStructType(index));
-      GenerateRef(HeapType(index), data, nullability);
-      return;
-    }
-    case HeapType::kEq: {
-      const uint8_t num_types = arrays_.size() + structs_.size();
-      const uint8_t emit_i31ref = 2;
-      constexpr uint8_t fallback_to_eqref = 1;
-      uint8_t random =
-          data->get<uint8_t>() % (num_types + emit_i31ref + fallback_to_eqref);
-      // Try generating one of the alternatives
-      // and continue to the rest of the methods in case it fails.
-      if (random >= num_types + emit_i31ref) {
-        if (GenerateOneOf(alternatives_other, type, data, nullability)) {
-          return;
-        }
-        random = data->get<uint8_t>() % (num_types + emit_i31ref);
-      }
-      if (random < num_types) {
-        // Using `HeapType(random)` here relies on the assumption that struct
-        // and array types come before signatures.
-        DCHECK(builder_->builder()->IsArrayType(random) ||
-               builder_->builder()->IsStructType(random));
-        GenerateRef(HeapType(random), data, nullability);
-      } else {
-        GenerateRef(HeapType(HeapType::kI31), data, nullability);
-      }
-      return;
-    }
-    case HeapType::kFunc: {
-      uint32_t random = data->get<uint8_t>() % (functions_.size() + 1);
-      /// Try generating one of the alternatives
-      // and continue to the rest of the methods in case it fails.
-      if (random >= functions_.size()) {
-        if (GenerateOneOf(alternatives_func_any, type, data, nullability)) {
-          return;
-        }
-        random = data->get<uint8_t>() % functions_.size();
-      }
-      uint32_t signature_index = functions_[random];
-      DCHECK(builder_->builder()->IsSignature(signature_index));
-      GenerateRef(HeapType(signature_index), data, nullability);
-      return;
-    }
-    case HeapType::kI31: {
-      // Try generating one of the alternatives
-      // and continue to the rest of the methods in case it fails.
-      if (data->get<bool>() &&
-          GenerateOneOf(alternatives_other, type, data, nullability)) {
-        return;
-      }
-      Generate(kWasmI32, data);
-      builder_->EmitWithPrefix(kExprRefI31);
-      return;
-    }
-    case HeapType::kExn: {
-      // TODO(manoskouk): Can we somehow come up with a nontrivial exnref?
-      ref_null(type, data);
-      if (nullability == kNonNullable) {
-        builder_->Emit(kExprRefAsNonNull);
-      }
-      return;
-    }
-    case HeapType::kExtern: {
-      uint8_t choice = data->get<uint8_t>();
-      if (choice < 25) {
-        // ~10% chance of extern.convert_any.
-        GenerateRef(HeapType(HeapType::kAny), data);
-        builder_->EmitWithPrefix(kExprExternConvertAny);
-        if (nullability == kNonNullable) {
-          builder_->Emit(kExprRefAsNonNull);
-        }
-        return;
-      }
-      // ~80% chance of string.
-      if (choice < 230) {
-        uint8_t subchoice = choice % 7;
-        switch (subchoice) {
-          case 0:
-            return string_cast(data);
-          case 1:
-            return string_fromcharcode(data);
-          case 2:
-            return string_fromcodepoint(data);
-          case 3:
-            return string_concat(data);
-          case 4:
-            return string_substring(data);
-          case 5:
-            return string_fromcharcodearray(data);
-          case 6:
-            return string_fromutf8array(data);
-        }
-      }
-      // ~10% chance of fallthrough.
-      V8_FALLTHROUGH;
-    }
-    case HeapType::kNoExtern:
-    case HeapType::kNoFunc:
-    case HeapType::kNone:
-    case HeapType::kNoExn:
-      ref_null(type, data);
-      if (nullability == kNonNullable) {
-        builder_->Emit(kExprRefAsNonNull);
-      }
-      return;
-    default:
-      // Indexed type.
-      DCHECK(type.is_index());
-      if (type.ref_index() == string_imports_.array_i8 &&
-          data->get<uint8_t>() < 32) {
-        // 1/8th chance, fits the number of remaining alternatives (7) well.
-        return string_toutf8array(data);
-      }
-      GenerateOneOf(alternatives_indexed_type, type, data, nullability);
-      return;
-  }
-  UNREACHABLE();
-}
-
-std::vector<ValueType> WasmGenerator::GenerateTypes(DataRange* data) {
-  std::vector<ValueType> types;
-  int num_params = int{data->get<uint8_t>()} % (kMaxParameters + 1);
-  for (int i = 0; i < num_params; ++i) {
-    types.push_back(GetValueType(
-        data, static_cast<uint32_t>(functions_.size() + structs_.size() +
-                                    arrays_.size())));
-  }
-  return types;
-}
-
-void WasmGenerator::Generate(base::Vector<const ValueType> types,
-                             DataRange* data) {
-  // Maybe emit a multi-value block with the expected return type. Use a
-  // non-default value to indicate block generation to avoid recursion when we
-  // reach the end of the data.
-  bool generate_block = data->get<uint8_t>() % 32 == 1;
-  if (generate_block) {
-    GeneratorRecursionScope rec_scope(this);
-    if (!recursion_limit_reached()) {
-      const auto param_types = GenerateTypes(data);
-      Generate(base::VectorOf(param_types), data);
-      any_block(base::VectorOf(param_types), types, data);
-      return;
-    }
-  }
-
-  if (types.size() == 0) {
-    Generate(kWasmVoid, data);
-    return;
-  }
-  if (types.size() == 1) {
-    Generate(types[0], data);
-    return;
-  }
-
-  // Split the types in two halves and recursively generate each half.
-  // Each half is non empty to ensure termination.
-  size_t split_index = data->get<uint8_t>() % (types.size() - 1) + 1;
-  base::Vector<const ValueType> lower_half = types.SubVector(0, split_index);
-  base::Vector<const ValueType> upper_half =
-      types.SubVector(split_index, types.size());
-  DataRange first_range = data->split();
-  Generate(lower_half, &first_range);
-  Generate(upper_half, data);
-}
-
-// Emit code to match an arbitrary signature.
-// TODO(11954): Add the missing reference type conversion/upcasting.
-void WasmGenerator::ConsumeAndGenerate(
-    base::Vector<const ValueType> param_types,
-    base::Vector<const ValueType> return_types, DataRange* data) {
-  // This numeric conversion logic consists of picking exactly one
-  // index in the return values and dropping all the values that come
-  // before that index. Then we convert the value from that index to the
-  // wanted type. If we don't find any value we generate it.
-  auto primitive = [](ValueType t) -> bool {
-    switch (t.kind()) {
-      case kI32:
-      case kI64:
-      case kF32:
-      case kF64:
-        return true;
-      default:
-        return false;
-    }
-  };
-
-  if (return_types.size() == 0 || param_types.size() == 0 ||
-      !primitive(return_types[0])) {
-    for (unsigned i = 0; i < param_types.size(); i++) {
-      builder_->Emit(kExprDrop);
-    }
-    Generate(return_types, data);
-    return;
-  }
-
-  int bottom_primitives = 0;
-
-  while (static_cast<int>(param_types.size()) > bottom_primitives &&
-         primitive(param_types[bottom_primitives])) {
-    bottom_primitives++;
-  }
-  int return_index =
-      bottom_primitives > 0 ? (data->get<uint8_t>() % bottom_primitives) : -1;
-  for (int i = static_cast<int>(param_types.size() - 1); i > return_index;
-       --i) {
-    builder_->Emit(kExprDrop);
-  }
-  for (int i = return_index; i > 0; --i) {
-    Convert(param_types[i], param_types[i - 1]);
-    builder_->EmitI32Const(0);
-    builder_->Emit(kExprSelect);
-  }
-  DCHECK(!return_types.empty());
-  if (return_index >= 0) {
-    Convert(param_types[0], return_types[0]);
-    Generate(return_types + 1, data);
-  } else {
-    Generate(return_types, data);
-  }
-}
-
-enum SigKind { kFunctionSig, kExceptionSig };
-
-FunctionSig* GenerateSig(Zone* zone, DataRange* data, SigKind sig_kind,
-                         int num_types) {
-  // Generate enough parameters to spill some to the stack.
-  int num_params = int{data->get<uint8_t>()} % (kMaxParameters + 1);
-  int num_returns = sig_kind == kFunctionSig
-                        ? int{data->get<uint8_t>()} % (kMaxReturns + 1)
-                        : 0;
-
-  FunctionSig::Builder builder(zone, num_returns, num_params);
-  for (int i = 0; i < num_returns; ++i) {
-    builder.AddReturn(GetValueType(data, num_types));
-  }
-  for (int i = 0; i < num_params; ++i) {
-    builder.AddParam(GetValueType(data, num_types));
-  }
-  return builder.Build();
-}
-
 WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
                               WasmModuleBuilder* builder, ValueType type,
                               const std::vector<uint32_t>& structs,
                               const std::vector<uint32_t>& arrays,
                               uint32_t recursion_depth);
+
+template <WasmModuleGenerationOptions options>
+class ModuleGen {
+ public:
+  explicit ModuleGen(Zone* zone, WasmModuleBuilder* fn, DataRange* module_range,
+                     uint8_t num_functions, uint8_t num_structs,
+                     uint8_t num_arrays)
+      : zone_(zone),
+        builder_(fn),
+        module_range_(module_range),
+        num_functions_(num_functions),
+        num_structs_(num_structs),
+        num_arrays_(num_arrays),
+        num_types_(num_functions + num_structs + num_arrays) {}
+
+  // Generates and adds random number of memories.
+  void GenerateRandomMemories() {
+    int num_memories = 1 + module_range_->get<uint8_t>() % kMaxMemories;
+    for (int i = 0; i < num_memories; i++) {
+      builder_->AddMemory(0, 32);
+    }
+  }
+
+  // Puts the types into random recursive groups.
+  std::map<uint8_t, uint8_t> GenerateRandomRecursiveGroups(
+      uint8_t kNumDefaultArrayTypes) {
+    // (Type_index -> end of explicit rec group).
+    std::map<uint8_t, uint8_t> explicit_rec_groups;
+    uint8_t current_type_index = 0;
+
+    // The default array types are each in their own recgroup.
+    for (uint8_t i = 0; i < kNumDefaultArrayTypes; i++) {
+      explicit_rec_groups.emplace(current_type_index, current_type_index);
+      builder_->AddRecursiveTypeGroup(current_type_index++, 1);
+    }
+
+    while (current_type_index < num_types_) {
+      // First, pick a random start for the next group. We allow it to be
+      // beyond the end of types (i.e., we add no further recursive groups).
+      uint8_t group_start = module_range_->get<uint8_t>() %
+                                (num_types_ - current_type_index + 1) +
+                            current_type_index;
+      DCHECK_GE(group_start, current_type_index);
+      current_type_index = group_start;
+      if (group_start < num_types_) {
+        // If we did not reach the end of the types, pick a random group size.
+        uint8_t group_size =
+            module_range_->get<uint8_t>() % (num_types_ - group_start) + 1;
+        DCHECK_LE(group_start + group_size, num_types_);
+        for (uint8_t i = group_start; i < group_start + group_size; i++) {
+          explicit_rec_groups.emplace(i, group_start + group_size - 1);
+        }
+        builder_->AddRecursiveTypeGroup(group_start, group_size);
+        current_type_index += group_size;
+      }
+    }
+    return explicit_rec_groups;
+  }
+
+  // Generates and adds random struct types.
+  void GenerateRandomStructs(
+      const std::map<uint8_t, uint8_t>& explicit_rec_groups,
+      std::vector<uint32_t>& struct_types, uint8_t& current_type_index,
+      uint8_t kNumDefaultArrayTypes) {
+    uint8_t last_struct_type_index = current_type_index + num_structs_;
+    for (; current_type_index < last_struct_type_index; current_type_index++) {
+      auto rec_group = explicit_rec_groups.find(current_type_index);
+      uint8_t current_rec_group_end = rec_group != explicit_rec_groups.end()
+                                          ? rec_group->second
+                                          : current_type_index;
+
+      uint32_t supertype = kNoSuperType;
+      uint8_t num_fields =
+          module_range_->get<uint8_t>() % (kMaxStructFields + 1);
+
+      uint8_t existing_struct_types =
+          current_type_index - kNumDefaultArrayTypes;
+      if (existing_struct_types > 0 && module_range_->get<bool>()) {
+        supertype = module_range_->get<uint8_t>() % existing_struct_types +
+                    kNumDefaultArrayTypes;
+        num_fields += builder_->GetStructType(supertype)->field_count();
+      }
+      StructType::Builder struct_builder(zone_, num_fields);
+
+      // Add all fields from super type.
+      uint32_t field_index = 0;
+      if (supertype != kNoSuperType) {
+        const StructType* parent = builder_->GetStructType(supertype);
+        for (; field_index < parent->field_count(); ++field_index) {
+          // TODO(14034): This could also be any sub type of the supertype's
+          // element type.
+          struct_builder.AddField(parent->field(field_index),
+                                  parent->mutability(field_index));
+        }
+      }
+      for (; field_index < num_fields; field_index++) {
+        // Notes:
+        // - We allow a type to only have non-nullable fields of types that
+        //   are defined earlier. This way we avoid infinite non-nullable
+        //   constructions. Also relevant for arrays and functions.
+        // - On the other hand, nullable fields can be picked up to the end of
+        //   the current recursive group.
+        // - We exclude the non-nullable generic types arrayref, anyref,
+        //   structref, eqref and externref from the fields of structs and
+        //   arrays. This is so that GenerateInitExpr has a way to break a
+        //   recursion between a struct/array field and those types
+        //   ((ref extern) gets materialized through (ref any)).
+        ValueType type = GetValueTypeHelper<options>(
+            module_range_, current_rec_group_end + 1, current_type_index,
+            kIncludeNumericTypes, kIncludePackedTypes, kExcludeSomeGenerics);
+
+        bool mutability = module_range_->get<bool>();
+        struct_builder.AddField(type, mutability);
+      }
+      StructType* struct_fuz = struct_builder.Build();
+      // TODO(14034): Generate some final types too.
+      uint32_t index = builder_->AddStructType(struct_fuz, false, supertype);
+      struct_types.push_back(index);
+    }
+  }
+
+  // Creates and adds random array types.
+  void GenerateRandomArrays(
+      const std::map<uint8_t, uint8_t>& explicit_rec_groups,
+      std::vector<uint32_t>& array_types, uint8_t& current_type_index) {
+    uint8_t last_struct_type_index = current_type_index + num_structs_;
+    for (; current_type_index < num_structs_ + num_arrays_;
+         current_type_index++) {
+      auto rec_group = explicit_rec_groups.find(current_type_index);
+      uint8_t current_rec_group_end = rec_group != explicit_rec_groups.end()
+                                          ? rec_group->second
+                                          : current_type_index;
+      ValueType type = GetValueTypeHelper<options>(
+          module_range_, current_rec_group_end + 1, current_type_index,
+          kIncludeNumericTypes, kIncludePackedTypes, kExcludeSomeGenerics);
+      uint32_t supertype = kNoSuperType;
+      if (current_type_index > last_struct_type_index &&
+          module_range_->get<bool>()) {
+        // Do not include the default array types, because they are final.
+        uint8_t existing_array_types =
+            current_type_index - last_struct_type_index;
+        supertype = last_struct_type_index +
+                    (module_range_->get<uint8_t>() % existing_array_types);
+        // TODO(14034): This could also be any sub type of the supertype's
+        // element type.
+        type = builder_->GetArrayType(supertype)->element_type();
+      }
+      ArrayType* array_fuz = zone_->New<ArrayType>(type, true);
+      // TODO(14034): Generate some final types too.
+      uint32_t index = builder_->AddArrayType(array_fuz, false, supertype);
+      array_types.push_back(index);
+    }
+  }
+
+  enum SigKind { kFunctionSig, kExceptionSig };
+
+  FunctionSig* GenerateSig(SigKind sig_kind, int num_types) {
+    // Generate enough parameters to spill some to the stack.
+    int num_params = int{module_range_->get<uint8_t>()} % (kMaxParameters + 1);
+    int num_returns =
+        sig_kind == kFunctionSig
+            ? int{module_range_->get<uint8_t>()} % (kMaxReturns + 1)
+            : 0;
+
+    FunctionSig::Builder builder(zone_, num_returns, num_params);
+    for (int i = 0; i < num_returns; ++i) {
+      builder.AddReturn(GetValueType<options>(module_range_, num_types));
+    }
+    for (int i = 0; i < num_params; ++i) {
+      builder.AddParam(GetValueType<options>(module_range_, num_types));
+    }
+    return builder.Build();
+  }
+
+  // Creates and adds random function signatures.
+  void GenerateRandomFunctionSigs(
+      const std::map<uint8_t, uint8_t>& explicit_rec_groups,
+      std::vector<uint32_t>& function_signatures, uint8_t& current_type_index,
+      bool kIsFinal) {
+    // Recursive groups consist of recursive types that came with the WasmGC
+    // proposal.
+    DCHECK_IMPLIES(!ShouldGenerateWasmGC(options), explicit_rec_groups.empty());
+
+    for (; current_type_index < num_types_; current_type_index++) {
+      auto rec_group = explicit_rec_groups.find(current_type_index);
+      uint8_t current_rec_group_end = rec_group != explicit_rec_groups.end()
+                                          ? rec_group->second
+                                          : current_type_index;
+      FunctionSig* sig = GenerateSig(kFunctionSig, current_rec_group_end + 1);
+      uint32_t signature_index = builder_->ForceAddSignature(sig, kIsFinal);
+      function_signatures.push_back(signature_index);
+    }
+  }
+
+  void GenerateRandomExceptions(uint8_t num_exceptions) {
+    for (int i = 0; i < num_exceptions; ++i) {
+      FunctionSig* sig = GenerateSig(kExceptionSig, num_types_);
+      builder_->AddTag(sig);
+    }
+  }
+
+  // Adds the "wasm:js-string" imports to the module.
+  StringImports AddImportedStringImports() {
+    static constexpr uint32_t kArrayI8 = 0;
+    static constexpr uint32_t kArrayI16 = 1;
+    StringImports strings;
+    strings.array_i8 = kArrayI8;
+    strings.array_i16 = kArrayI16;
+    static constexpr ValueType kRefExtern = ValueType::Ref(HeapType::kExtern);
+    static constexpr ValueType kExternRef = kWasmExternRef;
+    static constexpr ValueType kI32 = kWasmI32;
+    static constexpr ValueType kRefA8 = ValueType::Ref(kArrayI8);
+    static constexpr ValueType kRefNullA8 = ValueType::RefNull(kArrayI8);
+    static constexpr ValueType kRefNullA16 = ValueType::RefNull(kArrayI16);
+
+    // Shorthands: "r" = nullable "externref",
+    // "e" = non-nullable "ref extern".
+    static constexpr ValueType kReps_e_i[] = {kRefExtern, kI32};
+    static constexpr ValueType kReps_e_rr[] = {kRefExtern, kExternRef,
+                                               kExternRef};
+    static constexpr ValueType kReps_e_rii[] = {kRefExtern, kExternRef, kI32,
+                                                kI32};
+    static constexpr ValueType kReps_i_ri[] = {kI32, kExternRef, kI32};
+    static constexpr ValueType kReps_i_rr[] = {kI32, kExternRef, kExternRef};
+    static constexpr ValueType kReps_from_a16[] = {kRefExtern, kRefNullA16,
+                                                   kI32, kI32};
+    static constexpr ValueType kReps_from_a8[] = {kRefExtern, kRefNullA8, kI32,
+                                                  kI32};
+    static constexpr ValueType kReps_into_a16[] = {kI32, kExternRef,
+                                                   kRefNullA16, kI32};
+    static constexpr ValueType kReps_into_a8[] = {kI32, kExternRef, kRefNullA8,
+                                                  kI32};
+    static constexpr ValueType kReps_to_a8[] = {kRefA8, kExternRef};
+
+    static constexpr FunctionSig kSig_e_i(1, 1, kReps_e_i);
+    static constexpr FunctionSig kSig_e_r(1, 1, kReps_e_rr);
+    static constexpr FunctionSig kSig_e_rr(1, 2, kReps_e_rr);
+    static constexpr FunctionSig kSig_e_rii(1, 3, kReps_e_rii);
+
+    static constexpr FunctionSig kSig_i_r(1, 1, kReps_i_ri);
+    static constexpr FunctionSig kSig_i_ri(1, 2, kReps_i_ri);
+    static constexpr FunctionSig kSig_i_rr(1, 2, kReps_i_rr);
+    static constexpr FunctionSig kSig_from_a16(1, 3, kReps_from_a16);
+    static constexpr FunctionSig kSig_from_a8(1, 3, kReps_from_a8);
+    static constexpr FunctionSig kSig_into_a16(1, 3, kReps_into_a16);
+    static constexpr FunctionSig kSig_into_a8(1, 3, kReps_into_a8);
+    static constexpr FunctionSig kSig_to_a8(1, 1, kReps_to_a8);
+
+    static constexpr base::Vector<const char> kJsString =
+        base::StaticCharVector("wasm:js-string");
+    static constexpr base::Vector<const char> kTextDecoder =
+        base::StaticCharVector("wasm:text-decoder");
+    static constexpr base::Vector<const char> kTextEncoder =
+        base::StaticCharVector("wasm:text-encoder");
+
+#define STRINGFUNC(name, sig, group) \
+  strings.name = builder_->AddImport(base::CStrVector(#name), &sig, group)
+
+    STRINGFUNC(cast, kSig_e_r, kJsString);
+    STRINGFUNC(test, kSig_i_r, kJsString);
+    STRINGFUNC(fromCharCode, kSig_e_i, kJsString);
+    STRINGFUNC(fromCodePoint, kSig_e_i, kJsString);
+    STRINGFUNC(charCodeAt, kSig_i_ri, kJsString);
+    STRINGFUNC(codePointAt, kSig_i_ri, kJsString);
+    STRINGFUNC(length, kSig_i_r, kJsString);
+    STRINGFUNC(concat, kSig_e_rr, kJsString);
+    STRINGFUNC(substring, kSig_e_rii, kJsString);
+    STRINGFUNC(equals, kSig_i_rr, kJsString);
+    STRINGFUNC(compare, kSig_i_rr, kJsString);
+    STRINGFUNC(fromCharCodeArray, kSig_from_a16, kJsString);
+    STRINGFUNC(intoCharCodeArray, kSig_into_a16, kJsString);
+    STRINGFUNC(measureStringAsUTF8, kSig_i_r, kTextEncoder);
+    STRINGFUNC(encodeStringIntoUTF8Array, kSig_into_a8, kTextEncoder);
+    STRINGFUNC(encodeStringToUTF8Array, kSig_to_a8, kTextEncoder);
+    STRINGFUNC(decodeStringFromUTF8Array, kSig_from_a8, kTextDecoder);
+
+#undef STRINGFUNC
+
+    return strings;
+  }
+
+  // Creates and adds random tables.
+  void GenerateRandomTables(const std::vector<uint32_t>& array_types,
+                            const std::vector<uint32_t>& struct_types) {
+    int num_tables = module_range_->get<uint8_t>() % kMaxTables + 1;
+    for (int i = 0; i < num_tables; i++) {
+      uint32_t min_size = i == 0
+                              ? num_functions_
+                              : module_range_->get<uint8_t>() % kMaxTableSize;
+      uint32_t max_size =
+          module_range_->get<uint8_t>() % (kMaxTableSize - min_size) + min_size;
+      // Table 0 is always funcref. This guarantees that
+      // - call_indirect has at least one funcref table to work with,
+      // - we have a place to reference all functions in the program, so they
+      //   count as "declared" for ref.func.
+      bool force_funcref = i == 0;
+      ValueType type =
+          force_funcref
+              ? kWasmFuncRef
+              : GetValueTypeHelper<options>(
+                    module_range_, num_types_, num_types_, kExcludeNumericTypes,
+                    kExcludePackedTypes, kIncludeAllGenerics);
+      bool use_initializer =
+          !type.is_defaultable() || module_range_->get<bool>();
+      uint32_t table_index =
+          use_initializer
+              ? builder_->AddTable(
+                    type, min_size, max_size,
+                    GenerateInitExpr(zone_, *module_range_, builder_, type,
+                                     struct_types, array_types, 0))
+              : builder_->AddTable(type, min_size, max_size);
+      if (type.is_reference_to(HeapType::kFunc)) {
+        // For function tables, initialize them with functions from the program.
+        // Currently, the fuzzer assumes that every funcref/(ref func) table
+        // contains the functions in the program in the order they are defined.
+        // TODO(11954): Consider generalizing this.
+        WasmModuleBuilder::WasmElemSegment segment(zone_, type, table_index,
+                                                   WasmInitExpr(0));
+        for (int entry_index = 0; entry_index < static_cast<int>(min_size);
+             entry_index++) {
+          segment.entries.emplace_back(
+              WasmModuleBuilder::WasmElemSegment::Entry::kRefFuncEntry,
+              builder_->NumImportedFunctions() +
+                  (entry_index % num_functions_));
+        }
+        builder_->AddElementSegment(std::move(segment));
+      }
+    }
+  }
+
+  // Creates and adds random globals.
+  std::tuple<std::vector<ValueType>, std::vector<uint8_t>>
+  GenerateRandomGlobals(const std::vector<uint32_t>& array_types,
+                        const std::vector<uint32_t>& struct_types) {
+    int num_globals = module_range_->get<uint8_t>() % (kMaxGlobals + 1);
+    std::vector<ValueType> globals;
+    std::vector<uint8_t> mutable_globals;
+    globals.reserve(num_globals);
+    mutable_globals.reserve(num_globals);
+
+    for (int i = 0; i < num_globals; ++i) {
+      ValueType type = GetValueType<options>(module_range_, num_types_);
+      // 1/8 of globals are immutable.
+      const bool mutability = (module_range_->get<uint8_t>() % 8) != 0;
+      builder_->AddGlobal(type, mutability,
+                          GenerateInitExpr(zone_, *module_range_, builder_,
+                                           type, struct_types, array_types, 0));
+      globals.push_back(type);
+      if (mutability) mutable_globals.push_back(static_cast<uint8_t>(i));
+    }
+
+    return {globals, mutable_globals};
+  }
+
+ private:
+  Zone* zone_;
+  WasmModuleBuilder* builder_;
+  DataRange* module_range_;
+  const uint8_t num_functions_;
+  const uint8_t num_structs_;
+  const uint8_t num_arrays_;
+  const uint16_t num_types_;
+};
 
 WasmInitExpr GenerateStructNewInitExpr(Zone* zone, DataRange& range,
                                        WasmModuleBuilder* builder,
@@ -3350,7 +3816,6 @@ WasmInitExpr GenerateArrayInitExpr(Zone* zone, DataRange& range,
   }
 }
 
-// TODO(manoskouk): Add global.get.
 WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
                               WasmModuleBuilder* builder, ValueType type,
                               const std::vector<uint32_t>& structs,
@@ -3441,7 +3906,7 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
           null_only || (range.get<uint8_t>() % 4 == 0)) {
         return WasmInitExpr::RefNullConst(type.heap_type().representation());
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     }
     case kRef: {
       switch (type.heap_representation()) {
@@ -3463,13 +3928,13 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
                                                          type.nullability()),
                                  structs, arrays, recursion_depth + 1));
           }
-          V8_FALLTHROUGH;
+          [[fallthrough]];
         }
         case HeapType::kEq: {
           uint8_t choice = range.get<uint8_t>() % 3;
-          HeapType::Representation subtype = choice == 0   ? HeapType::kStruct
+          HeapType::Representation subtype = choice == 0   ? HeapType::kI31
                                              : choice == 1 ? HeapType::kArray
-                                                           : HeapType::kI31;
+                                                           : HeapType::kStruct;
 
           return GenerateInitExpr(
               zone, range, builder,
@@ -3526,10 +3991,10 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
       UNREACHABLE();
   }
 }
+
 }  // namespace
 
-// TODO(14637): Replace this by an empty implementation in release builds to
-// reduce binary size.
+template <WasmModuleGenerationOptions options>
 base::Vector<uint8_t> GenerateRandomWasmModule(
     Zone* zone, base::Vector<const uint8_t> data) {
   WasmModuleBuilder builder(zone);
@@ -3542,154 +4007,74 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
   DataRange module_range(data);
   DataRange functions_range = module_range.split();
   std::vector<uint32_t> function_signatures;
-  std::vector<uint32_t> array_types;
-  std::vector<uint32_t> struct_types;
-
-  // Add struct and array types first so that we get a chance to generate
-  // these types in function signatures.
-  // Currently, WasmGenerator assumes this order for struct/array/signature
-  // definitions.
 
   static_assert(kMaxFunctions >= 1, "need min. 1 function");
   uint8_t num_functions = 1 + (module_range.get<uint8_t>() % kMaxFunctions);
 
-  // We need at least one struct and one array in order to support
-  // WasmInitExpr for abstract types.
+  // In case of WasmGC expressions:
+  // Add struct and array types first so that we get a chance to generate
+  // these types in function signatures.
+  // Currently, `BodyGen` assumes this order for struct/array/signature
+  // definitions.
+  // Otherwise, for non-WasmGC we can't use structs/arrays.
+  uint8_t num_structs = 0;
+  uint8_t num_arrays = 0;
+  std::vector<uint32_t> array_types;
+  std::vector<uint32_t> struct_types;
+
+  // In case of WasmGC expressions:
   // We always add two default array types with mutable i8 and i16 elements,
   // respectively.
-  constexpr uint8_t kNumDefaultArrayTypes = 2;
-  uint8_t num_structs = 1 + module_range.get<uint8_t>() % kMaxStructs;
-  uint8_t num_arrays =
-      kNumDefaultArrayTypes + module_range.get<uint8_t>() % kMaxArrays;
-  uint16_t num_types = num_functions + num_structs + num_arrays;
-
-  // (Type_index -> end of explicit rec group).
-  std::map<uint8_t, uint8_t> explicit_rec_groups;
-  {
-    uint8_t current_type_index = 0;
-    // The default array types are each in their own recgroup.
-    explicit_rec_groups.emplace(current_type_index, current_type_index);
-    builder.AddRecursiveTypeGroup(current_type_index++, 1);
-    explicit_rec_groups.emplace(current_type_index, current_type_index);
-    builder.AddRecursiveTypeGroup(current_type_index++, 1);
-
-    while (current_type_index < num_types) {
-      // First, pick a random start for the next group. We allow it to be
-      // beyond the end of types (i.e., we add no further recursive groups).
-      uint8_t group_start =
-          module_range.get<uint8_t>() % (num_types - current_type_index + 1) +
-          current_type_index;
-      DCHECK_GE(group_start, current_type_index);
-      current_type_index = group_start;
-      if (group_start < num_types) {
-        // If we did not reach the end of the types, pick a random group size.
-        uint8_t group_size =
-            module_range.get<uint8_t>() % (num_types - group_start) + 1;
-        DCHECK_LE(group_start + group_size, num_types);
-        for (uint8_t i = group_start; i < group_start + group_size; i++) {
-          explicit_rec_groups.emplace(i, group_start + group_size - 1);
-        }
-        builder.AddRecursiveTypeGroup(group_start, group_size);
-        current_type_index += group_size;
-      }
-    }
+  constexpr uint8_t kNumDefaultArrayTypesForWasmGC = 2;
+  if constexpr (ShouldGenerateWasmGC(options)) {
+    // We need at least one struct and one array in order to support
+    // WasmInitExpr for abstract types.
+    num_structs = 1 + module_range.get<uint8_t>() % kMaxStructs;
+    num_arrays = kNumDefaultArrayTypesForWasmGC +
+                 module_range.get<uint8_t>() % kMaxArrays;
   }
+
+  ModuleGen<options> gen_module(zone, &builder, &module_range, num_functions,
+                                num_structs, num_arrays);
+
+  // Add random number of memories.
+  // TODO(v8:14674): Add a mode without declaring any memory or memory
+  // instructions.
+  gen_module.GenerateRandomMemories();
 
   uint8_t current_type_index = 0;
-  // Add default array types.
-  uint32_t array_i8;
-  uint32_t array_i16;
-  {
-    ArrayType* a8 = zone->New<ArrayType>(kWasmI8, 1);
-    array_i8 = builder.AddArrayType(a8, true, kNoSuperType);
-    DCHECK_EQ(array_i8, current_type_index);
-    array_types.push_back(array_i8);
-    ArrayType* a16 = zone->New<ArrayType>(kWasmI16, 1);
-    array_i16 = builder.AddArrayType(a16, true, kNoSuperType);
-    array_types.push_back(array_i16);
-    current_type_index = array_i16 + 1;
-  }
-  DCHECK_EQ(current_type_index, kNumDefaultArrayTypes);
+  // In case of WasmGC expressions, we create recursive groups for the recursive
+  // types.
+  std::map<uint8_t, uint8_t> explicit_rec_groups;
+  if constexpr (ShouldGenerateWasmGC(options)) {
+    // Put the types into random recursive groups.
+    explicit_rec_groups = gen_module.GenerateRandomRecursiveGroups(
+        kNumDefaultArrayTypesForWasmGC);
 
-  // Add random-generated types.
-  uint8_t last_struct_type = current_type_index + num_structs;
-  for (; current_type_index < last_struct_type; current_type_index++) {
-    auto rec_group = explicit_rec_groups.find(current_type_index);
-    uint8_t current_rec_group_end = rec_group != explicit_rec_groups.end()
-                                        ? rec_group->second
-                                        : current_type_index;
-
-    uint32_t supertype = kNoSuperType;
-    uint8_t num_fields = module_range.get<uint8_t>() % (kMaxStructFields + 1);
-
-    uint8_t existing_struct_types = current_type_index - kNumDefaultArrayTypes;
-    if (existing_struct_types > 0 && module_range.get<bool>()) {
-      supertype = module_range.get<uint8_t>() % existing_struct_types +
-                  kNumDefaultArrayTypes;
-      num_fields += builder.GetStructType(supertype)->field_count();
+    // Add default array types.
+    static constexpr uint32_t kArrayI8 = 0;
+    static constexpr uint32_t kArrayI16 = 1;
+    {
+      ArrayType* a8 = zone->New<ArrayType>(kWasmI8, 1);
+      CHECK_EQ(kArrayI8, builder.AddArrayType(a8, true, kNoSuperType));
+      array_types.push_back(kArrayI8);
+      ArrayType* a16 = zone->New<ArrayType>(kWasmI16, 1);
+      CHECK_EQ(kArrayI16, builder.AddArrayType(a16, true, kNoSuperType));
+      array_types.push_back(kArrayI16);
     }
-    StructType::Builder struct_builder(zone, num_fields);
+    static_assert(kNumDefaultArrayTypesForWasmGC == kArrayI16 + 1);
+    current_type_index = kNumDefaultArrayTypesForWasmGC;
 
-    // Add all fields from super type.
-    uint32_t field_index = 0;
-    if (supertype != kNoSuperType) {
-      const StructType* parent = builder.GetStructType(supertype);
-      for (; field_index < parent->field_count(); ++field_index) {
-        // TODO(14034): This could also be any sub type of the supertype's
-        // element type.
-        struct_builder.AddField(parent->field(field_index),
-                                parent->mutability(field_index));
-      }
-    }
-    for (; field_index < num_fields; field_index++) {
-      // Notes:
-      // - We allow a type to only have non-nullable fields of types that
-      //   are defined earlier. This way we avoid infinite non-nullable
-      //   constructions. Also relevant for arrays and functions.
-      // - On the other hand, nullable fields can be picked up to the end of
-      //   the current recursive group.
-      // - We exclude the non-nullable generic types arrayref, anyref,
-      //   structref, eqref and externref from the fields of structs and
-      //   arrays. This is so that GenerateInitExpr has a way to break a
-      //   recursion between a struct/array field and those types
-      //   ((ref extern) gets materialized through (ref any)).
-      ValueType type = GetValueTypeHelper(
-          &module_range, current_rec_group_end + 1, current_type_index,
-          kIncludeNumericTypes, kIncludePackedTypes,
-          kExcludeSomeGenericsWhenTypeIsNonNullable);
+    // Add randomly generated structs.
+    gen_module.GenerateRandomStructs(explicit_rec_groups, struct_types,
+                                     current_type_index,
+                                     kNumDefaultArrayTypesForWasmGC);
+    DCHECK_EQ(current_type_index, kNumDefaultArrayTypesForWasmGC + num_structs);
 
-      bool mutability = module_range.get<bool>();
-      struct_builder.AddField(type, mutability);
-    }
-    StructType* struct_fuz = struct_builder.Build();
-    // TODO(14034): Generate some final types too.
-    uint32_t index = builder.AddStructType(struct_fuz, false, supertype);
-    struct_types.push_back(index);
-  }
-
-  for (; current_type_index < num_structs + num_arrays; current_type_index++) {
-    auto rec_group = explicit_rec_groups.find(current_type_index);
-    uint8_t current_rec_group_end = rec_group != explicit_rec_groups.end()
-                                        ? rec_group->second
-                                        : current_type_index;
-    ValueType type = GetValueTypeHelper(
-        &module_range, current_rec_group_end + 1, current_type_index,
-        kIncludeNumericTypes, kIncludePackedTypes,
-        kExcludeSomeGenericsWhenTypeIsNonNullable);
-    uint32_t supertype = kNoSuperType;
-    if (current_type_index > last_struct_type && module_range.get<bool>()) {
-      // Do not include the default array types, because they are final.
-      uint8_t existing_array_types = current_type_index - last_struct_type;
-      supertype = last_struct_type +
-                  (module_range.get<uint8_t>() % existing_array_types);
-      // TODO(14034): This could also be any sub type of the supertype's
-      // element type.
-      type = builder.GetArrayType(supertype)->element_type();
-    }
-    ArrayType* array_fuz = zone->New<ArrayType>(type, true);
-    // TODO(14034): Generate some final types too.
-    uint32_t index = builder.AddArrayType(array_fuz, false, supertype);
-    array_types.push_back(index);
+    // Add randomly generated arrays.
+    gen_module.GenerateRandomArrays(explicit_rec_groups, array_types,
+                                    current_type_index);
+    DCHECK_EQ(current_type_index, num_structs + num_arrays);
   }
 
   // We keep the signature for the first (main) function constant.
@@ -3700,94 +4085,21 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
       builder.ForceAddSignature(&kMainFnSig, kIsFinal));
   current_type_index++;
 
-  for (; current_type_index < num_types; current_type_index++) {
-    auto rec_group = explicit_rec_groups.find(current_type_index);
-    uint8_t current_rec_group_end = rec_group != explicit_rec_groups.end()
-                                        ? rec_group->second
-                                        : current_type_index;
-    FunctionSig* sig = GenerateSig(zone, &module_range, kFunctionSig,
-                                   current_rec_group_end + 1);
-    uint32_t signature_index = builder.ForceAddSignature(sig, kIsFinal);
-    function_signatures.push_back(signature_index);
-  }
+  // Add randomly generated signatures.
+  gen_module.GenerateRandomFunctionSigs(
+      explicit_rec_groups, function_signatures, current_type_index, kIsFinal);
+  DCHECK_EQ(current_type_index, num_functions + num_structs + num_arrays);
 
+  // Add exceptions.
   int num_exceptions = 1 + (module_range.get<uint8_t>() % kMaxExceptions);
-  for (int i = 0; i < num_exceptions; ++i) {
-    FunctionSig* sig =
-        GenerateSig(zone, &module_range, kExceptionSig, num_types);
-    builder.AddTag(sig);
-  }
+  gen_module.GenerateRandomExceptions(num_exceptions);
 
+  // In case of WasmGC expressions:
   // Add the "wasm:js-string" imports to the module. They may or may not be
   // used later, but they'll always be available.
-  StringImports strings;
-  strings.array_i16 = array_i16;
-  strings.array_i8 = array_i8;
-  static constexpr ValueType kRefExtern = ValueType::Ref(HeapType::kExtern);
-  static constexpr ValueType kExternRef = kWasmExternRef;
-  static constexpr ValueType kI32 = kWasmI32;
-  const ValueType kRefA8 = ValueType::Ref(array_i8);
-  const ValueType kRefNullA8 = ValueType::RefNull(array_i8);
-  const ValueType kRefNullA16 = ValueType::RefNull(array_i16);
-
-  // Shorthands: "r" = nullable "externref",
-  // "e" = non-nullable "ref extern".
-  static constexpr ValueType kReps_e_i[] = {kRefExtern, kI32};
-  static constexpr ValueType kReps_e_rr[] = {kRefExtern, kExternRef,
-                                             kExternRef};
-  static constexpr ValueType kReps_e_rii[] = {kRefExtern, kExternRef, kI32,
-                                              kI32};
-  static constexpr ValueType kReps_i_ri[] = {kI32, kExternRef, kI32};
-  static constexpr ValueType kReps_i_rr[] = {kI32, kExternRef, kExternRef};
-  const ValueType kReps_from_a16[] = {kRefExtern, kRefNullA16, kI32, kI32};
-  const ValueType kReps_from_a8[] = {kRefExtern, kRefNullA8, kI32, kI32};
-  const ValueType kReps_into_a16[] = {kI32, kExternRef, kRefNullA16, kI32};
-  const ValueType kReps_into_a8[] = {kI32, kExternRef, kRefNullA8, kI32};
-  const ValueType kReps_to_a8[] = {kRefA8, kExternRef};
-
-  static constexpr FunctionSig kSig_e_i(1, 1, kReps_e_i);
-  static constexpr FunctionSig kSig_e_r(1, 1, kReps_e_rr);
-  static constexpr FunctionSig kSig_e_rr(1, 2, kReps_e_rr);
-  static constexpr FunctionSig kSig_e_rii(1, 3, kReps_e_rii);
-
-  static constexpr FunctionSig kSig_i_r(1, 1, kReps_i_ri);
-  static constexpr FunctionSig kSig_i_ri(1, 2, kReps_i_ri);
-  static constexpr FunctionSig kSig_i_rr(1, 2, kReps_i_rr);
-  const FunctionSig kSig_from_a16(1, 3, kReps_from_a16);
-  const FunctionSig kSig_from_a8(1, 3, kReps_from_a8);
-  const FunctionSig kSig_into_a16(1, 3, kReps_into_a16);
-  const FunctionSig kSig_into_a8(1, 3, kReps_into_a8);
-  const FunctionSig kSig_to_a8(1, 1, kReps_to_a8);
-
-  static constexpr base::Vector<const char> kJsString =
-      base::StaticCharVector("wasm:js-string");
-  static constexpr base::Vector<const char> kTextDecoder =
-      base::StaticCharVector("wasm:text-decoder");
-  static constexpr base::Vector<const char> kTextEncoder =
-      base::StaticCharVector("wasm:text-encoder");
-
-#define STRINGFUNC(name, sig, group) \
-  strings.name = builder.AddImport(base::CStrVector(#name), &sig, group)
-
-  STRINGFUNC(cast, kSig_e_r, kJsString);
-  STRINGFUNC(test, kSig_i_r, kJsString);
-  STRINGFUNC(fromCharCode, kSig_e_i, kJsString);
-  STRINGFUNC(fromCodePoint, kSig_e_i, kJsString);
-  STRINGFUNC(charCodeAt, kSig_i_ri, kJsString);
-  STRINGFUNC(codePointAt, kSig_i_ri, kJsString);
-  STRINGFUNC(length, kSig_i_r, kJsString);
-  STRINGFUNC(concat, kSig_e_rr, kJsString);
-  STRINGFUNC(substring, kSig_e_rii, kJsString);
-  STRINGFUNC(equals, kSig_i_rr, kJsString);
-  STRINGFUNC(compare, kSig_i_rr, kJsString);
-  STRINGFUNC(fromCharCodeArray, kSig_from_a16, kJsString);
-  STRINGFUNC(intoCharCodeArray, kSig_into_a16, kJsString);
-  STRINGFUNC(measureStringAsUTF8, kSig_i_r, kTextEncoder);
-  STRINGFUNC(encodeStringIntoUTF8Array, kSig_into_a8, kTextEncoder);
-  STRINGFUNC(encodeStringToUTF8Array, kSig_to_a8, kTextEncoder);
-  STRINGFUNC(decodeStringFromUTF8Array, kSig_from_a8, kTextDecoder);
-
-#undef STRINGFUNC
+  StringImports strings = ShouldGenerateWasmGC(options)
+                              ? gen_module.AddImportedStringImports()
+                              : StringImports();
 
   // Generate function declarations before tables. This will be needed once we
   // have typed-function tables.
@@ -3802,73 +4114,23 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
     functions.push_back(builder.AddFunction(function_signatures[i]));
   }
 
-  int num_globals = module_range.get<uint8_t>() % (kMaxGlobals + 1);
-  std::vector<ValueType> globals;
-  std::vector<uint8_t> mutable_globals;
-  globals.reserve(num_globals);
-  mutable_globals.reserve(num_globals);
-
-  for (int i = 0; i < num_globals; ++i) {
-    ValueType type = GetValueType(&module_range, num_types);
-    // 1/8 of globals are immutable.
-    const bool mutability = (module_range.get<uint8_t>() % 8) != 0;
-    builder.AddGlobal(type, mutability,
-                      GenerateInitExpr(zone, module_range, &builder, type,
-                                       struct_types, array_types, 0));
-    globals.push_back(type);
-    if (mutability) mutable_globals.push_back(static_cast<uint8_t>(i));
-  }
-
   // Generate tables before function bodies, so they are available for table
-  // operations.
+  // operations. Generate tables before the globals, so tables don't
+  // accidentally use globals in their initializer expressions.
   // Always generate at least one table for call_indirect.
-  int num_tables = module_range.get<uint8_t>() % kMaxTables + 1;
-  for (int i = 0; i < num_tables; i++) {
-    uint32_t min_size =
-        i == 0 ? num_functions : module_range.get<uint8_t>() % kMaxTableSize;
-    uint32_t max_size =
-        module_range.get<uint8_t>() % (kMaxTableSize - min_size) + min_size;
-    // Table 0 is always funcref. This guarantees that
-    // - call_indirect has at least one funcref table to work with,
-    // - we have a place to reference all functions in the program, so they
-    //   count as "declared" for ref.func.
-    bool force_funcref = i == 0;
-    ValueType type =
-        force_funcref
-            ? kWasmFuncRef
-            : GetValueTypeHelper(&module_range, num_types, num_types,
-                                 kExcludeNumericTypes, kExcludePackedTypes,
-                                 kAlwaysIncludeAllGenerics);
-    bool use_initializer = !type.is_defaultable() || module_range.get<bool>();
-    uint32_t table_index =
-        use_initializer
-            ? builder.AddTable(
-                  type, min_size, max_size,
-                  GenerateInitExpr(zone, module_range, &builder, type,
-                                   struct_types, array_types, 0))
-            : builder.AddTable(type, min_size, max_size);
-    if (type.is_reference_to(HeapType::kFunc)) {
-      // For function tables, initialize them with functions from the program.
-      // Currently, the fuzzer assumes that every funcref/(ref func) table
-      // contains the functions in the program in the order they are defined.
-      // TODO(11954): Consider generalizing this.
-      WasmModuleBuilder::WasmElemSegment segment(zone, type, table_index,
-                                                 WasmInitExpr(0));
-      for (int entry_index = 0; entry_index < static_cast<int>(min_size);
-           entry_index++) {
-        segment.entries.emplace_back(
-            WasmModuleBuilder::WasmElemSegment::Entry::kRefFuncEntry,
-            builder.NumImportedFunctions() + (entry_index % num_functions));
-      }
-      builder.AddElementSegment(std::move(segment));
-    }
-  }
+  gen_module.GenerateRandomTables(array_types, struct_types);
 
+  // Add globals.
+  auto [globals, mutable_globals] =
+      gen_module.GenerateRandomGlobals(array_types, struct_types);
+
+  // Add passive data segments.
   int num_data_segments = module_range.get<uint8_t>() % kMaxPassiveDataSegments;
   for (int i = 0; i < num_data_segments; i++) {
     GeneratePassiveDataSegment(&module_range, &builder);
   }
 
+  // Generate function bodies.
   for (int i = 0; i < num_functions; ++i) {
     WasmFunctionBuilder* f = functions[i];
     // On the last function don't split the DataRange but just use the
@@ -3876,26 +4138,35 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
     DataRange function_range = i != num_functions - 1
                                    ? functions_range.split()
                                    : std::move(functions_range);
-    WasmGenerator gen(f, function_signatures, globals, mutable_globals,
-                      struct_types, array_types, strings, &function_range);
+    BodyGen<options> gen_body(f, function_signatures, globals, mutable_globals,
+                              struct_types, array_types, strings,
+                              &function_range);
     const FunctionSig* sig = f->signature();
     base::Vector<const ValueType> return_types(sig->returns().begin(),
                                                sig->return_count());
-    gen.InitializeNonDefaultableLocals(&function_range);
-    gen.Generate(return_types, &function_range);
-    if (!CheckHardwareSupportsSimd() && gen.HasSimd()) return {};
+    gen_body.InitializeNonDefaultableLocals(&function_range);
+    gen_body.Generate(return_types, &function_range);
+    // TODO(v8:14639): Disable SIMD expressions if needed, so that a module is
+    // always generated.
+    if (ShouldGenerateSIMD(options) && !CheckHardwareSupportsSimd() &&
+        gen_body.HasSimd()) {
+      return {};
+    }
     f->Emit(kExprEnd);
     if (i == 0) builder.AddExport(base::CStrVector("main"), f);
   }
 
   ZoneBuffer buffer{zone};
-  builder.SetMaxMemorySize(32);
   builder.WriteTo(&buffer);
   return base::VectorOf(buffer);
 }
 
+// Used by the initializer expression fuzzer.
 base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
     Zone* zone, base::Vector<const uint8_t> data, size_t* count) {
+  // Don't limit expressions for the initializer expression fuzzer.
+  constexpr WasmModuleGenerationOptions options =
+      WasmModuleGenerationOptions::kGenerateAll;
   WasmModuleBuilder builder(zone);
 
   DataRange module_range(data);
@@ -3939,10 +4210,9 @@ base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
       }
     }
     for (; field_index < num_fields; field_index++) {
-      ValueType type = GetValueTypeHelper(
+      ValueType type = GetValueTypeHelper<options>(
           &module_range, current_type_index, current_type_index,
-          kIncludeNumericTypes, kIncludePackedTypes,
-          kExcludeSomeGenericsWhenTypeIsNonNullable);
+          kIncludeNumericTypes, kIncludePackedTypes, kExcludeSomeGenerics);
 
       bool mutability = module_range.get<bool>();
       struct_builder.AddField(type, mutability);
@@ -3953,10 +4223,9 @@ base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
   }
 
   for (; current_type_index < num_structs + num_arrays; current_type_index++) {
-    ValueType type = GetValueTypeHelper(
+    ValueType type = GetValueTypeHelper<options>(
         &module_range, current_type_index, current_type_index,
-        kIncludeNumericTypes, kIncludePackedTypes,
-        kExcludeSomeGenericsWhenTypeIsNonNullable);
+        kIncludeNumericTypes, kIncludePackedTypes, kExcludeSomeGenerics);
     uint32_t supertype = kNoSuperType;
     if (current_type_index > last_struct_type && module_range.get<bool>()) {
       uint8_t existing_array_types = current_type_index - last_struct_type;
@@ -3973,9 +4242,9 @@ base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
   constexpr bool kIsFinal = true;
   std::vector<ValueType> globals;
   for (; current_type_index < num_types; current_type_index++) {
-    ValueType return_type = GetValueTypeHelper(
+    ValueType return_type = GetValueTypeHelper<options>(
         &module_range, num_types - num_globals, num_types - num_globals,
-        kIncludeNumericTypes, kExcludePackedTypes, kAlwaysIncludeAllGenerics,
+        kIncludeNumericTypes, kExcludePackedTypes, kIncludeAllGenerics,
         kExcludeS128);
     globals.push_back(return_type);
     // Create a new function signature for each global. These functions will be
@@ -4025,9 +4294,32 @@ base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
   }
 
   ZoneBuffer buffer{zone};
-  builder.SetMaxMemorySize(32);
   builder.WriteTo(&buffer);
   return base::VectorOf(buffer);
 }
+
+// Explicit template instantiation for kMVP.
+template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    base::Vector<uint8_t> GenerateRandomWasmModule<
+        WasmModuleGenerationOptions::kMVP>(Zone*,
+                                           base::Vector<const uint8_t> data);
+
+// Explicit template instantiation for kGenerateSIMD.
+template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    base::Vector<uint8_t> GenerateRandomWasmModule<
+        WasmModuleGenerationOptions::kGenerateSIMD>(
+        Zone*, base::Vector<const uint8_t> data);
+
+// Explicit template instantiation for kGenerateWasmGC.
+template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    base::Vector<uint8_t> GenerateRandomWasmModule<
+        WasmModuleGenerationOptions::kGenerateWasmGC>(
+        Zone*, base::Vector<const uint8_t> data);
+
+// Explicit template instantiation for kGenerateAll.
+template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    base::Vector<uint8_t> GenerateRandomWasmModule<
+        WasmModuleGenerationOptions::kGenerateAll>(
+        Zone*, base::Vector<const uint8_t> data);
 
 }  // namespace v8::internal::wasm::fuzzing

@@ -9,11 +9,12 @@
 #include "src/heap/evacuation-allocator-inl.h"
 #include "src/heap/incremental-marking-inl.h"
 #include "src/heap/marking-state-inl.h"
-#include "src/heap/memory-chunk.h"
+#include "src/heap/mutable-page.h"
 #include "src/heap/new-spaces.h"
 #include "src/heap/objects-visiting-inl.h"
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/heap/scavenger.h"
+#include "src/objects/js-objects.h"
 #include "src/objects/map.h"
 #include "src/objects/objects-body-descriptors-inl.h"
 #include "src/objects/objects-inl.h"
@@ -84,7 +85,7 @@ void Scavenger::PageMemoryFence(Tagged<MaybeObject> object) {
   // with  page initialization.
   Tagged<HeapObject> heap_object;
   if (object.GetHeapObject(&heap_object)) {
-    BasicMemoryChunk::FromHeapObject(heap_object)->SynchronizedHeapLoad();
+    MemoryChunk::FromHeapObject(heap_object)->SynchronizedLoad();
   }
 #endif
 }
@@ -225,9 +226,9 @@ bool Scavenger::HandleLargeObject(Tagged<Map> map, Tagged<HeapObject> object,
   // TODO(hpayer): Make this check size based, i.e.
   // object_size > kMaxRegularHeapObjectSize
   if (V8_UNLIKELY(
-          BasicMemoryChunk::FromHeapObject(object)->InNewLargeObjectSpace())) {
+          MemoryChunk::FromHeapObject(object)->InNewLargeObjectSpace())) {
     DCHECK_EQ(NEW_LO_SPACE,
-              MemoryChunk::FromHeapObject(object)->owner_identity());
+              MutablePageMetadata::FromHeapObject(object)->owner_identity());
     if (object->release_compare_and_swap_map_word_forwarded(
             MapWord::FromMap(map), object)) {
       surviving_new_large_objects_.insert({object, map});
@@ -407,7 +408,7 @@ SlotCallbackResult Scavenger::EvacuateObject(THeapObjectSlot slot,
             map, slot, String::unchecked_cast(source), size,
             ObjectFields::kDataOnly);
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     default:
       return EvacuateObjectDefault(map, slot, source, size,
                                    Map::ObjectFieldsFrom(visitor_id));
@@ -524,7 +525,12 @@ template <typename TSlot>
 void ScavengeVisitor::VisitPointersImpl(Tagged<HeapObject> host, TSlot start,
                                         TSlot end) {
   for (TSlot slot = start; slot < end; ++slot) {
-    typename TSlot::TObject object = *slot;
+    const std::optional<Tagged<Object>> optional_object =
+        this->GetObjectFilterReadOnlyAndSmiFast(slot);
+    if (!optional_object) {
+      continue;
+    }
+    typename TSlot::TObject object = *optional_object;
     Tagged<HeapObject> heap_object;
     // Treat weak references as strong.
     if (object.GetHeapObject(&heap_object)) {
@@ -543,7 +549,10 @@ int ScavengeVisitor::VisitJSArrayBuffer(Tagged<Map> map,
 
 int ScavengeVisitor::VisitJSApiObject(Tagged<Map> map,
                                       Tagged<JSObject> object) {
-  return VisitJSObject(map, object);
+  int size = JSAPIObjectWithEmbedderSlots::BodyDescriptor::SizeOf(map, object);
+  JSAPIObjectWithEmbedderSlots::BodyDescriptor::IterateBody(map, object, size,
+                                                            this);
+  return size;
 }
 
 int ScavengeVisitor::VisitEphemeronHashTable(Tagged<Map> map,

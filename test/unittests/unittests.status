@@ -241,7 +241,6 @@
   'LocalFactoryTest.OneByteInternalizedString_DuplicateIsDeduplicated': [SKIP],
   'LocalFactoryTest.OneByteInternalizedString_IsAddedToStringTable': [SKIP],
   # Requires write barriers
-  'SpacesTest.WriteBarrierFromHeapObject': [SKIP],
   'SpacesTest.WriteBarrierInYoungGenerationToSpace': [SKIP],
   'SpacesTest.WriteBarrierInYoungGenerationFromSpace': [SKIP],
   # Requires a second isolate
@@ -383,6 +382,13 @@
   # Bug: crbug.com/v8/14320
   'TimeTicks.NowResolution': [PASS,FAIL],
 }],  # system == windows
+
+##############################################################################
+['system == android', {
+  # https://crbug.com/v8/14545
+  'LogAllTest.LogAll': [SKIP],
+  'LogTimerTest.ConsoleTimeEvents': [SKIP],
+}],  # 'system == android'
 
 ['clang_coverage and mode == debug', {
   # Too slow tests.

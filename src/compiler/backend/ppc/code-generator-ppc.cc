@@ -12,7 +12,7 @@
 #include "src/compiler/backend/gap-resolver.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/osr.h"
-#include "src/heap/memory-chunk.h"
+#include "src/heap/mutable-page.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-objects.h"
@@ -976,6 +976,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                        SourceLocation());
 #endif
       break;
+    case kArchCallCFunctionWithFrameState:
     case kArchCallCFunction: {
       int const num_gp_parameters = ParamField::decode(instr->opcode());
       int const fp_param_field = FPParamField::decode(instr->opcode());
@@ -1027,15 +1028,22 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         int offset_since_start_call = pc_offset - start_pc_offset;
         // Here we are going to patch the `addi` instruction above to use the
         // correct offset.
-        // LoadPC emits two instructions and pc is the address of its
-        // second emitted instruction therefore there is one more instruction to
-        // count.
+        // LoadPC emits two instructions and pc is the address of its second
+        // emitted instruction. Add one more to the offset to point to after the
+        // Call.
         offset_since_start_call += kInstrSize;
         __ patch_pc_address(kScratchReg, start_pc_offset,
                             offset_since_start_call);
       }
 #endif  // V8_ENABLE_WEBASSEMBLY
       RecordSafepoint(instr->reference_map(), pc_offset);
+
+      bool const needs_frame_state =
+          (opcode == kArchCallCFunctionWithFrameState);
+      if (needs_frame_state) {
+        RecordDeoptInfo(instr, pc_offset);
+      }
+
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -2024,6 +2032,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kPPC_DoubleExtractHighWord32:
       __ MovDoubleHighToInt(i.OutputRegister(), i.InputDoubleRegister(0));
       DCHECK_EQ(LeaveRC, i.OutputRCBit());
+      break;
+    case kPPC_DoubleFromWord32Pair:
+      __ clrldi(i.TempRegister(0), i.InputRegister(1), Operand(32));
+      __ ShiftLeftU64(kScratchReg, i.InputRegister(0), Operand(32));
+      __ OrU64(i.TempRegister(0), i.TempRegister(0), kScratchReg);
+      __ MovInt64ToDouble(i.OutputDoubleRegister(), i.TempRegister(0));
       break;
     case kPPC_DoubleInsertLowWord32:
       __ InsertDoubleLow(i.OutputDoubleRegister(), i.InputRegister(1), r0);

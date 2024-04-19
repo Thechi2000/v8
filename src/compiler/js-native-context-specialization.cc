@@ -2227,6 +2227,20 @@ Reduction JSNativeContextSpecialization::ReduceElementAccess(
     }
   }
 
+  // Do not optimize Float16 typed arrays, since they are not yet supported by
+  // the rest of the compiler.
+  // TODO(v8:14012): We could lower further here and emit LoadTypedElement (like
+  // we do for other typed arrays). However, given the lack of hardware support
+  // for Float16 operations, it's not clear whether optimizing further would be
+  // really useful.
+  for (const ElementAccessInfo& access_info : access_infos) {
+    if (access_info.elements_kind() == ElementsKind::FLOAT16_ELEMENTS ||
+        access_info.elements_kind() ==
+            ElementsKind::RAB_GSAB_FLOAT16_ELEMENTS) {
+      return NoChange();
+    }
+  }
+
   // For holey stores or growing stores, we need to check that the prototype
   // chain contains no setters for elements, and we need to guard those checks
   // via code dependencies on the relevant prototype maps.
@@ -2785,13 +2799,13 @@ Node* JSNativeContextSpecialization::InlineApiCall(
     Node* receiver, Node* api_holder, Node* frame_state, Node* value,
     Node** effect, Node** control,
     FunctionTemplateInfoRef function_template_info) {
-  if (!function_template_info.call_code(broker()).has_value()) {
+  compiler::OptionalObjectRef maybe_callback_data =
+      function_template_info.callback_data(broker());
+  if (!maybe_callback_data.has_value()) {
     TRACE_BROKER_MISSING(broker(), "call code for function template info "
                                        << function_template_info);
     return nullptr;
   }
-  CallHandlerInfoRef call_handler_info =
-      *function_template_info.call_code(broker());
 
   // Only setters have a value.
   int const argc = value == nullptr ? 0 : 1;
@@ -2808,9 +2822,8 @@ Node* JSNativeContextSpecialization::InlineApiCall(
           1 /* implicit receiver */,
       CallDescriptor::kNeedsFrameState);
 
-  Node* data =
-      jsgraph()->ConstantNoHole(call_handler_info.data(broker()), broker());
-  ApiFunction function(call_handler_info.callback(broker()));
+  Node* data = jsgraph()->ConstantNoHole(maybe_callback_data.value(), broker());
+  ApiFunction function(function_template_info.callback(broker()));
   Node* function_reference =
       graph()->NewNode(common()->ExternalConstant(ExternalReference::Create(
           &function, ExternalReference::DIRECT_API_CALL)));
@@ -3067,6 +3080,7 @@ JSNativeContextSpecialization::BuildPropertyStore(
       case MachineRepresentation::kBit:
       case MachineRepresentation::kCompressedPointer:
       case MachineRepresentation::kCompressed:
+      case MachineRepresentation::kProtectedPointer:
       case MachineRepresentation::kIndirectPointer:
       case MachineRepresentation::kSandboxedPointer:
       case MachineRepresentation::kWord8:
@@ -3173,24 +3187,6 @@ Reduction JSNativeContextSpecialization::ReduceJSToObject(Node* node) {
   ReplaceWithValue(node, receiver, effect);
   return Replace(receiver);
 }
-
-namespace {
-
-ExternalArrayType GetArrayTypeFromElementsKind(ElementsKind kind) {
-  switch (kind) {
-#define TYPED_ARRAY_CASE(Type, type, TYPE, ctype) \
-  case TYPE##_ELEMENTS:                           \
-  case RAB_GSAB_##TYPE##_ELEMENTS:                \
-    return kExternal##Type##Array;
-    TYPED_ARRAYS(TYPED_ARRAY_CASE)
-#undef TYPED_ARRAY_CASE
-    default:
-      break;
-  }
-  UNREACHABLE();
-}
-
-}  // namespace
 
 JSNativeContextSpecialization::ValueEffectControl
 JSNativeContextSpecialization::BuildElementAccess(
@@ -3730,6 +3726,7 @@ JSNativeContextSpecialization::
   // Access the actual element.
   ExternalArrayType external_array_type =
       GetArrayTypeFromElementsKind(elements_kind);
+  DCHECK_NE(external_array_type, ExternalArrayType::kExternalFloat16Array);
   switch (keyed_mode.access_mode()) {
     case AccessMode::kLoad: {
       // Check if we can return undefined for out-of-bounds loads.
@@ -3959,6 +3956,11 @@ Node* JSNativeContextSpecialization::BuildExtendPropertiesBackingStore(
   // it unclear what the best approach is here.
   DCHECK_EQ(map.UnusedPropertyFields(), 0);
   int length = map.NextFreePropertyIndex() - map.GetInObjectProperties();
+  // Under normal circumstances, NextFreePropertyIndex() will always be larger
+  // than GetInObjectProperties(). However, an attacker able to corrupt heap
+  // memory can break this invariant, in which case we'll get confused here,
+  // potentially causing a sandbox violation. This CHECK defends against that.
+  SBXCHECK_GE(length, 0);
   int new_length = length + JSObject::kFieldsAdded;
   // Collect the field values from the {properties}.
   ZoneVector<Node*> values(zone());

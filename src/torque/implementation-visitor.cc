@@ -3615,6 +3615,10 @@ void ImplementationVisitor::GenerateBuiltinDefinitionsAndInterfaceDescriptors(
 
           interface_descriptors << " public:\n";
 
+          // Currently, no torque-defined builtins are directly exposed to
+          // objects inside the sandbox via the code pointer table.
+          interface_descriptors << "  INTERNAL_DESCRIPTOR()\n";
+
           if (has_context_parameter) {
             interface_descriptors << "  DEFINE_RESULT_AND_PARAMETERS(";
           } else {
@@ -4336,14 +4340,14 @@ void CppClassGenerator::GenerateCppObjectLayoutDefinitionAsserts() {
 
   ClassFieldOffsetGenerator g(impl_, impl_, type_, gen_name_,
                               type_->GetSuperClass(), false);
-  for (auto f : type_->fields()) {
+  for (const auto& f : type_->fields()) {
     CurrentSourcePosition::Scope scope(f.pos);
     g.RecordOffsetFor(f);
   }
   g.Finish();
   impl_ << "\n";
 
-  for (auto f : type_->fields()) {
+  for (const auto& f : type_->fields()) {
     std::string field_offset =
         "k" + CamelifyString(f.name_and_type.name) + "Offset";
     std::string cpp_field_offset =
@@ -5248,6 +5252,8 @@ void GenerateClassFieldVerifier(const std::string& class_name,
   if (!field_type->IsSubtypeOf(TypeOracle::GetTaggedType()) &&
       !field_type->StructSupertype())
     return;
+  // Protected pointer fields cannot be read or verified from torque yet.
+  if (field_type->IsSubtypeOf(TypeOracle::GetProtectedPointerType())) return;
   if (field_type == TypeOracle::GetFloat64OrHoleType()) return;
   // Do not verify if the field may be uninitialized.
   if (TypeOracle::GetUninitializedType()->IsSubtypeOf(field_type)) return;

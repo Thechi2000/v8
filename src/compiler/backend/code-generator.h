@@ -159,6 +159,10 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
   void AssembleCode();  // Does not need to run on main thread.
   MaybeHandle<Code> FinalizeCode();
 
+#if V8_ENABLE_WEBASSEMBLY
+  base::OwnedVector<uint8_t> GenerateWasmDeoptimizationData();
+#endif
+
   base::OwnedVector<uint8_t> GetSourcePositionTable();
   base::OwnedVector<uint8_t> GetProtectedInstructionsData();
 
@@ -413,6 +417,7 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
   // ===========================================================================
 
   void RecordCallPosition(Instruction* instr);
+  void RecordDeoptInfo(Instruction* instr, int pc_offset);
   Handle<DeoptimizationData> GenerateDeoptimizationData();
   int DefineDeoptimizationLiteral(DeoptimizationLiteral literal);
   DeoptimizationEntry const& GetDeoptimizationEntry(Instruction* instr,

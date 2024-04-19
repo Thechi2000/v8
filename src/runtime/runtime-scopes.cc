@@ -13,7 +13,12 @@
 #include "src/execution/isolate.h"
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/objects/arguments-inl.h"
+#include "src/objects/fixed-array.h"
+#include "src/objects/js-disposable-stack-inl.h"
+#include "src/objects/objects.h"
+#include "src/objects/oddball.h"
 #include "src/objects/smi.h"
+#include "src/objects/tagged.h"
 #include "src/runtime/runtime-utils.h"
 
 namespace v8 {
@@ -23,6 +28,12 @@ RUNTIME_FUNCTION(Runtime_ThrowConstAssignError) {
   HandleScope scope(isolate);
   THROW_NEW_ERROR_RETURN_FAILURE(isolate,
                                  NewTypeError(MessageTemplate::kConstAssign));
+}
+
+RUNTIME_FUNCTION(Runtime_ThrowUsingAssignError) {
+  HandleScope scope(isolate);
+  THROW_NEW_ERROR_RETURN_FAILURE(isolate,
+                                 NewTypeError(MessageTemplate::kUsingAssign));
 }
 
 namespace {
@@ -223,6 +234,40 @@ RUNTIME_FUNCTION(Runtime_DeclareGlobals) {
   });
 
   return ReadOnlyRoots(isolate).undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_InitializeDisposableStack) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(0, args.length());
+
+  return *isolate->factory()->NewJSDisposableStack();
+}
+
+RUNTIME_FUNCTION(Runtime_AddDisposableValue) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+
+  Handle<JSDisposableStack> stack = args.at<JSDisposableStack>(0);
+  Handle<Object> value = args.at<Object>(1);
+
+  Handle<Object> dispose_method;
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, dispose_method,
+      Object::GetProperty(isolate, value,
+                          isolate->factory()->dispose_symbol()));
+
+  JSDisposableStack::Add(isolate, stack, value, dispose_method);
+
+  return *value;
+}
+
+RUNTIME_FUNCTION(Runtime_DisposeDisposableStack) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+
+  Handle<JSDisposableStack> disposable_stack = args.at<JSDisposableStack>(0);
+
+  return JSDisposableStack::DisposeResources(isolate, disposable_stack);
 }
 
 namespace {
@@ -549,6 +594,7 @@ RUNTIME_FUNCTION(Runtime_NewRestParameter) {
   Handle<JSObject> result = isolate->factory()->NewJSArray(
       PACKED_ELEMENTS, num_elements, num_elements,
       ArrayStorageAllocationMode::DONT_INITIALIZE_ARRAY_ELEMENTS);
+  if (num_elements == 0) return *result;
   {
     DisallowGarbageCollection no_gc;
     Tagged<FixedArray> elements = FixedArray::cast(result->elements());
@@ -812,13 +858,18 @@ MaybeHandle<Object> StoreLookupSlot(
   }
   // The property was found in a context slot.
   if (index != Context::kNotFound) {
+    auto holder_context = Handle<Context>::cast(holder);
     if (flag == kNeedsInitialization &&
-        IsTheHole(Handle<Context>::cast(holder)->get(index), isolate)) {
+        IsTheHole(holder_context->get(index), isolate)) {
       THROW_NEW_ERROR(isolate,
                       NewReferenceError(MessageTemplate::kNotDefined, name),
                       Object);
     }
     if ((attributes & READ_ONLY) == 0) {
+      if (v8_flags.const_tracking_let && holder_context->IsScriptContext()) {
+        Context::UpdateConstTrackingLetSideData(holder_context, index, value,
+                                                isolate);
+      }
       Handle<Context>::cast(holder)->set(index, *value);
     } else if (!is_sloppy_function_name || is_strict(language_mode)) {
       THROW_NEW_ERROR(

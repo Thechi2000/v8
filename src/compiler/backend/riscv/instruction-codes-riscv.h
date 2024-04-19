@@ -92,6 +92,7 @@ namespace compiler {
   V(RiscvWord64AtomicExchangeUint64)                 \
   V(RiscvLoadDecodeSandboxedPointer)                 \
   V(RiscvStoreEncodeSandboxedPointer)                \
+  V(RiscvStoreIndirectPointer)                       \
   V(RiscvAtomicLoadDecompressTaggedSigned)           \
   V(RiscvAtomicLoadDecompressTagged)                 \
   V(RiscvAtomicStoreCompressTagged)                  \
@@ -374,7 +375,6 @@ namespace compiler {
   V(RiscvVzextVf2)                        \
   V(RiscvVsextVf2)
 
-#ifdef CAN_USE_ZBB_INSTRUCTIONS
 #define TARGET_ARCH_OPCODE_LIST_ZBB(V) \
   V(RiscvAndn)                         \
   V(RiscvOrn)                          \
@@ -400,13 +400,6 @@ namespace compiler {
 #define TARGET_ARCH_OPCODE_LIST_ZBB_32(V)
 #endif
 
-#else
-#define TARGET_ARCH_OPCODE_LIST_ZBB(V)
-
-#define TARGET_ARCH_OPCODE_LIST_ZBB_32(V)
-#endif
-
-#ifdef CAN_USE_ZBA_INSTRUCTIONS
 #define TARGET_ARCH_OPCODE_LIST_ZBA(V) \
   V(RiscvSh1add)                       \
   V(RiscvSh2add)                       \
@@ -422,12 +415,7 @@ namespace compiler {
 #else
 #define TARGET_ARCH_OPCODE_LIST_ZBA_32(V)
 #endif
-#else
-#define TARGET_ARCH_OPCODE_LIST_ZBA(V)
-#define TARGET_ARCH_OPCODE_LIST_ZBA_32(V)
-#endif
 
-#ifdef CAN_USE_ZBS_INSTRUCTIONS
 #define TARGET_ARCH_OPCODE_LIST_ZBS(V) \
   V(RiscvBclr)                         \
   V(RiscvBclri)                        \
@@ -437,9 +425,6 @@ namespace compiler {
   V(RiscvBinvi)                        \
   V(RiscvBset)                         \
   V(RiscvBseti)
-#else
-#define TARGET_ARCH_OPCODE_LIST_ZBS(V)
-#endif
 
 #define TARGET_ARCH_OPCODE_LIST(V)   \
   TARGET_ARCH_OPCODE_LIST_COMMON(V)  \

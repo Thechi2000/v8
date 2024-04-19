@@ -1850,7 +1850,8 @@ TEST(NativeSnapshotObjectIdMoving) {
     auto local = v8::Local<v8::String>::New(isolate, wrapper);
     i::Handle<i::String> internal = i::Handle<i::String>::cast(
         v8::Utils::OpenHandle(*v8::Local<v8::String>::Cast(local)));
-    i::heap::ForceEvacuationCandidate(i::Page::FromHeapObject(*internal));
+    i::heap::ForceEvacuationCandidate(
+        i::PageMetadata::FromHeapObject(*internal));
   }
   i::heap::InvokeMajorGC(CcTest::heap());
 
@@ -2061,7 +2062,13 @@ TEST(GetHeapValueForDeletedObject) {
     CHECK(heap_profiler->FindObjectById(prop->GetId())->IsObject());
   }
   CompileRun("delete a.p;");
-  CHECK(heap_profiler->FindObjectById(prop->GetId()).IsEmpty());
+  {
+    // Exclude the stack during object finding, so that conservative stack
+    // scanning may not accidentally mark the object as reachable.
+    i::Heap* heap = reinterpret_cast<i::Isolate*>(env->GetIsolate())->heap();
+    i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
+    CHECK(heap_profiler->FindObjectById(prop->GetId()).IsEmpty());
+  }
 }
 
 static int StringCmp(const char* ref, i::Tagged<i::String> act) {
@@ -2834,8 +2841,6 @@ TEST(ArrayGrowLeftTrim) {
   AllocationTracker* tracker =
       reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
   CHECK(tracker);
-  // Resolve all function locations.
-  tracker->PrepareForSerialization();
   // Print for better diagnostics in case of failure.
   tracker->trace_tree()->Print(tracker);
 
@@ -2858,8 +2863,6 @@ TEST(TrackHeapAllocationsWithInlining) {
   AllocationTracker* tracker =
       reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
   CHECK(tracker);
-  // Resolve all function locations.
-  tracker->PrepareForSerialization();
   // Print for better diagnostics in case of failure.
   tracker->trace_tree()->Print(tracker);
 
@@ -2892,8 +2895,6 @@ TEST(TrackHeapAllocationsWithoutInlining) {
   AllocationTracker* tracker =
       reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
   CHECK(tracker);
-  // Resolve all function locations.
-  tracker->PrepareForSerialization();
   // Print for better diagnostics in case of failure.
   tracker->trace_tree()->Print(tracker);
 
@@ -2942,8 +2943,6 @@ TEST(TrackBumpPointerAllocations) {
     AllocationTracker* tracker =
         reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
     CHECK(tracker);
-    // Resolve all function locations.
-    tracker->PrepareForSerialization();
     // Print for better diagnostics in case of failure.
     tracker->trace_tree()->Print(tracker);
 
@@ -2968,8 +2967,6 @@ TEST(TrackBumpPointerAllocations) {
     AllocationTracker* tracker =
         reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
     CHECK(tracker);
-    // Resolve all function locations.
-    tracker->PrepareForSerialization();
     // Print for better diagnostics in case of failure.
     tracker->trace_tree()->Print(tracker);
 
@@ -2997,8 +2994,6 @@ TEST(TrackV8ApiAllocation) {
   AllocationTracker* tracker =
       reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
   CHECK(tracker);
-  // Resolve all function locations.
-  tracker->PrepareForSerialization();
   // Print for better diagnostics in case of failure.
   tracker->trace_tree()->Print(tracker);
 

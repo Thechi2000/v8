@@ -291,11 +291,6 @@ class V8_EXPORT Module : public Data {
    * module_name is used solely for logging/debugging and doesn't affect module
    * behavior.
    */
-  V8_DEPRECATED("Please use the version that takes a MemorySpan")
-  static Local<Module> CreateSyntheticModule(
-      Isolate* isolate, Local<String> module_name,
-      const std::vector<Local<String>>& export_names,
-      SyntheticModuleEvaluationSteps evaluation_steps);
   static Local<Module> CreateSyntheticModule(
       Isolate* isolate, Local<String> module_name,
       const MemorySpan<const Local<String>>& export_names,
@@ -310,17 +305,6 @@ class V8_EXPORT Module : public Data {
    */
   V8_WARN_UNUSED_RESULT Maybe<bool> SetSyntheticModuleExport(
       Isolate* isolate, Local<String> export_name, Local<Value> export_value);
-
-  /**
-   * Search the modules requested directly or indirectly by the module for
-   * any top-level await that has not yet resolved. If there is any, the
-   * returned vector contains a tuple of the unresolved module and a message
-   * with the pending top-level await.
-   * An embedder may call this before exiting to improve error messages.
-   */
-  V8_DEPRECATED("Please use GetStalledTopLevelAwaitMessages")
-  std::vector<std::tuple<Local<Module>, Local<Message>>>
-  GetStalledTopLevelAwaitMessage(Isolate* isolate);
 
   /**
    * Search the modules requested directly or indirectly by the module for
@@ -803,15 +787,6 @@ class V8_EXPORT ScriptCompiler {
    * It is possible to specify multiple context extensions (obj in the above
    * example).
    */
-  V8_DEPRECATED("Use CompileFunction")
-  static V8_WARN_UNUSED_RESULT MaybeLocal<Function> CompileFunctionInContext(
-      Local<Context> context, Source* source, size_t arguments_count,
-      Local<String> arguments[], size_t context_extension_count,
-      Local<Object> context_extensions[],
-      CompileOptions options = kNoCompileOptions,
-      NoCacheReason no_cache_reason = kNoCacheNoReason,
-      Local<ScriptOrModule>* script_or_module_out = nullptr);
-
   static V8_WARN_UNUSED_RESULT MaybeLocal<Function> CompileFunction(
       Local<Context> context, Source* source, size_t arguments_count = 0,
       Local<String> arguments[] = nullptr, size_t context_extension_count = 0,

@@ -468,6 +468,7 @@ template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitStore(typename Adapter::node_t node) {
   RiscvOperandGeneratorT<Adapter> g(this);
   typename Adapter::StoreView store_view = this->store_view(node);
+  DCHECK_EQ(store_view.displacement(), 0);
   node_t base = store_view.base();
   node_t index = this->value(store_view.index());
   node_t value = store_view.value();
@@ -479,8 +480,8 @@ void InstructionSelectorT<Adapter>::VisitStore(typename Adapter::node_t node) {
   // TODO(riscv): I guess this could be done in a better way.
   if (write_barrier_kind != kNoWriteBarrier &&
       V8_LIKELY(!v8_flags.disable_write_barriers)) {
-    DCHECK(CanBeTaggedPointer(rep));
-    InstructionOperand inputs[3];
+    DCHECK(CanBeTaggedOrCompressedOrIndirectPointer(rep));
+    InstructionOperand inputs[4];
     size_t input_count = 0;
     inputs[input_count++] = g.UseUniqueRegister(base);
     inputs[input_count++] = g.UseUniqueRegister(index);
@@ -489,7 +490,16 @@ void InstructionSelectorT<Adapter>::VisitStore(typename Adapter::node_t node) {
         WriteBarrierKindToRecordWriteMode(write_barrier_kind);
     InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
     size_t const temp_count = arraysize(temps);
-    InstructionCode code = kArchStoreWithWriteBarrier;
+    InstructionCode code;
+    if (rep == MachineRepresentation::kIndirectPointer) {
+      DCHECK_EQ(write_barrier_kind, kIndirectPointerWriteBarrier);
+      // In this case we need to add the IndirectPointerTag as additional input.
+      code = kArchStoreIndirectWithWriteBarrier;
+      IndirectPointerTag tag = store_view.indirect_pointer_tag();
+      inputs[input_count++] = g.UseImmediate64(static_cast<int64_t>(tag));
+    } else {
+      code = kArchStoreWithWriteBarrier;
+    }
     code |= RecordWriteModeField::encode(record_write_mode);
     if (store_view.is_store_trap_on_null()) {
       code |= AccessModeField::encode(kMemoryAccessProtectedNullDereference);
@@ -538,9 +548,11 @@ void InstructionSelectorT<Adapter>::VisitStore(typename Adapter::node_t node) {
       case MachineRepresentation::kSandboxedPointer:
         code = kRiscvStoreEncodeSandboxedPointer;
         break;
+      case MachineRepresentation::kIndirectPointer:
+        code = kRiscvStoreIndirectPointer;
+        break;
       case MachineRepresentation::kSimd256:  // Fall through.
       case MachineRepresentation::kMapWord:  // Fall through.
-      case MachineRepresentation::kIndirectPointer:  // Fall through.
       case MachineRepresentation::kNone:
         UNREACHABLE();
     }
@@ -855,26 +867,26 @@ void InstructionSelectorT<Adapter>::VisitWord64ReverseBits(node_t node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord64ReverseBytes(node_t node) {
     RiscvOperandGeneratorT<Adapter> g(this);
-#ifdef CAN_USE_ZBB_INSTRUCTIONS
-    Emit(kRiscvRev8, g.DefineAsRegister(node),
-         g.UseRegister(this->input_at(node, 0)));
-#else
-    Emit(kRiscvByteSwap64, g.DefineAsRegister(node),
-         g.UseRegister(this->input_at(node, 0)));
-#endif
+    if (CpuFeatures::IsSupported(ZBB)) {
+      Emit(kRiscvRev8, g.DefineAsRegister(node),
+           g.UseRegister(this->input_at(node, 0)));
+    } else {
+      Emit(kRiscvByteSwap64, g.DefineAsRegister(node),
+           g.UseRegister(this->input_at(node, 0)));
+    }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord32ReverseBytes(node_t node) {
     RiscvOperandGeneratorT<Adapter> g(this);
-#ifdef CAN_USE_ZBB_INSTRUCTIONS
-    InstructionOperand temp = g.TempRegister();
-    Emit(kRiscvRev8, temp, g.UseRegister(this->input_at(node, 0)));
-    Emit(kRiscvShr64, g.DefineAsRegister(node), temp, g.TempImmediate(32));
-#else
-    Emit(kRiscvByteSwap32, g.DefineAsRegister(node),
-         g.UseRegister(this->input_at(node, 0)));
-#endif
+    if (CpuFeatures::IsSupported(ZBB)) {
+      InstructionOperand temp = g.TempRegister();
+      Emit(kRiscvRev8, temp, g.UseRegister(this->input_at(node, 0)));
+      Emit(kRiscvShr64, g.DefineAsRegister(node), temp, g.TempImmediate(32));
+    } else {
+      Emit(kRiscvByteSwap32, g.DefineAsRegister(node),
+           g.UseRegister(this->input_at(node, 0)));
+    }
 }
 
 template <typename Adapter>
@@ -1685,13 +1697,15 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitTruncateInt64ToInt32(
           TryEmitExtendingLoad(this, value, node)) {
         return;
       } else {
-        auto constant = constant_view(input_at(value, 1)).int64_value();
-        if (constant <= 63 && constant >= 32) {
-          // After smi untagging no need for truncate. Combine sequence.
-          Emit(kRiscvSar64, g.DefineSameAsFirst(node),
-               g.UseRegister(input_at(value, 0)),
-               g.UseImmediate(input_at(value, 1)));
-          return;
+        auto constant = constant_view(input_at(value, 1));
+        if (constant.is_int64()) {
+          if (constant.int64_value() <= 63 && constant.int64_value() >= 32) {
+            // After smi untagging no need for truncate. Combine sequence.
+            Emit(kRiscvSar64, g.DefineSameAsFirst(node),
+                 g.UseRegister(input_at(value, 0)),
+                 g.UseImmediate(input_at(value, 1)));
+            return;
+          }
         }
       }
     }

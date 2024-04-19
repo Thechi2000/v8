@@ -13,6 +13,7 @@
 #include "src/heap/linear-allocation-area.h"
 #include "src/roots/roots.h"
 #include "src/sandbox/code-pointer-table.h"
+#include "src/sandbox/external-buffer-table.h"
 #include "src/sandbox/external-pointer-table.h"
 #include "src/sandbox/trusted-pointer-table.h"
 #include "src/utils/utils.h"
@@ -46,54 +47,54 @@ class Isolate;
 #endif  // V8_HOST_ARCH_64_BIT
 
 // IsolateData fields, defined as: V(Offset, Size, Name)
-#define ISOLATE_DATA_FIELDS(V)                                                \
-  /* Misc. fields. */                                                         \
-  V(kCageBaseOffset, kSystemPointerSize, cage_base)                           \
-  V(kStackGuardOffset, StackGuard::kSizeInBytes, stack_guard)                 \
-  V(kIsMarkingFlag, kUInt8Size, is_marking_flag)                              \
-  V(kIsMinorMarkingFlag, kUInt8Size, is_minor_marking_flag)                   \
-  V(kIsSharedSpaceIsolateFlag, kUInt8Size, is_shared_space_isolate_flag)      \
-  V(kUsesSharedHeapFlag, kUInt8Size, uses_shared_heap_flag)                   \
-  V(kExecutionModeOffset, kUInt8Size, execution_mode)                         \
-  V(kStackIsIterableOffset, kUInt8Size, stack_is_iterable)                    \
-  V(kErrorMessageParam, kUInt8Size, error_message_param)                      \
-  V(kTablesAlignmentPaddingOffset, 1, tables_alignment_padding)               \
-  /* Tier 0 tables (small but fast access). */                                \
-  V(kBuiltinTier0EntryTableOffset,                                            \
-    Builtins::kBuiltinTier0Count* kSystemPointerSize,                         \
-    builtin_tier0_entry_table)                                                \
-  V(kBuiltinsTier0TableOffset,                                                \
-    Builtins::kBuiltinTier0Count* kSystemPointerSize, builtin_tier0_table)    \
-  /* Misc. fields. */                                                         \
-  V(kNewAllocationInfoOffset, LinearAllocationArea::kSize,                    \
-    new_allocation_info)                                                      \
-  V(kOldAllocationInfoOffset, LinearAllocationArea::kSize,                    \
-    old_allocation_info)                                                      \
-  ISOLATE_DATA_FAST_C_CALL_PADDING(V)                                         \
-  V(kFastCCallCallerFPOffset, kSystemPointerSize, fast_c_call_caller_fp)      \
-  V(kFastCCallCallerPCOffset, kSystemPointerSize, fast_c_call_caller_pc)      \
-  V(kFastApiCallTargetOffset, kSystemPointerSize, fast_api_call_target)       \
-  V(kLongTaskStatsCounterOffset, kSizetSize, long_task_stats_counter)         \
-  V(kThreadLocalTopOffset, ThreadLocalTop::kSizeInBytes, thread_local_top)    \
-  V(kHandleScopeDataOffset, HandleScopeData::kSizeInBytes, handle_scope_data) \
-  V(kEmbedderDataOffset, Internals::kNumIsolateDataSlots* kSystemPointerSize, \
-    embedder_data)                                                            \
-  ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)                                  \
-  ISOLATE_DATA_FIELDS_SANDBOX(V)                                              \
-  V(kApiCallbackThunkArgumentOffset, kSystemPointerSize,                      \
-    api_callback_thunk_argument)                                              \
-  V(kContinuationPreservedEmbedderDataOffset, kSystemPointerSize,             \
-    continuation_preserved_embedder_data)                                     \
-  ISOLATE_DATA_WASM64_OOB_PADDING(V)                                          \
-  V(kWasm64OOBOffset, kInt64Size, wasm64_oob_offset)                          \
-  /* Full tables (arbitrary size, potentially slower access). */              \
-  V(kRootsTableOffset, RootsTable::kEntriesCount* kSystemPointerSize,         \
-    roots_table)                                                              \
-  V(kExternalReferenceTableOffset, ExternalReferenceTable::kSizeInBytes,      \
-    external_reference_table)                                                 \
-  V(kBuiltinEntryTableOffset, Builtins::kBuiltinCount* kSystemPointerSize,    \
-    builtin_entry_table)                                                      \
-  V(kBuiltinTableOffset, Builtins::kBuiltinCount* kSystemPointerSize,         \
+#define ISOLATE_DATA_FIELDS(V)                                                 \
+  /* Misc. fields. */                                                          \
+  V(kCageBaseOffset, kSystemPointerSize, cage_base)                            \
+  V(kStackGuardOffset, StackGuard::kSizeInBytes, stack_guard)                  \
+  V(kIsMarkingFlag, kUInt8Size, is_marking_flag)                               \
+  V(kIsMinorMarkingFlag, kUInt8Size, is_minor_marking_flag)                    \
+  V(kIsSharedSpaceIsolateFlag, kUInt8Size, is_shared_space_isolate_flag)       \
+  V(kUsesSharedHeapFlag, kUInt8Size, uses_shared_heap_flag)                    \
+  V(kExecutionModeOffset, kUInt8Size, execution_mode)                          \
+  V(kStackIsIterableOffset, kUInt8Size, stack_is_iterable)                     \
+  V(kErrorMessageParam, kUInt8Size, error_message_param)                       \
+  V(kTablesAlignmentPaddingOffset, 1, tables_alignment_padding)                \
+  /* Tier 0 tables (small but fast access). */                                 \
+  V(kBuiltinTier0EntryTableOffset,                                             \
+    Builtins::kBuiltinTier0Count* kSystemPointerSize,                          \
+    builtin_tier0_entry_table)                                                 \
+  V(kBuiltinsTier0TableOffset,                                                 \
+    Builtins::kBuiltinTier0Count* kSystemPointerSize, builtin_tier0_table)     \
+  /* Misc. fields. */                                                          \
+  V(kNewAllocationInfoOffset, LinearAllocationArea::kSize,                     \
+    new_allocation_info)                                                       \
+  V(kOldAllocationInfoOffset, LinearAllocationArea::kSize,                     \
+    old_allocation_info)                                                       \
+  ISOLATE_DATA_FAST_C_CALL_PADDING(V)                                          \
+  V(kFastCCallCallerFPOffset, kSystemPointerSize, fast_c_call_caller_fp)       \
+  V(kFastCCallCallerPCOffset, kSystemPointerSize, fast_c_call_caller_pc)       \
+  V(kFastApiCallTargetOffset, kSystemPointerSize, fast_api_call_target)        \
+  V(kLongTaskStatsCounterOffset, kSizetSize, long_task_stats_counter)          \
+  V(kThreadLocalTopOffset, ThreadLocalTop::kSizeInBytes, thread_local_top)     \
+  V(kHandleScopeDataOffset, HandleScopeData::kSizeInBytes, handle_scope_data)  \
+  V(kEmbedderDataOffset, Internals::kNumIsolateDataSlots* kSystemPointerSize,  \
+    embedder_data)                                                             \
+  ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)                                   \
+  ISOLATE_DATA_FIELDS_SANDBOX(V)                                               \
+  V(kApiCallbackThunkArgumentOffset, kSystemPointerSize,                       \
+    api_callback_thunk_argument)                                               \
+  V(kContinuationPreservedEmbedderDataOffset, kSystemPointerSize,              \
+    continuation_preserved_embedder_data)                                      \
+  ISOLATE_DATA_WASM64_OOB_PADDING(V)                                           \
+  V(kWasm64OOBOffset, kInt64Size, wasm64_oob_offset)                           \
+  /* Full tables (arbitrary size, potentially slower access). */               \
+  V(kRootsTableOffset, RootsTable::kEntriesCount* kSystemPointerSize,          \
+    roots_table)                                                               \
+  V(kExternalReferenceTableOffset, ExternalReferenceTable::kSizeInBytes,       \
+    external_reference_table)                                                  \
+  V(kBuiltinEntryTableOffset, Builtins::kBuiltinCount* kSystemPointerSize,     \
+    builtin_entry_table)                                                       \
+  V(kBuiltinTableOffset, Builtins::kBuiltinCount* kSystemPointerSize,          \
     builtin_table)
 
 #ifdef V8_COMPRESS_POINTERS
@@ -101,7 +102,9 @@ class Isolate;
   V(kExternalPointerTableOffset, ExternalPointerTable::kSize, \
     external_pointer_table)                                   \
   V(kSharedExternalPointerTableOffset, kSystemPointerSize,    \
-    shared_external_pointer_table)
+    shared_external_pointer_table)                            \
+  V(kCppHeapPointerTableOffset, ExternalPointerTable::kSize,  \
+    cpp_heap_pointer_table)
 #else
 #define ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)
 #endif  // V8_COMPRESS_POINTERS
@@ -110,7 +113,11 @@ class Isolate;
 #define ISOLATE_DATA_FIELDS_SANDBOX(V)                             \
   V(kTrustedCageBaseOffset, kSystemPointerSize, trusted_cage_base) \
   V(kTrustedPointerTableOffset, TrustedPointerTable::kSize,        \
-    trusted_pointer_table)
+    trusted_pointer_table)                                         \
+  V(kExternalBufferTableOffset, ExternalBufferTable::kSize,        \
+    external_buffer_table)                                         \
+  V(kSharedExternalBufferTableOffset, kSystemPointerSize,          \
+    shared_external_buffer_table)
 #else
 #define ISOLATE_DATA_FIELDS_SANDBOX(V)
 #endif  // V8_ENABLE_SANDBOX
@@ -184,6 +191,11 @@ class IsolateData final {
   Address fast_c_call_caller_fp() const { return fast_c_call_caller_fp_; }
   Address fast_c_call_caller_pc() const { return fast_c_call_caller_pc_; }
   Address fast_api_call_target() const { return fast_api_call_target_; }
+
+  static constexpr int exception_offset() {
+    return thread_local_top_offset() + ThreadLocalTop::exception_offset();
+  }
+
   // The value of kPointerCageBaseRegister.
   Address cage_base() const { return cage_base_; }
   StackGuard* stack_guard() { return &stack_guard_; }
@@ -335,12 +347,15 @@ class IsolateData final {
 #ifdef V8_COMPRESS_POINTERS
   ExternalPointerTable external_pointer_table_;
   ExternalPointerTable* shared_external_pointer_table_;
+  ExternalPointerTable cpp_heap_pointer_table_;
 #endif  // V8_COMPRESS_POINTERS
 
 #ifdef V8_ENABLE_SANDBOX
   const Address trusted_cage_base_;
 
   TrustedPointerTable trusted_pointer_table_;
+  ExternalBufferTable external_buffer_table_;
+  ExternalBufferTable* shared_external_buffer_table_;
 #endif  // V8_ENABLE_SANDBOX
 
   // This is a storage for an additional argument for the Api callback thunk

@@ -11,6 +11,7 @@
 #include "src/objects/heap-number.h"
 #include "src/objects/js-collection.h"
 #include "src/objects/js-generator.h"
+#include "src/objects/js-objects.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/ordered-hash-table.h"
 #include "src/objects/source-text-module.h"
@@ -609,6 +610,15 @@ FieldAccess AccessBuilder::ForJSIteratorResultValue() {
                         MaybeHandle<Name>(), OptionalMapRef(),
                         Type::NonInternal(), MachineType::AnyTagged(),
                         kFullWriteBarrier,   "JSIteratorResultValue"};
+  return access;
+}
+
+// static
+FieldAccess AccessBuilder::ForJSPrimitiveWrapperValue() {
+  FieldAccess access = {kTaggedBase,         JSPrimitiveWrapper::kValueOffset,
+                        MaybeHandle<Name>(), OptionalMapRef(),
+                        Type::NonInternal(), MachineType::AnyTagged(),
+                        kFullWriteBarrier,   "JSPrimitiveWrapperValue"};
   return access;
 }
 
@@ -1213,6 +1223,10 @@ ElementAccess AccessBuilder::ForTypedArrayElement(ExternalArrayType type,
       ElementAccess access = {taggedness, header_size, Type::Unsigned32(),
                               MachineType::Uint32(), kNoWriteBarrier};
       return access;
+    }
+    case kExternalFloat16Array: {
+      // TODO(v8:14012): support machine logic
+      UNIMPLEMENTED();
     }
     case kExternalFloat32Array: {
       ElementAccess access = {taggedness, header_size, Type::Number(),

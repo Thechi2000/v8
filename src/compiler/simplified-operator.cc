@@ -934,6 +934,7 @@ bool operator==(AssertNotNullParameters const& lhs,
   V(CheckNumber, 1, 1)                   \
   V(CheckSmi, 1, 1)                      \
   V(CheckString, 1, 1)                   \
+  V(CheckStringOrStringWrapper, 1, 1)    \
   V(CheckBigInt, 1, 1)                   \
   V(CheckedBigIntToBigInt64, 1, 1)       \
   V(CheckedInt32ToTaggedSigned, 1, 1)    \
@@ -2266,8 +2267,8 @@ const Operator* SimplifiedOperatorBuilder::FastApiCall(
       static_cast<int>(descriptor->ParameterCount()) +  // slow call
       FastApiCallNode::kEffectAndControlInputCount;
   return zone()->New<Operator1<FastApiCallParameters>>(
-      IrOpcode::kFastApiCall, Operator::kNoThrow, "FastApiCall",
-      value_input_count, 1, 1, 1, 1, 0,
+      IrOpcode::kFastApiCall, Operator::kNoProperties, "FastApiCall",
+      value_input_count, 1, 1, 1, 1, 2,
       FastApiCallParameters(c_functions, feedback, descriptor));
 }
 

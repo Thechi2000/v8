@@ -28,7 +28,7 @@ MarkingBarrier* WriteBarrier::CurrentMarkingBarrier(
   if (!verification_candidate.is_null() &&
       !InAnySharedSpace(verification_candidate)) {
     Heap* host_heap =
-        MemoryChunk::FromHeapObject(verification_candidate)->heap();
+        MutablePageMetadata::FromHeapObject(verification_candidate)->heap();
     LocalHeap* local_heap = LocalHeap::Current();
     if (!local_heap) local_heap = host_heap->main_thread_local_heap();
     DCHECK_EQ(marking_barrier, local_heap->marking_barrier());
@@ -63,6 +63,13 @@ void WriteBarrier::MarkingSlowFromInternalFields(Heap* heap,
   }
 }
 
+// static
+void WriteBarrier::MarkingSlowFromCppHeapWrappable(Heap* heap, void* object) {
+  if (auto* cpp_heap = heap->cpp_heap()) {
+    CppHeap::From(cpp_heap)->WriteBarrier(object);
+  }
+}
+
 void WriteBarrier::MarkingSlow(Tagged<InstructionStream> host,
                                RelocInfo* reloc_info,
                                Tagged<HeapObject> value) {
@@ -75,8 +82,8 @@ void WriteBarrier::SharedSlow(Tagged<InstructionStream> host,
   MarkCompactCollector::RecordRelocSlotInfo info =
       MarkCompactCollector::ProcessRelocInfo(host, reloc_info, value);
 
-  base::MutexGuard write_scope(info.memory_chunk->mutex());
-  RememberedSet<OLD_TO_SHARED>::InsertTyped(info.memory_chunk, info.slot_type,
+  base::MutexGuard write_scope(info.page_metadata->mutex());
+  RememberedSet<OLD_TO_SHARED>::InsertTyped(info.page_metadata, info.slot_type,
                                             info.offset);
 }
 
@@ -120,7 +127,7 @@ int WriteBarrier::MarkingFromCode(Address raw_host, Address raw_slot) {
 #endif
 
 #if DEBUG
-  Heap* heap = MemoryChunk::FromHeapObject(host)->heap();
+  Heap* heap = MutablePageMetadata::FromHeapObject(host)->heap();
   DCHECK(heap->incremental_marking()->IsMarking());
 
   // We will only reach local objects here while incremental marking in the
@@ -146,7 +153,7 @@ int WriteBarrier::IndirectPointerMarkingFromCode(Address raw_host,
   IndirectPointerSlot slot(raw_slot, tag);
 
 #if DEBUG
-  Heap* heap = MemoryChunk::FromHeapObject(host)->heap();
+  Heap* heap = MutablePageMetadata::FromHeapObject(host)->heap();
   DCHECK(heap->incremental_marking()->IsMarking());
 
   // We will only reach local objects here while incremental marking in the
@@ -172,7 +179,7 @@ int WriteBarrier::SharedMarkingFromCode(Address raw_host, Address raw_slot) {
   DCHECK(InWritableSharedSpace(host));
 
 #if DEBUG
-  Heap* heap = MemoryChunk::FromHeapObject(host)->heap();
+  Heap* heap = MutablePageMetadata::FromHeapObject(host)->heap();
   DCHECK(heap->incremental_marking()->IsMajorMarking());
   Isolate* isolate = heap->isolate();
   DCHECK(isolate->is_shared_space_isolate());
@@ -203,9 +210,9 @@ int WriteBarrier::SharedFromCode(Address raw_host, Address raw_slot) {
 
 #ifdef ENABLE_SLOW_DCHECKS
 bool WriteBarrier::IsImmortalImmovableHeapObject(Tagged<HeapObject> object) {
-  BasicMemoryChunk* basic_chunk = BasicMemoryChunk::FromHeapObject(object);
+  MemoryChunk* chunk = MemoryChunk::FromHeapObject(object);
   // All objects in readonly space are immortal and immovable.
-  return basic_chunk->InReadOnlySpace();
+  return chunk->InReadOnlySpace();
 }
 #endif
 

@@ -990,13 +990,13 @@ class TestApiCallbacks {
   explicit TestApiCallbacks(int min_duration_ms)
       : min_duration_ms_(min_duration_ms), is_warming_up_(false) {}
 
-  static void Getter(v8::Local<v8::String> name,
+  static void Getter(v8::Local<v8::Name> name,
                      const v8::PropertyCallbackInfo<v8::Value>& info) {
     TestApiCallbacks* data = FromInfo(info);
     data->Wait();
   }
 
-  static void Setter(v8::Local<v8::String> name, v8::Local<v8::Value> value,
+  static void Setter(v8::Local<v8::Name> name, v8::Local<v8::Value> value,
                      const v8::PropertyCallbackInfo<void>& info) {
     TestApiCallbacks* data = FromInfo(info);
     data->Wait();
@@ -4020,9 +4020,12 @@ TEST(ContextIsolation) {
 void ValidateEmbedderState(v8::CpuProfile* profile,
                            EmbedderStateTag expected_tag) {
   for (int i = 0; i < profile->GetSamplesCount(); i++) {
-    if (profile->GetSampleState(i) == StateTag::GC) {
-      // Samples captured during a GC do not have an EmbedderState
-      CHECK_EQ(profile->GetSampleEmbedderState(i), EmbedderStateTag::EMPTY);
+    if (profile->GetSampleState(i) == StateTag::GC ||
+        profile->GetSampleState(i) == StateTag::LOGGING) {
+      // Samples captured during a GC (including logging during GC) might not
+      // have an EmbedderState
+      CHECK(profile->GetSampleEmbedderState(i) == expected_tag ||
+            profile->GetSampleEmbedderState(i) == EmbedderStateTag::EMPTY);
     } else {
       CHECK_EQ(profile->GetSampleEmbedderState(i), expected_tag);
     }
@@ -4180,8 +4183,8 @@ TEST(EmbedderStatePropagateNativeContextMove) {
             [](const v8::FunctionCallbackInfo<v8::Value>& info) {
               i::Isolate* isolate =
                   reinterpret_cast<i::Isolate*>(info.GetIsolate());
-              i::heap::ForceEvacuationCandidate(
-                  i::Page::FromHeapObject(isolate->raw_native_context()));
+              i::heap::ForceEvacuationCandidate(i::PageMetadata::FromHeapObject(
+                  isolate->raw_native_context()));
               heap::InvokeMajorGC(isolate->heap());
             });
     v8::Local<v8::Function> move_func =
@@ -4236,8 +4239,8 @@ TEST(ContextFilterMovedNativeContext) {
             [](const v8::FunctionCallbackInfo<v8::Value>& info) {
               i::Isolate* isolate =
                   reinterpret_cast<i::Isolate*>(info.GetIsolate());
-              i::heap::ForceEvacuationCandidate(
-                  i::Page::FromHeapObject(isolate->raw_native_context()));
+              i::heap::ForceEvacuationCandidate(i::PageMetadata::FromHeapObject(
+                  isolate->raw_native_context()));
               heap::InvokeMajorGC(isolate->heap());
             });
     v8::Local<v8::Function> move_func =
@@ -4422,7 +4425,8 @@ struct FastApiReceiver {
   }
 
   static void SlowCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
-    v8::Object* receiver_obj = v8::Object::Cast(*info.Holder());
+    v8::Object* receiver_obj =
+        v8::Object::Cast(*info.HolderSoonToBeDeprecated());
     if (!IsValidUnwrapObject(receiver_obj)) {
       info.GetIsolate()->ThrowError("Called with a non-object.");
       return;

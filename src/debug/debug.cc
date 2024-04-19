@@ -735,7 +735,7 @@ void Debug::Break(JavaScriptFrame* frame, Handle<JSFunction> break_target) {
     case StepOver:
       // StepOver should not break in a deeper frame than target frame.
       if (current_frame_count > target_frame_count) return;
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case StepInto: {
       // StepInto and StepOver should enter "generator stepping" mode, except
       // for the implicit initial yield in generators, where it should simply
@@ -1544,7 +1544,7 @@ void Debug::PrepareStep(StepAction step_action) {
     }
     case StepOver:
       thread_local_.target_frame_count_ = current_frame_count;
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case StepInto:
       FloodWithOneShot(shared);
       break;
@@ -3109,36 +3109,35 @@ bool Debug::PerformSideEffectCheckForAccessor(
 }
 
 void Debug::IgnoreSideEffectsOnNextCallTo(
-    Handle<CallHandlerInfo> call_handler_info) {
-  DCHECK(call_handler_info->IsSideEffectCallHandlerInfo());
+    Handle<FunctionTemplateInfo> function) {
+  DCHECK(function->has_side_effects());
   // There must be only one such call handler info.
-  CHECK(ignore_side_effects_for_call_handler_info_.is_null());
-  ignore_side_effects_for_call_handler_info_ = call_handler_info;
+  CHECK(ignore_side_effects_for_function_template_info_.is_null());
+  ignore_side_effects_for_function_template_info_ = function;
 }
 
 bool Debug::PerformSideEffectCheckForCallback(
-    Handle<CallHandlerInfo> call_handler_info) {
+    Handle<FunctionTemplateInfo> function) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
 
-  // If an empty |call_handler_info| handle is passed here then it means that
+  // If an empty |function| handle is passed here then it means that
   // the callback IS side-effectful (see CallApiCallbackWithSideEffects
   // builtin).
-  if (!call_handler_info.is_null() &&
-      call_handler_info->IsSideEffectFreeCallHandlerInfo()) {
+  if (!function.is_null() && !function->has_side_effects()) {
     return true;
   }
-  if (!ignore_side_effects_for_call_handler_info_.is_null()) {
-    // If the |ignore_side_effects_for_call_handler_info_| is set then the next
-    // API callback call must be made to this function.
-    CHECK(ignore_side_effects_for_call_handler_info_.is_identical_to(
-        call_handler_info));
-    ignore_side_effects_for_call_handler_info_ = {};
+  if (!ignore_side_effects_for_function_template_info_.is_null()) {
+    // If the |ignore_side_effects_for_function_template_info_| is set then
+    // the next API callback call must be made to this function.
+    CHECK(ignore_side_effects_for_function_template_info_.is_identical_to(
+        function));
+    ignore_side_effects_for_function_template_info_ = {};
     return true;
   }
 
   if (v8_flags.trace_side_effect_free_debug_evaluate) {
-    PrintF("[debug-evaluate] API CallHandlerInfo may cause side effect.\n");
+    PrintF("[debug-evaluate] FunctionTemplateInfo may cause side effect.\n");
   }
 
   side_effect_check_failed_ = true;

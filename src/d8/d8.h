@@ -184,6 +184,8 @@ class SerializationDataQueue {
 
 class Worker : public std::enable_shared_from_this<Worker> {
  public:
+  static constexpr i::ExternalPointerTag kManagedTag = i::kGenericManagedTag;
+
   explicit Worker(const char* script);
   ~Worker();
 
@@ -554,9 +556,9 @@ class Shell : public i::AllStatic {
   static void RealmDispose(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void RealmSwitch(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void RealmEval(const v8::FunctionCallbackInfo<v8::Value>& info);
-  static void RealmSharedGet(Local<String> property,
+  static void RealmSharedGet(Local<Name> property,
                              const PropertyCallbackInfo<Value>& info);
-  static void RealmSharedSet(Local<String> property, Local<Value> value,
+  static void RealmSharedSet(Local<Name> property, Local<Value> value,
                              const PropertyCallbackInfo<void>& info);
 
   static void LogGetAndStop(const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -565,6 +567,7 @@ class Shell : public i::AllStatic {
 
   static void InstallConditionalFeatures(
       const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void EnableJSPI(const v8::FunctionCallbackInfo<v8::Value>& info);
 
   static void AsyncHooksCreateHook(
       const v8::FunctionCallbackInfo<v8::Value>& info);

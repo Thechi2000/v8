@@ -53,8 +53,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvTruncLS:
     case kRiscvTruncUlD:
     case kRiscvTruncUlS:
-    case kRiscvLoadDecodeSandboxedPointer:
-    case kRiscvStoreEncodeSandboxedPointer:
     case kRiscvCmp32:
 #elif V8_TARGET_ARCH_RISCV32
     case kRiscvAdd32:
@@ -71,7 +69,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvSubOvf:
     case kRiscvSub32:
 #endif
-#ifdef CAN_USE_ZBA_INSTRUCTIONS
     case kRiscvSh1add:
     case kRiscvSh2add:
     case kRiscvSh3add:
@@ -82,8 +79,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvSh3adduw:
     case kRiscvSlliuw:
 #endif
-#endif
-#ifdef CAN_USE_ZBB_INSTRUCTIONS
     case kRiscvAndn:
     case kRiscvOrn:
     case kRiscvXnor:
@@ -103,8 +98,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvSexth:
     case kRiscvZexth:
     case kRiscvRev8:
-#endif
-#ifdef CAN_USE_ZBS_INSTRUCTIONS
     case kRiscvBclr:
     case kRiscvBclri:
     case kRiscvBext:
@@ -113,7 +106,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvBinvi:
     case kRiscvBset:
     case kRiscvBseti:
-#endif
     case kRiscvAbsD:
     case kRiscvAbsS:
     case kRiscvAddD:
@@ -335,6 +327,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvWord64AtomicLoadUint64:
     case kRiscvLoadDecompressTaggedSigned:
     case kRiscvLoadDecompressTagged:
+    case kRiscvLoadDecodeSandboxedPointer:
     case kRiscvAtomicLoadDecompressTaggedSigned:
     case kRiscvAtomicLoadDecompressTagged:
     case kRiscvAtomicStoreCompressTagged:
@@ -374,6 +367,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kRiscvWord64AtomicExchangeUint64:
     case kRiscvWord64AtomicCompareExchangeUint64:
     case kRiscvStoreCompressTagged:
+    case kRiscvStoreEncodeSandboxedPointer:
+    case kRiscvStoreIndirectPointer:
 #elif V8_TARGET_ARCH_RISCV32
     case kRiscvWord32AtomicPairStore:
     case kRiscvWord32AtomicPairAdd:

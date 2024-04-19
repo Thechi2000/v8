@@ -37,6 +37,8 @@ PropertyKey::PropertyKey(Isolate* isolate, Handle<Object> key, bool* success) {
     return;
   }
   if (!name_->AsIntegerIndex(&index_)) {
+    // Make sure the name is internalized.
+    name_ = isolate->factory()->InternalizeName(name_);
     // {AsIntegerIndex} may modify {index_} before deciding to fail.
     index_ = LookupIterator::kInvalidIndex;
   }
@@ -337,6 +339,22 @@ void LookupIterator::InternalUpdateProtector(Isolate* isolate,
     if (receiver->map()->is_prototype_map() &&
         (IsJSPrimitiveWrapper(*receiver) || IsJSObjectPrototype(*receiver))) {
       Protectors::InvalidateNumberStringNotRegexpLike(isolate);
+    }
+  } else if (*name == roots.to_primitive_symbol()) {
+    if (!Protectors::IsStringWrapperToPrimitiveIntact(isolate)) return;
+    if (isolate->IsInAnyContext(*receiver,
+                                Context::INITIAL_STRING_PROTOTYPE_INDEX) ||
+        isolate->IsInAnyContext(*receiver,
+                                Context::INITIAL_OBJECT_PROTOTYPE_INDEX) ||
+        IsStringWrapper(*receiver)) {
+      Protectors::InvalidateStringWrapperToPrimitive(isolate);
+    }
+  } else if (*name == roots.valueOf_string()) {
+    if (!Protectors::IsStringWrapperToPrimitiveIntact(isolate)) return;
+    if (isolate->IsInAnyContext(*receiver,
+                                Context::INITIAL_STRING_PROTOTYPE_INDEX) ||
+        IsStringWrapper(*receiver)) {
+      Protectors::InvalidateStringWrapperToPrimitive(isolate);
     }
   }
 }
@@ -1189,7 +1207,7 @@ bool LookupIterator::SkipInterceptor(Tagged<JSObject> holder) {
     switch (interceptor_state_) {
       case InterceptorState::kUninitialized:
         interceptor_state_ = InterceptorState::kSkipNonMasking;
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       case InterceptorState::kSkipNonMasking:
         return true;
       case InterceptorState::kProcessNonMasking:
@@ -1254,13 +1272,13 @@ LookupIterator::State LookupIterator::LookupInSpecialHolder(
         if (is_element || !name_->IsPrivate() || name_->IsPrivateName())
           return ACCESS_CHECK;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case ACCESS_CHECK:
       if (check_interceptor() && HasInterceptor<is_element>(map, index_) &&
           !SkipInterceptor<is_element>(JSObject::cast(holder))) {
         if (is_element || !name_->IsPrivate()) return INTERCEPTOR;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case INTERCEPTOR:
       if (IsJSGlobalObjectMap(map) && !is_js_array_element(is_element)) {
         Tagged<GlobalDictionary> dict =

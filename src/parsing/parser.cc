@@ -324,18 +324,17 @@ Expression* Parser::NewThrowError(Runtime::FunctionId id,
   return factory()->NewThrow(call_constructor, pos);
 }
 
-Expression* Parser::NewSuperPropertyReference(Scope* home_object_scope,
-                                              int pos) {
+Expression* Parser::NewSuperPropertyReference(int pos) {
   const AstRawString* home_object_name;
   if (IsStatic(scope()->GetReceiverScope()->function_kind())) {
     home_object_name = ast_value_factory_->dot_static_home_object_string();
   } else {
     home_object_name = ast_value_factory_->dot_home_object_string();
   }
-  return factory()->NewSuperPropertyReference(
-      home_object_scope->NewHomeObjectVariableProxy(factory(), home_object_name,
-                                                    pos),
-      pos);
+
+  VariableProxy* proxy = NewUnresolved(home_object_name, pos);
+  proxy->set_is_home_object();
+  return factory()->NewSuperPropertyReference(proxy, pos);
 }
 
 SuperCallReference* Parser::NewSuperCallReference(int pos) {
@@ -1138,7 +1137,7 @@ FunctionLiteral* Parser::ParseClassForMemberInitialization(
   // Reparse the whole class body to build member initializer functions.
   Expression* expr;
   {
-    bool is_anonymous = IsNull(class_name);
+    bool is_anonymous = IsEmptyIdentifier(class_name);
     ClassScope* class_scope = NewClassScope(original_scope_, is_anonymous);
     BlockState block_state(&scope_, class_scope);
     RaiseLanguageMode(LanguageMode::kStrict);
@@ -1614,7 +1613,7 @@ Statement* Parser::ParseExportDefault() {
         result = ParseAsyncFunctionDeclaration(&local_names, true);
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
 
     default: {
       int pos = position();
@@ -1817,7 +1816,7 @@ Statement* Parser::ParseExportDeclaration() {
         result = ParseAsyncFunctionDeclaration(&names, false);
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
 
     default:
       ReportUnexpectedToken(scanner()->current_token());
@@ -3158,7 +3157,7 @@ void Parser::DeclareClassVariable(ClassScope* scope, const AstRawString* name,
   scope->SetScopeName(name);
 #endif
 
-  DCHECK_IMPLIES(name == nullptr, class_info->is_anonymous);
+  DCHECK_IMPLIES(IsEmptyIdentifier(name), class_info->is_anonymous);
   // Declare a special class variable for anonymous classes with the dot
   // if we need to save it for static private method access.
   Variable* class_variable =
@@ -3186,7 +3185,7 @@ Variable* Parser::CreatePrivateNameVariable(ClassScope* scope,
   int begin = position();
   int end = end_position();
   bool was_added = false;
-  DCHECK(IsConstVariableMode(mode));
+  DCHECK(IsImmutableLexicalOrPrivateVariableMode(mode));
   Variable* var =
       scope->DeclarePrivateName(name, mode, is_static_flag, &was_added);
   if (!was_added) {
@@ -3316,7 +3315,7 @@ Expression* Parser::RewriteClassLiteral(ClassScope* block_scope,
         DefaultConstructor(name, has_extends, pos, end_pos);
   }
 
-  if (name != nullptr) {
+  if (!IsEmptyIdentifier(name)) {
     DCHECK_NOT_NULL(block_scope->class_variable());
     block_scope->class_variable()->set_initializer_position(end_pos);
   }

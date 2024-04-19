@@ -259,6 +259,11 @@ FrameTranslationBuilder::ToFrameTranslation(LocalFactory* factory) {
   return result;
 }
 
+base::Vector<const uint8_t> FrameTranslationBuilder::ToFrameTranslationWasm() {
+  DCHECK(!v8_flags.turbo_compress_frame_translations);
+  return base::VectorOf(contents_);
+}
+
 void FrameTranslationBuilder::BeginBuiltinContinuationFrame(
     BytecodeOffset bytecode_offset, int literal_id, unsigned height) {
   auto opcode = TranslationOpcode::BUILTIN_CONTINUATION_FRAME;
@@ -282,6 +287,12 @@ void FrameTranslationBuilder::BeginWasmInlinedIntoJSFrame(
   auto opcode = TranslationOpcode::WASM_INLINED_INTO_JS_FRAME;
   Add(opcode, SignedOperand(bailout_id.ToInt()), SignedOperand(literal_id),
       SignedOperand(height));
+}
+
+void FrameTranslationBuilder::BeginLiftoffFrame(BytecodeOffset bailout_id,
+                                                unsigned height) {
+  auto opcode = TranslationOpcode::LIFTOFF_FRAME;
+  Add(opcode, SignedOperand(bailout_id.ToInt()), SignedOperand(height));
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -339,6 +350,11 @@ void FrameTranslationBuilder::ArgumentsElements(CreateArgumentsType type) {
 
 void FrameTranslationBuilder::ArgumentsLength() {
   auto opcode = TranslationOpcode::ARGUMENTS_LENGTH;
+  Add(opcode);
+}
+
+void FrameTranslationBuilder::RestLength() {
+  auto opcode = TranslationOpcode::REST_LENGTH;
   Add(opcode);
 }
 

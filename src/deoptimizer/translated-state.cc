@@ -7,7 +7,6 @@
 #include <iomanip>
 
 #include "src/base/memory.h"
-#include "src/base/v8-fallthrough.h"
 #include "src/common/assert-scope.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/deoptimizer/materialized-object-store.h"
@@ -132,6 +131,14 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
          << SharedFunctionInfo::cast(shared_info)->DebugNameCStr().get()
          << ", height=" << height << ", wasm_return_type=" << wasm_return_type
          << "}";
+      break;
+    }
+
+    case v8::internal::TranslationOpcode::LIFTOFF_FRAME: {
+      DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 2);
+      int bailout_id = iterator.NextOperand();
+      unsigned height = iterator.NextOperand();
+      os << "{bailout_id=" << bailout_id << ", height=" << height << "}";
       break;
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -315,6 +322,11 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
     case TranslationOpcode::ARGUMENTS_LENGTH: {
       DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 0);
       os << "{arguments_length}";
+      break;
+    }
+    case TranslationOpcode::REST_LENGTH: {
+      DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 0);
+      os << "{rest_length}";
       break;
     }
 
@@ -602,7 +614,7 @@ Tagged<Object> TranslatedValue::GetRawValue() const {
       }
       // If this is not the hole nan, then this is a normal double value, so
       // fall through to that.
-      V8_FALLTHROUGH;
+      [[fallthrough]];
 
     case kDouble: {
       int smi;
@@ -818,6 +830,16 @@ TranslatedFrame TranslatedFrame::JSToWasmBuiltinContinuationFrame(
   frame.return_kind_ = return_kind;
   return frame;
 }
+
+TranslatedFrame TranslatedFrame::LiftoffFrame(
+    BytecodeOffset bytecode_offset, int height) {
+  // WebAssembly functions do not have a SharedFunctionInfo on the stack.
+  // The deoptimizer has to recover the function-specific data based on the PC.
+  Tagged<SharedFunctionInfo> shared_info;
+  TranslatedFrame frame(kLiftoffFunction, shared_info, height);
+  frame.bytecode_offset_ = bytecode_offset;
+  return frame;
+}
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 TranslatedFrame TranslatedFrame::JavaScriptBuiltinContinuationFrame(
@@ -870,6 +892,9 @@ int TranslatedFrame::GetValueCount() {
     case kWasmInlinedIntoJS: {
       static constexpr int kTheContext = 1;
       return height() + kTheContext + kTheFunction;
+    }
+    case kLiftoffFunction: {
+      return height();
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -1016,6 +1041,17 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
       return TranslatedFrame::JSToWasmBuiltinContinuationFrame(
           bailout_id, shared_info, height, return_kind);
     }
+
+    case TranslationOpcode::LIFTOFF_FRAME: {
+      BytecodeOffset bailout_id = BytecodeOffset(iterator->NextOperand());
+      int height = iterator->NextOperand();
+      if (trace_file != nullptr) {
+        PrintF(trace_file, "  reading input for liftoff frame");
+        PrintF(trace_file, " => bailout_id=%d, height=%d ; inputs:\n",
+               bailout_id.ToInt(), height);
+      }
+      return TranslatedFrame::LiftoffFrame(bailout_id, height);
+    }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
     case TranslationOpcode::JAVA_SCRIPT_BUILTIN_CONTINUATION_FRAME: {
@@ -1056,6 +1092,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     case TranslationOpcode::DUPLICATED_OBJECT:
     case TranslationOpcode::ARGUMENTS_ELEMENTS:
     case TranslationOpcode::ARGUMENTS_LENGTH:
+    case TranslationOpcode::REST_LENGTH:
     case TranslationOpcode::CAPTURED_OBJECT:
     case TranslationOpcode::REGISTER:
     case TranslationOpcode::INT32_REGISTER:
@@ -1188,6 +1225,7 @@ int TranslatedState::CreateNextTranslatedValue(
 #if V8_ENABLE_WEBASSEMBLY
     case TranslationOpcode::WASM_INLINED_INTO_JS_FRAME:
     case TranslationOpcode::JS_TO_WASM_BUILTIN_CONTINUATION_FRAME:
+    case TranslationOpcode::LIFTOFF_FRAME:
 #endif  // V8_ENABLE_WEBASSEMBLY
     case TranslationOpcode::UPDATE_FEEDBACK:
     case TranslationOpcode::MATCH_PREVIOUS_TRANSLATION:
@@ -1220,6 +1258,16 @@ int TranslatedState::CreateNextTranslatedValue(
                actual_argument_count_);
       }
       frame.Add(TranslatedValue::NewInt32(this, actual_argument_count_));
+      return 0;
+    }
+
+    case TranslationOpcode::REST_LENGTH: {
+      int rest_length =
+          std::max(0, actual_argument_count_ - formal_parameter_count_);
+      if (trace_file != nullptr) {
+        PrintF(trace_file, "rest length field (length = %d)", rest_length);
+      }
+      frame.Add(TranslatedValue::NewInt32(this, rest_length));
       return 0;
     }
 

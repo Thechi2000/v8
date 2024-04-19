@@ -576,6 +576,10 @@ struct FunctionTypeFeedback {
   // TODO(clemensb): This does not belong here; find a better place.
   int tierup_priority = 0;
 
+  static constexpr uint32_t kUninitializedLiftoffFrameSize = -1;
+  // The size of the stack frame in liftoff in bytes.
+  uint32_t liftoff_frame_size = kUninitializedLiftoffFrameSize;
+
   static constexpr uint32_t kNonDirectCall = 0xFFFFFFFF;
 };
 
@@ -596,6 +600,7 @@ struct TypeFeedbackStorage {
   mutable base::SharedMutex mutex;
 
   WellKnownImportsList well_known_imports;
+  bool has_magic_string_constants{false};
 
   size_t EstimateCurrentMemoryConsumption() const;
 };
@@ -641,13 +646,13 @@ struct V8_EXPORT_PRIVATE WasmModule {
   WireBytesRef name_section = {0, 0};
   // Set to true if this module has wasm-gc types in its type section.
   bool is_wasm_gc = false;
+  // Set to true if this module has any shared elements other than memories.
+  bool has_shared_part = false;
 
   std::vector<TypeDefinition> types;  // by type index
   // Maps each type index to its global (cross-module) canonical index as per
   // isorecursive type canonicalization.
   std::vector<uint32_t> isorecursive_canonical_type_ids;
-  // First index -> size. Used for fuzzing only.
-  std::unordered_map<uint32_t, uint32_t> explicit_recursive_type_groups;
   std::vector<WasmFunction> functions;
   std::vector<WasmGlobal> globals;
   std::vector<WasmDataSegment> data_segments;
@@ -770,6 +775,10 @@ struct V8_EXPORT_PRIVATE WasmModule {
     if (isorecursive_canonical_type_ids.empty()) return -1;
     return *std::max_element(isorecursive_canonical_type_ids.begin(),
                              isorecursive_canonical_type_ids.end());
+  }
+
+  bool function_is_shared(int func_index) const {
+    return types[functions[func_index].sig_index].is_shared;
   }
 
   bool function_was_validated(int func_index) const {

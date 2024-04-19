@@ -103,12 +103,8 @@ class StackHandlerIterator {
 
 // -------------------------------------------------------------------------
 
-#define INITIALIZE_SINGLETON(type, field) field##_(this),
 StackFrameIteratorBase::StackFrameIteratorBase(Isolate* isolate)
-    : isolate_(isolate),
-      STACK_FRAME_TYPE_LIST(INITIALIZE_SINGLETON) frame_(nullptr),
-      handler_(nullptr) {}
-#undef INITIALIZE_SINGLETON
+    : isolate_(isolate), frame_(nullptr), handler_(nullptr) {}
 
 StackFrameIterator::StackFrameIterator(Isolate* isolate)
     : StackFrameIterator(isolate, isolate->thread_local_top()) {}
@@ -140,7 +136,7 @@ void StackFrameIterator::Advance() {
   handler_ = it.handler();
 
   // Advance to the calling frame.
-  frame_ = SingletonFor(type, &state);
+  SetNewFrame(type, &state);
   // When we're done iterating over the stack frames, the handler
   // chain must have been completely unwound. Except for wasm stack-switching:
   // we stop at the end of the current segment.
@@ -153,41 +149,55 @@ void StackFrameIterator::Advance() {
 }
 
 StackFrame* StackFrameIterator::Reframe() {
-  StackFrame::Type type = ComputeStackFrameType(&frame_->state_);
-  frame_ = SingletonFor(type, &frame_->state_);
+  StackFrame::State state = frame_->state_;
+  StackFrame::Type type = ComputeStackFrameType(&state);
+  SetNewFrame(type, &state);
   return frame();
 }
 
+namespace {
+StackFrame::Type GetStateForFastCCallCallerFP(Isolate* isolate, Address fp,
+                                              Address pc, Address pc_address,
+                                              StackFrame::State* state) {
+  // 'Fast C calls' are a special type of C call where we call directly from
+  // JS to C without an exit frame inbetween. The CEntryStub is responsible
+  // for setting Isolate::c_entry_fp, meaning that it won't be set for fast C
+  // calls. To keep the stack iterable, we store the FP and PC of the caller
+  // of the fast C call on the isolate. This is guaranteed to be the topmost
+  // JS frame, because fast C calls cannot call back into JS. We start
+  // iterating the stack from this topmost JS frame.
+  DCHECK_NE(kNullAddress, pc);
+  state->fp = fp;
+  state->sp = kNullAddress;
+  state->pc_address = reinterpret_cast<Address*>(pc_address);
+  state->callee_pc_address = nullptr;
+  state->constant_pool_address = nullptr;
+#if V8_ENABLE_WEBASSEMBLY
+  if (wasm::GetWasmCodeManager()->LookupCode(isolate, pc)) {
+    return StackFrame::WASM;
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
+  return StackFrame::TURBOFAN;
+}
+}  // namespace
+
 void StackFrameIterator::Reset(ThreadLocalTop* top) {
   StackFrame::State state;
+  StackFrame::Type type;
 
   const Address fast_c_call_caller_fp =
       isolate_->isolate_data()->fast_c_call_caller_fp();
   if (fast_c_call_caller_fp != kNullAddress) {
-    // 'Fast C calls' are a special type of C call where we call directly from
-    // JS to C without an exit frame inbetween. The CEntryStub is responsible
-    // for setting Isolate::c_entry_fp, meaning that it won't be set for fast C
-    // calls. To keep the stack iterable, we store the FP and PC of the caller
-    // of the fast C call on the isolate. This is guaranteed to be the topmost
-    // JS frame, because fast C calls cannot call back into JS. We start
-    // iterating the stack from this topmost JS frame.
-    DCHECK_NE(kNullAddress, isolate_->isolate_data()->fast_c_call_caller_pc());
-    state.fp = fast_c_call_caller_fp;
-    state.sp = kNullAddress;
-    state.pc_address = reinterpret_cast<Address*>(
-        isolate_->isolate_data()->fast_c_call_caller_pc_address());
-    state.callee_pc_address = nullptr;
-    state.constant_pool_address = nullptr;
-
-    handler_ = StackHandler::FromAddress(Isolate::handler(top));
-    frame_ = SingletonFor(StackFrame::TURBOFAN, &state);
-
+    const Address caller_pc = isolate_->isolate_data()->fast_c_call_caller_pc();
+    const Address caller_pc_address =
+        isolate_->isolate_data()->fast_c_call_caller_pc_address();
+    type = GetStateForFastCCallCallerFP(isolate_, fast_c_call_caller_fp,
+                                        caller_pc, caller_pc_address, &state);
   } else {
-    StackFrame::Type type =
-        ExitFrame::GetStateForFramePointer(Isolate::c_entry_fp(top), &state);
-    handler_ = StackHandler::FromAddress(Isolate::handler(top));
-    frame_ = SingletonFor(type, &state);
+    type = ExitFrame::GetStateForFramePointer(Isolate::c_entry_fp(top), &state);
   }
+    handler_ = StackHandler::FromAddress(Isolate::handler(top));
+    SetNewFrame(type, &state);
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -198,33 +208,35 @@ void StackFrameIterator::Reset(ThreadLocalTop* top, wasm::StackMemory* stack) {
   StackFrame::State state;
   StackSwitchFrame::GetStateForJumpBuffer(stack->jmpbuf(), &state);
   handler_ = StackHandler::FromAddress(Isolate::handler(top));
-  frame_ = SingletonFor(StackFrame::STACK_SWITCH, &state);
+  SetNewFrame(StackFrame::STACK_SWITCH, &state);
 }
 #endif
 
-StackFrame* StackFrameIteratorBase::SingletonFor(StackFrame::Type type,
-                                                 StackFrame::State* state) {
-  StackFrame* result = SingletonFor(type);
-  DCHECK((!result) == (type == StackFrame::NO_FRAME_TYPE));
-  if (result) result->state_ = *state;
-  return result;
+void StackFrameIteratorBase::SetNewFrame(StackFrame::Type type,
+                                         StackFrame::State* state) {
+  SetNewFrame(type);
+  DCHECK_EQ(!frame_, type == StackFrame::NO_FRAME_TYPE);
+  if (frame_) frame_->state_ = *state;
 }
 
-StackFrame* StackFrameIteratorBase::SingletonFor(StackFrame::Type type) {
-#define FRAME_TYPE_CASE(type, field) \
-  case StackFrame::type:             \
-    return &field##_;
-
+void StackFrameIteratorBase::SetNewFrame(StackFrame::Type type) {
   switch (type) {
+#define FRAME_TYPE_CASE(type, class)      \
+  case StackFrame::type:                  \
+    frame_ = new (&class##_) class(this); \
+    return;
+    STACK_FRAME_TYPE_LIST(FRAME_TYPE_CASE)
+#undef FRAME_TYPE_CASE
+
     case StackFrame::NO_FRAME_TYPE:
-      return nullptr;
-      STACK_FRAME_TYPE_LIST(FRAME_TYPE_CASE)
-    default:
+    // We don't expect to see NUMBER_OF_TYPES or MANUAL, but stay robust against
+    // them rather than being UNREACHABLE in case stack frame iteration gets
+    // wonky.
+    case StackFrame::NUMBER_OF_TYPES:
+    case StackFrame::MANUAL:
       break;
   }
-  return nullptr;
-
-#undef FRAME_TYPE_CASE
+  frame_ = nullptr;
 }
 
 // -------------------------------------------------------------------------
@@ -498,7 +510,7 @@ StackFrameIteratorForProfiler::StackFrameIteratorForProfiler(
     return;
   }
 
-  frame_ = SingletonFor(type, &state);
+  SetNewFrame(type, &state);
   if (advance_frame && !done()) {
     Advance();
   }
@@ -520,15 +532,23 @@ void StackFrameIteratorForProfiler::AdvanceOneFrame() {
   Address last_sp = last_frame->sp(), last_fp = last_frame->fp();
 
   // Before advancing to the next stack frame, perform pointer validity tests.
-  if (!IsValidFrame(last_frame) || !IsValidCaller(last_frame)) {
+  if (!IsValidState(last_frame->state_) ||
+      !HasValidExitIfEntryFrame(last_frame)) {
     frame_ = nullptr;
     return;
   }
 
-  // Advance to the previous frame.
+  // Advance to the previous frame, and perform pointer validity tests there
+  // too.
   StackFrame::State state;
-  StackFrame::Type type = frame_->GetCallerState(&state);
-  frame_ = SingletonFor(type, &state);
+  last_frame->ComputeCallerState(&state);
+  if (!IsValidState(state)) {
+    frame_ = nullptr;
+    return;
+  }
+
+  StackFrame::Type type = ComputeStackFrameType(&state);
+  SetNewFrame(type, &state);
   if (!frame_) return;
 
   // Check that we have actually moved to the previous frame in the stack.
@@ -537,28 +557,26 @@ void StackFrameIteratorForProfiler::AdvanceOneFrame() {
   }
 }
 
-bool StackFrameIteratorForProfiler::IsValidFrame(StackFrame* frame) const {
-  return IsValidStackAddress(frame->sp()) && IsValidStackAddress(frame->fp());
+bool StackFrameIteratorForProfiler::IsValidState(
+    const StackFrame::State& state) const {
+  return IsValidStackAddress(state.sp) && IsValidStackAddress(state.fp);
 }
 
-bool StackFrameIteratorForProfiler::IsValidCaller(StackFrame* frame) {
-  StackFrame::State state;
-  if (frame->is_entry() || frame->is_construct_entry()) {
-    // See EntryFrame::GetCallerState. It computes the caller FP address
-    // and calls ExitFrame::GetStateForFramePointer on it. We need to be
-    // sure that caller FP address is valid.
-    Address next_exit_frame_fp_address =
-        frame->fp() + EntryFrameConstants::kNextExitFrameFPOffset;
-    // Profiling tick might be triggered in the middle of JSEntry builtin
-    // before the next_exit_frame_fp value is initialized. IsValidExitFrame()
-    // is able to deal with such a case, so just suppress the MSan warning.
-    MSAN_MEMORY_IS_INITIALIZED(next_exit_frame_fp_address, kSystemPointerSize);
-    Address next_exit_frame_fp = Memory<Address>(next_exit_frame_fp_address);
-    if (!IsValidExitFrame(next_exit_frame_fp)) return false;
-  }
-  frame->ComputeCallerState(&state);
-  return IsValidStackAddress(state.sp) && IsValidStackAddress(state.fp) &&
-         SingletonFor(frame->GetCallerState(&state)) != nullptr;
+bool StackFrameIteratorForProfiler::HasValidExitIfEntryFrame(
+    const StackFrame* frame) const {
+  if (!frame->is_entry() && !frame->is_construct_entry()) return true;
+
+  // See EntryFrame::GetCallerState. It computes the caller FP address
+  // and calls ExitFrame::GetStateForFramePointer on it. We need to be
+  // sure that caller FP address is valid.
+  Address next_exit_frame_fp_address =
+      frame->fp() + EntryFrameConstants::kNextExitFrameFPOffset;
+  // Profiling tick might be triggered in the middle of JSEntry builtin
+  // before the next_exit_frame_fp value is initialized. IsValidExitFrame()
+  // is able to deal with such a case, so just suppress the MSan warning.
+  MSAN_MEMORY_IS_INITIALIZED(next_exit_frame_fp_address, kSystemPointerSize);
+  Address next_exit_frame_fp = Memory<Address>(next_exit_frame_fp_address);
+  return IsValidExitFrame(next_exit_frame_fp);
 }
 
 bool StackFrameIteratorForProfiler::IsValidExitFrame(Address fp) const {
@@ -834,8 +852,6 @@ StackFrame::Type StackFrameIterator::ComputeStackFrameType(
         return StackFrame::JS_TO_WASM;
       }
       return StackFrame::TURBOFAN_STUB_WITH_CONTEXT;
-    case CodeKind::JS_TO_JS_FUNCTION:
-      return StackFrame::TURBOFAN_STUB_WITH_CONTEXT;
     case CodeKind::C_WASM_ENTRY:
       return StackFrame::C_WASM_ENTRY;
     case CodeKind::WASM_TO_JS_FUNCTION:
@@ -846,7 +862,6 @@ StackFrame::Type StackFrameIterator::ComputeStackFrameType(
       UNREACHABLE();
 #else
     case CodeKind::C_WASM_ENTRY:
-    case CodeKind::JS_TO_JS_FUNCTION:
     case CodeKind::JS_TO_WASM_FUNCTION:
     case CodeKind::WASM_FUNCTION:
     case CodeKind::WASM_TO_CAPI_FUNCTION:
@@ -948,6 +963,15 @@ void EntryFrame::ComputeCallerState(State* state) const {
 }
 
 StackFrame::Type EntryFrame::GetCallerState(State* state) const {
+  const Address fast_c_call_caller_fp =
+      Memory<Address>(fp() + EntryFrameConstants::kNextFastCallFrameFPOffset);
+  if (fast_c_call_caller_fp != kNullAddress) {
+    Address caller_pc_address =
+        fp() + EntryFrameConstants::kNextFastCallFramePCOffset;
+    Address caller_pc = Memory<Address>(caller_pc_address);
+    return GetStateForFastCCallCallerFP(isolate(), fast_c_call_caller_fp,
+                                        caller_pc, caller_pc_address, state);
+  }
   Address next_exit_frame_fp =
       Memory<Address>(fp() + EntryFrameConstants::kNextExitFrameFPOffset);
   return ExitFrame::GetStateForFramePointer(next_exit_frame_fp, state);
@@ -1371,8 +1395,8 @@ void VisitSpillSlot(Isolate* isolate, RootVisitor* v,
         if (is_self_forwarded) {
           // The object might be in a self-forwarding state if it's located
           // in new large object space. GC will fix this at a later stage.
-          CHECK(BasicMemoryChunk::FromHeapObject(forwarded)
-                    ->InNewLargeObjectSpace());
+          CHECK(
+              MemoryChunk::FromHeapObject(forwarded)->InNewLargeObjectSpace());
         } else {
           Tagged<HeapObject> forwarded_map = forwarded->map(cage_base);
           // The map might be forwarded as well.
@@ -2810,12 +2834,14 @@ Tagged<DeoptimizationData> OptimizedFrame::GetDeoptimizationData(
   Tagged<JSFunction> opt_function = function();
   Tagged<Code> code = opt_function->code(isolate());
 
+  Address pc = maybe_unauthenticated_pc();
+
   // The code object may have been replaced by lazy deoptimization. Fall back
   // to a slow search in this case to find the original optimized code object.
-  if (!code->contains(isolate(), pc())) {
+  if (!code->contains(isolate(), pc)) {
     code = isolate()
                ->heap()
-               ->GcSafeFindCodeForInnerPointer(pc())
+               ->GcSafeFindCodeForInnerPointer(pc)
                ->UnsafeCastToCode();
   }
   DCHECK(!code.is_null());
@@ -2823,13 +2849,13 @@ Tagged<DeoptimizationData> OptimizedFrame::GetDeoptimizationData(
 
   if (code->is_maglevved()) {
     MaglevSafepointEntry safepoint_entry =
-        code->GetMaglevSafepointEntry(isolate(), pc());
+        code->GetMaglevSafepointEntry(isolate(), pc);
     if (safepoint_entry.has_deoptimization_index()) {
       *deopt_index = safepoint_entry.deoptimization_index();
       return DeoptimizationData::cast(code->deoptimization_data());
     }
   } else {
-    SafepointEntry safepoint_entry = code->GetSafepointEntry(isolate(), pc());
+    SafepointEntry safepoint_entry = code->GetSafepointEntry(isolate(), pc);
     if (safepoint_entry.has_deoptimization_index()) {
       *deopt_index = safepoint_entry.deoptimization_index();
       return DeoptimizationData::cast(code->deoptimization_data());
@@ -3022,7 +3048,8 @@ void WasmFrame::Print(StringStream* accumulator, PrintMode mode,
 }
 
 wasm::WasmCode* WasmFrame::wasm_code() const {
-  return wasm::GetWasmCodeManager()->LookupCode(isolate(), pc());
+  return wasm::GetWasmCodeManager()->LookupCode(isolate(),
+                                                maybe_unauthenticated_pc());
 }
 
 Tagged<WasmInstanceObject> WasmFrame::wasm_instance() const {
@@ -3070,7 +3097,8 @@ void WasmFrame::Summarize(std::vector<FrameSummary>* functions) const {
   // The {WasmCode*} escapes this scope via the {FrameSummary}, which is fine,
   // since this code object is part of our stack.
   wasm::WasmCode* code = wasm_code();
-  int offset = static_cast<int>(pc() - code->instruction_start());
+  int offset =
+      static_cast<int>(maybe_unauthenticated_pc() - code->instruction_start());
   Handle<WasmInstanceObject> instance(wasm_instance(), isolate());
   // Push regular non-inlined summary.
   SourcePosition pos = code->GetSourcePositionBefore(offset);

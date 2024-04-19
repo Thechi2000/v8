@@ -139,8 +139,8 @@ uint8_t* TestingModuleBuilder::AddMemory(uint32_t size, SharedFlag shared,
   trusted_instance_data_->set_memory_objects(*memory_objects);
 
   // Create the memory_bases_and_sizes array.
-  Handle<FixedAddressArray> memory_bases_and_sizes =
-      FixedAddressArray::New(isolate_, 2);
+  Handle<TrustedFixedAddressArray> memory_bases_and_sizes =
+      TrustedFixedAddressArray::New(isolate_, 2);
   uint8_t* mem_start = reinterpret_cast<uint8_t*>(
       memory_object->array_buffer()->backing_store());
   memory_bases_and_sizes->set_sandboxed_pointer(
@@ -152,7 +152,9 @@ uint8_t* TestingModuleBuilder::AddMemory(uint32_t size, SharedFlag shared,
   mem0_size_ = size;
   CHECK(size == 0 || mem0_start_);
 
+  // TODO(14616): Add shared_trusted_instance_data_.
   WasmMemoryObject::UseInInstance(isolate_, memory_object,
+                                  trusted_instance_data_,
                                   trusted_instance_data_, 0);
   // TODO(wasm): Delete the following line when test-run-wasm will use a
   // multiple of kPageSize as memory size. At the moment, the effect of these
@@ -204,9 +206,9 @@ uint32_t TestingModuleBuilder::AddFunction(const FunctionSig* sig,
   }
   DCHECK_LT(index, kMaxFunctions);  // limited for testing.
   if (!trusted_instance_data_.is_null()) {
-    Handle<FixedArray> funcs = isolate_->factory()->NewFixedArrayWithZeroes(
+    Handle<FixedArray> func_refs = isolate_->factory()->NewFixedArrayWithZeroes(
         static_cast<int>(test_module_->functions.size()));
-    trusted_instance_data_->set_wasm_internal_functions(*funcs);
+    trusted_instance_data_->set_func_refs(*func_refs);
   }
   return index;
 }
@@ -217,6 +219,7 @@ void TestingModuleBuilder::InitializeWrapperCache() {
   Handle<FixedArray> maps = isolate_->factory()->NewFixedArray(
       static_cast<int>(test_module_->types.size()));
   for (uint32_t index = 0; index < test_module_->types.size(); index++) {
+    // TODO(14616): Support shared types.
     CreateMapForType(isolate_, test_module_.get(), index, instance_object_,
                      maps);
   }
@@ -225,9 +228,9 @@ void TestingModuleBuilder::InitializeWrapperCache() {
 
 Handle<JSFunction> TestingModuleBuilder::WrapCode(uint32_t index) {
   InitializeWrapperCache();
-  Handle<WasmInternalFunction> internal =
-      WasmTrustedInstanceData::GetOrCreateWasmInternalFunction(
-          isolate_, trusted_instance_data_, index);
+  Handle<WasmFuncRef> func_ref = WasmTrustedInstanceData::GetOrCreateFuncRef(
+      isolate_, trusted_instance_data_, index);
+  Handle<WasmInternalFunction> internal{func_ref->internal(isolate_), isolate_};
   return WasmInternalFunction::GetOrCreateExternal(internal);
 }
 
@@ -267,8 +270,8 @@ void TestingModuleBuilder::AddIndirectFunctionTable(
       isolate_, instance_object_, table.type, table.initial_size,
       table.has_maximum_size, table.maximum_size,
       IsSubtypeOf(table.type, kWasmExternRef, test_module_.get())
-          ? Handle<Object>::cast(isolate_->factory()->null_value())
-          : Handle<Object>::cast(isolate_->factory()->wasm_null()));
+          ? Handle<HeapObject>{isolate_->factory()->null_value()}
+          : Handle<HeapObject>{isolate_->factory()->wasm_null()});
 
   WasmTableObject::AddUse(isolate_, table_obj, trusted_instance_data_,
                           table_index);

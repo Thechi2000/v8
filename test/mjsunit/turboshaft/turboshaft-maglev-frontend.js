@@ -4,7 +4,7 @@
 
 // Flags: --allow-natives-syntax --turboshaft-from-maglev --turbofan
 // Flags: --no-always-turbofan --no-stress-concurrent-inlining
-// Flags: --invocation-count-for-turbofan=3000
+// Flags: --invocation-count-for-turbofan=3000 --concurrent-recompilation
 
 // TODO(dmercadier): re-allow optimization of these functions once the
 // maglev-to-turboshaft graph builder supports everything they need.
@@ -16,8 +16,10 @@ function math_smi(x, y) {
   let a = x * y;
   a = a + 152;
   a = a / x;
+  a++;
   a = a - y;
   a = a % 5;
+  a--;
   return a;
 }
 %PrepareFunctionForOptimization(math_smi);
@@ -235,6 +237,17 @@ assertOptimized(simple_loop);
   assertEquals(3.41, load_holey_fixed_double(holey_double_arr, 1));
   assertEquals(undefined, load_holey_fixed_double(holey_double_arr, 2));
   assertOptimized(load_holey_fixed_double);
+
+  function load_hole(arr, idx) {
+    return arr[idx];
+  }
+  let holey_arr = [ {}, 3.41, /* hole */, 4.55 ];
+
+  %PrepareFunctionForOptimization(load_hole);
+  assertEquals(undefined, load_hole(holey_arr, 2));
+  %OptimizeFunctionOnNextCall(load_hole);
+  assertEquals(undefined, load_hole(holey_arr, 2));
+  assertOptimized(load_hole);
 }
 
 // Simple JS function call
@@ -266,6 +279,26 @@ assertOptimized(simple_loop);
   %OptimizeFunctionOnNextCall(f);
   assertEquals(59, f(o));
   assertOptimized(f);
+}
+
+// Unconditional deopt
+{
+  function deopt(x) {
+    if (x) { return 42; }
+    else {
+      // We won't gather feedback for this during feedback collection, so
+      // Maglev will generate an unconditional deopt for this branch.
+      return x + 17;
+    }
+  }
+
+  %PrepareFunctionForOptimization(deopt);
+  assertEquals(42, deopt(1));
+  %OptimizeFunctionOnNextCall(deopt);
+  assertEquals(42, deopt(1));
+  assertOptimized(deopt);
+  assertEquals(17, deopt(0));
+  assertUnoptimized(deopt);
 }
 
 // Lazy deopt during JS function call
@@ -615,4 +648,434 @@ assertOptimized(simple_loop);
   let str = "abcdefghi";
   assertEquals(false, string_cmp(str + "azeazeaze", "abc", 4));
   assertUnoptimized(string_cmp);
+
+  function string_char_code(s, c) {
+    return String.fromCharCode(73) + s.charCodeAt(1) + s.codePointAt(1);
+  }
+
+  %PrepareFunctionForOptimization(string_char_code);
+  assertEquals("I5530474565", string_char_code("a\u{12345}c", 1));
+  %OptimizeFunctionOnNextCall(string_char_code);
+  assertEquals("I5530474565", string_char_code("a\u{12345}c", 1));
+  assertOptimized(string_char_code);
+}
+
+// Testing generic builtins
+{
+  function f(a, b, c, d) {
+    let x1 = a + b;
+    let x2 = a - b;
+    let x3 = a * b;
+    let x4 = a / b;
+    let x5 = a % b;
+    let x6 = a ** b;
+    let x7 = a & b;
+    let x8 = a | b;
+    let x9 = a ^ b;
+    let x10 = a << b;
+    let x11 = a >> b;
+    let x12 = a >>> b;
+    let x13 = ~a;
+    let x14 = -a;
+    let x15 = a < b;
+    let x16 = a <= b;
+    let x17 = a > b;
+    let x18 = a >= b;
+    let x19 = a == b;
+    let x20 = a === b;
+    // It's important to do the increment/decrement last, because they lead to
+    // having numeric alternatives for {a} and {b} in Maglev, which leads Maglev
+    // to compiling subsequent <, <=, >, and >= to Float64 comparisons despite
+    // their generic feedback.
+    let x21 = a++;
+    let x22 = b--;
+    let x23 = ++c;
+    let x24 = --d;
+
+    return [x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15,
+            x16, x17, x18, x19, x20, x21, x22, x23, x24];
+  }
+
+  %PrepareFunctionForOptimization(f);
+  let expected_1 = f(1, 2, 1, 2);
+  let expected_2 = f("1", 2, "1", 2);
+  let expected_3 = f(2, "1", 2, "1");
+  let expected_4 = f([], 1, [], 1);
+  let expected_5 = f({}, 1, {}, 1);
+  %OptimizeFunctionOnNextCall(f);
+  assertEquals(expected_1, f(1, 2, 1, 2));
+  assertEquals(expected_2, f("1", 2, "1", 2));
+  assertEquals(expected_3, f(2, "1", 2, "1"));
+  assertEquals(expected_4, f([], 1, [], 1));
+  assertEquals(expected_5, f({}, 1, {}, 1));
+  assertOptimized(f);
+}
+
+// Testing ToBoolean and LogicalNot on various datatypes.
+{
+  function f(x, y) {
+    let a = x * 2;
+    let b = a * 2.27;
+    return [!a, !y, !b];
+  }
+
+  %PrepareFunctionForOptimization(f);
+  assertEquals([false, false, false], f(4, 3));
+  assertEquals([true, true, true], f(0, 0));
+  %OptimizeFunctionOnNextCall(f);
+  assertEquals([false, false, false], f(4, 3));
+  assertEquals([true, true, true], f(0, 0));
+  assertOptimized(f);
+}
+
+// Testing Float64 Ieee754 unary functions.
+{
+  function float_f(x) {
+    let x1 = Math.abs(x);
+    let x2 = Math.acos(x);
+    let x3 = Math.acosh(x);
+    let x4 = Math.asin(x);
+    let x5 = Math.asinh(x);
+    let x6 = Math.atan(x);
+    let x7 = Math.atanh(x);
+    let x8 = Math.cbrt(x);
+    let x9 = Math.cos(x);
+    let x10 = Math.cosh(x);
+    let x11 = Math.exp(x);
+    let x12 = Math.expm1(x);
+    let x13 = Math.log(x);
+    let x14 = Math.log1p(x);
+    let x15 = Math.log10(x);
+    let x16 = Math.log2(x);
+    let x17 = Math.sin(x);
+    let x18 = Math.sinh(x);
+    let x19 = Math.tan(x);
+    let x20 = Math.tanh(x);
+
+    return [x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11,
+            x12, x13, x14, x15, x16, x17, x18, x19, x20];
+  }
+
+  %PrepareFunctionForOptimization(float_f);
+  let expected_1 = float_f(0.758);
+  let expected_2 = float_f(2);
+
+  %OptimizeFunctionOnNextCall(float_f);
+  assertEquals(expected_1, float_f(0.758));
+  assertEquals(expected_2, float_f(2));
+  assertOptimized(float_f);
+}
+
+// Testing for-in loops.
+{
+  function forin(o) {
+    let s = 0;
+    for (let i in o) {
+      s += o[i];
+    }
+    return s;
+  }
+
+  let o = { x : 42, y : 19, z: 5 };
+
+  %PrepareFunctionForOptimization(forin);
+  assertEquals(66, forin(o));
+  %OptimizeFunctionOnNextCall(forin);
+  assertEquals(66, forin(o));
+  assertOptimized(forin);
+}
+
+// Testing loops with multiple forward edges.
+{
+  function g() { }
+  %NeverOptimizeFunction(g);
+
+  function multi_pred_loop(x) {
+    let i = 0;
+    if (x == 1) {
+      g();
+    } else {
+      g();
+    }
+    while (i < 5) {
+      i++;
+      // Putting a call in the loop so that it cannot be peeled (because it's
+      // not "trivial" anymore).
+      g();
+    }
+    return i;
+  }
+
+  %PrepareFunctionForOptimization(multi_pred_loop);
+  assertEquals(5, multi_pred_loop(1));
+  assertEquals(5, multi_pred_loop(2));
+  %OptimizeFunctionOnNextCall(multi_pred_loop);
+  assertEquals(5, multi_pred_loop(1));
+  assertEquals(5, multi_pred_loop(2));
+  assertOptimized(multi_pred_loop);
+}
+
+// Testing reference error if hole
+{
+  function ref_err_if_hole(x) {
+    switch (x) {
+      case 0:
+        let v = 17;
+      case 1:
+        return v;
+    }
+  }
+
+  %PrepareFunctionForOptimization(ref_err_if_hole);
+  assertEquals(17, ref_err_if_hole(0));
+  %OptimizeFunctionOnNextCall(ref_err_if_hole);
+  assertEquals(17, ref_err_if_hole(0));
+
+  assertThrows(() => ref_err_if_hole(1), ReferenceError,
+               "Cannot access 'v' before initialization");
+  assertOptimized(ref_err_if_hole);
+}
+
+// Testing `eval()`, which tests ArgumentsLength, ArgumentsElements,
+// CreateFunctionContext and CallRuntime.
+{
+  function f_eval() {
+    let i = 0.1;
+    eval();
+    if (i) {
+      const c = {};
+      eval();
+    }
+  }
+
+  %PrepareFunctionForOptimization(f_eval);
+  f_eval();
+  f_eval();
+  %OptimizeFunctionOnNextCall(f_eval);
+  f_eval();
+  assertOptimized(f_eval);
+}
+
+// Testing typed arrays creations, loads and stores.
+{
+  function typed_arr() {
+    const u16_arr = new Uint16Array(10);
+    u16_arr[5] = 18;
+    const i8_arr = new Int8Array(13);
+    i8_arr[2] = 47;
+    const f32_arr = new Float32Array(15);
+    f32_arr[10] = 3.362;
+    let u16 = u16_arr[1];
+    let i8 = i8_arr[4];
+    let f32 = f32_arr[9];
+    return [u16_arr, i8_arr, f32_arr, u16, i8, f32];
+  }
+
+  %PrepareFunctionForOptimization(typed_arr);
+  let a1 = typed_arr();
+  %OptimizeFunctionOnNextCall(typed_arr);
+  let a2 = typed_arr();
+  assertEquals(a1, a2);
+  assertOptimized(typed_arr);
+}
+
+// Testing dataview creation, loads and stores.
+{
+  function dataview() {
+    const buffer = new ArrayBuffer(40);
+    const dw = new DataView(buffer);
+    dw.setInt8(4, 32);
+    dw.setInt16(2, 152515);
+    dw.setFloat64(8, 12.2536);
+    return [dw.getInt16(0), dw.getInt8(4), dw.getFloat64(2), dw.getInt32(7)];
+  }
+
+  %PrepareFunctionForOptimization(dataview);
+  let a1 = dataview();
+  %OptimizeFunctionOnNextCall(dataview);
+  let a2 = dataview();
+  assertEquals(a1, a2);
+  assertOptimized(dataview);
+}
+
+// Testing untagged phis.
+{
+  function fact(n) {
+    let s = 1;
+    while (n > 1) {
+      s *= n;
+      n--;
+    }
+    return s;
+  }
+
+  %PrepareFunctionForOptimization(fact);
+  let n1 = fact(42);
+  %OptimizeFunctionOnNextCall(fact);
+  assertEquals(n1, fact(42));
+  assertOptimized(fact);
+}
+
+// Testing a few array operations.
+{
+  let a = [1, 2, 3, 4];
+  let b = [5, 6, 7, 8];
+
+  function make_fast_arr(a, b) {
+    let s = [0, 0, 0, 0];
+    for (let i = 0; i < 4; i++) {
+      s[i] = a[i] + b[i];
+    }
+    return s;
+  }
+
+  %PrepareFunctionForOptimization(make_fast_arr);
+  assertEquals([6, 8, 10, 12], make_fast_arr(a, b));
+  %OptimizeFunctionOnNextCall(make_fast_arr);
+  assertEquals([6, 8, 10, 12], make_fast_arr(a, b));
+  assertOptimized(make_fast_arr);
+
+  function arr_oob_load(a, b) {
+    let s = [0, 0, 0, 0, 0, 0];
+    for (let i = 0; i < 6; i++) {
+      // This will load out of bounds in {a} and {b}, which is fine.
+      s[i] = a[i] + b[i];
+    }
+    return s;
+  }
+
+  %PrepareFunctionForOptimization(arr_oob_load);
+  assertEquals([6, 8, 10, 12, NaN, NaN], arr_oob_load(a, b));
+  %OptimizeFunctionOnNextCall(arr_oob_load);
+  assertEquals([6, 8, 10, 12, NaN, NaN], arr_oob_load(a, b));
+  assertOptimized(arr_oob_load);
+
+  function ret_from_holey_arr(i) {
+    let arr = new Array(10);
+    arr[0] = 42;
+    return arr[i];
+  }
+
+  %PrepareFunctionForOptimization(ret_from_holey_arr);
+  assertEquals(42, ret_from_holey_arr(0));
+  %OptimizeFunctionOnNextCall(ret_from_holey_arr);
+  assertEquals(42, ret_from_holey_arr(0));
+  assertOptimized(ret_from_holey_arr);
+
+  // Triggering deopt by trying to return a hole.
+  assertEquals(undefined, ret_from_holey_arr(1));
+  assertUnoptimized(ret_from_holey_arr);
+
+  // Reopting
+  %OptimizeFunctionOnNextCall(ret_from_holey_arr);
+  assertEquals(undefined, ret_from_holey_arr(1));
+  // This time the hole is converted to undefined without deopting.
+  assertOptimized(ret_from_holey_arr);
+}
+
+// Testing SetKeyedGeneric and GetKeyedGeneric.
+{
+  function generic_key(arr, i, j) {
+    arr[i] = 45;
+    return arr[j];
+  }
+
+  let arr = new Int32Array(42);
+
+  %PrepareFunctionForOptimization(generic_key);
+  assertEquals(undefined, generic_key(arr, -123456, -45896));
+  %OptimizeFunctionOnNextCall(generic_key);
+  assertEquals(undefined, generic_key(arr, -123456, -45896));
+}
+
+// Testing OSR.
+{
+  function g(x) {
+    assertEquals(42.42, x);
+  }
+  %NeverOptimizeFunction(g);
+
+  function test_osr(x, y) {
+    let s = 0;
+    let loop_is_turbofan = false;
+    for (let i = 0; i < 20; i++) {
+      %OptimizeOsr();
+      s += i;
+      loop_is_turbofan = %CurrentFrameIsTurbofan();
+    }
+
+    // This multiplication will trigger a deopt (because it has no feedback).
+    s *= x;
+
+    // The loop should have been in Turbofan in its last few iterations.
+    assertEquals(true, loop_is_turbofan);
+
+    // We shouldn't be in Turbofan anymore
+    assertFalse(%CurrentFrameIsTurbofan());
+    assertFalse(%ActiveTierIsTurbofan(test_osr));
+
+    // Keeping the parameters alive, just to make sure that everything works.
+    g(y);
+
+    return s;
+  }
+
+  %PrepareFunctionForOptimization(test_osr);
+  assertEquals(570, test_osr(3, 42.42));
+}
+
+// Testing Array.prototype.push/pop.
+{
+  function array_push_pop(arr, x) {
+    let v = arr.pop();
+    arr.push(x); // This doesn't require growing the array.
+    return v + arr[5];
+  }
+
+  let arr = [0, 1, 2, 3, 4, 5];
+
+  %PrepareFunctionForOptimization(array_push_pop);
+  assertEquals(16, array_push_pop(arr, 11));
+
+  arr[5] = 5;
+  %OptimizeFunctionOnNextCall(array_push_pop);
+  assertEquals(16, array_push_pop(arr, 11));
+  assertOptimized(array_push_pop);
+
+  function array_push_grow_once(arr, x, y) {
+    // The 1st push will have to grow the array.
+    arr.push(x);
+    arr.push(y);
+    return arr.at(-1) + arr.at(-2) + arr.at(-3);
+  }
+
+  arr = [0, 1, 2, 3, 4, 5];
+
+  %PrepareFunctionForOptimization(array_push_grow_once);
+  assertEquals(29, array_push_grow_once(arr, 11, 13));
+
+  arr = [0, 1, 2, 3, 4, 5];
+  %OptimizeFunctionOnNextCall(array_push_grow_once);
+  assertEquals(29, array_push_grow_once(arr, 11, 13));
+  assertOptimized(array_push_grow_once);
+}
+
+// Testing some number/float to int32 truncations.
+{
+  function truncate_number_to_int32(d, b) {
+    let v1 = d ^ 42; // Checked NumberOrOddball truncation
+    let p1 = b ? 4.26 : undefined;
+    let v2 = p1 | 11; // (unchecked) NumberOrOddball truncation
+    let p2 = b ? 3.35 : 4.59;
+    let v3 = p2 & 255; // (unchecked) Float64 truncation
+    return v1 + v2 + v3;
+  }
+
+  %PrepareFunctionForOptimization(truncate_number_to_int32);
+  assertEquals(61, truncate_number_to_int32(1.253, 1));
+  assertEquals(58, truncate_number_to_int32(1.253, 0));
+  %OptimizeFunctionOnNextCall(truncate_number_to_int32);
+  assertEquals(61, truncate_number_to_int32(1.253, 1));
+  assertEquals(58, truncate_number_to_int32(1.253, 0));
+  assertOptimized(truncate_number_to_int32);
 }

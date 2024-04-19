@@ -443,7 +443,9 @@ class InterpreterFrameState {
  public:
   InterpreterFrameState(const MaglevCompilationUnit& info,
                         KnownNodeAspects* known_node_aspects)
-      : frame_(info), known_node_aspects_(known_node_aspects) {}
+      : frame_(info), known_node_aspects_(known_node_aspects) {
+    frame_[interpreter::Register::virtual_accumulator()] = nullptr;
+  }
 
   explicit InterpreterFrameState(const MaglevCompilationUnit& info)
       : InterpreterFrameState(
@@ -788,6 +790,11 @@ class MergePointInterpreterFrameState {
     // DCHECK_EQ(predecessors_so_far_, predecessor_count_);
     DCHECK_LT(i, predecessor_count_);
     return predecessors_[i];
+  }
+  void set_predecessor_at(int i, BasicBlock* val) {
+    // DCHECK_EQ(predecessors_so_far_, predecessor_count_);
+    DCHECK_LT(i, predecessor_count_);
+    predecessors_[i] = val;
   }
 
   bool is_loop() const {

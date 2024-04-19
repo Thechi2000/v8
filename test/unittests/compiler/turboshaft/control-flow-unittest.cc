@@ -120,13 +120,12 @@ TEST_F(ControlFlowTest, LoopPeelingSingleInputPhi) {
   auto test = CreateFromGraph(1, [](auto& Asm) {
     Block* loop = __ NewLoopHeader();
     Block *loop_body = __ NewBlock(), *outside = __ NewBlock();
-    OpIndex cond = Asm.GetParameter(0);
     __ Goto(loop);
     __ Bind(loop);
-    OpIndex cst = __ Word32Constant(42);
+    V<Word32> cst = __ Word32Constant(42);
     __ Goto(loop_body);
     __ Bind(loop_body);
-    OpIndex phi = __ Phi({cst}, RegisterRepresentation::Word32());
+    V<Word32> phi = __ Phi({cst}, RegisterRepresentation::Word32());
     __ GotoIf(phi, outside);
     __ Goto(loop);
     __ Bind(outside);

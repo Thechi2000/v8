@@ -202,20 +202,20 @@ HEAP_TEST(DoNotEvacuatePinnedPages) {
       heap, static_cast<int>(MemoryChunkLayout::AllocatableMemoryInDataPage()),
       AllocationType::kOld);
 
-  Page* page = Page::FromHeapObject(*handles.front());
+  MemoryChunk* chunk = MemoryChunk::FromHeapObject(*handles.front());
 
   CHECK(heap->InSpace(*handles.front(), OLD_SPACE));
-  page->SetFlag(MemoryChunk::PINNED);
+  chunk->SetFlagNonExecutable(MemoryChunk::PINNED);
 
   heap::InvokeMajorGC(heap);
   heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
 
   // The pinned flag should prevent the page from moving.
   for (Handle<FixedArray> object : handles) {
-    CHECK_EQ(page, Page::FromHeapObject(*object));
+    CHECK_EQ(chunk, MemoryChunk::FromHeapObject(*object));
   }
 
-  page->ClearFlag(MemoryChunk::PINNED);
+  chunk->ClearFlagNonExecutable(MemoryChunk::PINNED);
 
   heap::InvokeMajorGC(heap);
   heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
@@ -223,7 +223,7 @@ HEAP_TEST(DoNotEvacuatePinnedPages) {
   // `compact_on_every_full_gc` ensures that this page is an evacuation
   // candidate, so with the pin flag cleared compaction should now move it.
   for (Handle<FixedArray> object : handles) {
-    CHECK_NE(page, Page::FromHeapObject(*object));
+    CHECK_NE(chunk, MemoryChunk::FromHeapObject(*object));
   }
 }
 
@@ -345,8 +345,8 @@ TEST(Regress5829) {
   }
   CHECK(marking->IsMarking() || marking->IsStopped());
   if (marking->IsStopped()) {
-    heap->TryStartIncrementalMarking(i::GCFlag::kNoFlags,
-                                     i::GarbageCollectionReason::kTesting);
+    heap->StartIncrementalMarking(i::GCFlag::kNoFlags,
+                                  i::GarbageCollectionReason::kTesting);
   }
   CHECK(marking->IsMarking());
   CHECK(marking->black_allocation());
@@ -357,7 +357,7 @@ TEST(Regress5829) {
   array->set_length(9);
   heap->CreateFillerObjectAt(old_end - kTaggedSize, kTaggedSize);
   heap->FreeMainThreadLinearAllocationAreas();
-  Page* page = Page::FromAddress(array->address());
+  PageMetadata* page = PageMetadata::FromAddress(array->address());
   for (auto object_and_size : LiveObjectRange(page)) {
     CHECK(!IsFreeSpaceOrFiller(object_and_size.first));
   }

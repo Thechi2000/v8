@@ -28,7 +28,8 @@ WireBytesRef ConstantExpression::wire_bytes_ref() const {
 
 ValueOrError EvaluateConstantExpression(
     Zone* zone, ConstantExpression expr, ValueType expected, Isolate* isolate,
-    Handle<WasmTrustedInstanceData> trusted_instance_data) {
+    Handle<WasmTrustedInstanceData> trusted_instance_data,
+    Handle<WasmTrustedInstanceData> shared_trusted_instance_data) {
   switch (expr.kind()) {
     case ConstantExpression::kEmpty:
       UNREACHABLE();
@@ -43,9 +44,14 @@ ValueOrError EvaluateConstantExpression(
           ValueType::RefNull(expr.repr()));
     case ConstantExpression::kRefFunc: {
       uint32_t index = expr.index();
-      Handle<Object> value =
-          WasmTrustedInstanceData::GetOrCreateWasmInternalFunction(
-              isolate, trusted_instance_data, index);
+      const WasmModule* module = trusted_instance_data->module();
+      bool function_is_shared =
+          module->types[module->functions[index].sig_index].is_shared;
+      Handle<WasmFuncRef> value = WasmTrustedInstanceData::GetOrCreateFuncRef(
+          isolate,
+          function_is_shared ? shared_trusted_instance_data
+                             : trusted_instance_data,
+          index);
       return WasmValue(value, expected);
     }
     case ConstantExpression::kWireBytesRef: {
@@ -64,7 +70,7 @@ ValueOrError EvaluateConstantExpression(
       constexpr bool kIsShared = false;
       FunctionBody body(&sig, ref.offset(), start, end, kIsShared);
       WasmFeatures detected;
-      auto* module = trusted_instance_data->module();
+      const WasmModule* module = trusted_instance_data->module();
       ValueOrError result;
       {
         // We need a scope for the decoder because its destructor resets some
@@ -76,7 +82,8 @@ ValueOrError EvaluateConstantExpression(
         WasmFullDecoder<Decoder::FullValidationTag, ConstantExpressionInterface,
                         kConstantExpression>
             decoder(zone, module, WasmFeatures::All(), &detected, body, module,
-                    isolate, trusted_instance_data);
+                    isolate, trusted_instance_data,
+                    shared_trusted_instance_data);
 
         decoder.DecodeFunctionBody();
 

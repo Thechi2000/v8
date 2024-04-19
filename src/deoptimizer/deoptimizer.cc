@@ -87,7 +87,7 @@ Tagged<Code> DeoptimizableCodeIterator::Next() {
           // moving.
           safepoint_scope_.reset();
           state_ = kDone;
-          V8_FALLTHROUGH;
+          [[fallthrough]];
         case kDone:
           return Code();
       }
@@ -330,8 +330,8 @@ class ActivationsFinder : public ThreadVisitor {
                 isolate, code, it.frame()->pc());
             trampoline_pc = safepoint.trampoline_pc();
           } else {
-            SafepointEntry safepoint =
-                SafepointTable::FindEntry(isolate, code, it.frame()->pc());
+            SafepointEntry safepoint = SafepointTable::FindEntry(
+                isolate, code, it.frame()->maybe_unauthenticated_pc());
             trampoline_pc = safepoint.trampoline_pc();
           }
           // TODO(saelo): currently we have to use full pointer comparison as
@@ -343,9 +343,12 @@ class ActivationsFinder : public ThreadVisitor {
           CHECK_GE(trampoline_pc, 0);
           // Replace the current pc on the stack with the trampoline.
           // TODO(v8:10026): avoid replacing a signed pointer.
-          Address* pc_addr = it.frame()->pc_address();
-          Address new_pc = code->instruction_start() + trampoline_pc;
-          PointerAuthentication::ReplacePC(pc_addr, new_pc, kSystemPointerSize);
+          if (!it.frame()->InFastCCall()) {
+            Address* pc_addr = it.frame()->pc_address();
+            Address new_pc = code->instruction_start() + trampoline_pc;
+            PointerAuthentication::ReplacePC(pc_addr, new_pc,
+                                             kSystemPointerSize);
+          }
         }
       }
     }
@@ -383,8 +386,8 @@ void Deoptimizer::DeoptimizeMarkedCode(Isolate* isolate) {
             MaglevSafepointTable::FindEntry(isolate, code, it.frame()->pc());
         safe_if_deopt_triggered = safepoint.has_deoptimization_index();
       } else {
-        SafepointEntry safepoint =
-            SafepointTable::FindEntry(isolate, code, it.frame()->pc());
+        SafepointEntry safepoint = SafepointTable::FindEntry(
+            isolate, code, it.frame()->maybe_unauthenticated_pc());
         safe_if_deopt_triggered = safepoint.has_deoptimization_index();
       }
 
@@ -551,6 +554,12 @@ Deoptimizer::Deoptimizer(Isolate* isolate, Tagged<JSFunction> function,
   unsigned size = ComputeInputFrameSize();
   const int parameter_count =
       function->shared()->internal_formal_parameter_count_with_receiver();
+  // The parameter count from the (in-sandbox) SFI must match the actual
+  // parameter count of the Code that we are deoptimizing. For now, we use a
+  // SBXCHECK here to ensure that these values are always equal. In the future,
+  // we should change the deoptimizer to use the (trusted) parameter count from
+  // the Code object everywhere, at which point we could drop this again.
+  SBXCHECK_EQ(parameter_count, compiled_code_->parameter_count());
   input_ = new (size) FrameDescription(size, parameter_count, isolate_);
 
   DCHECK_EQ(deopt_exit_index_, kFixedExitSizeMarker);
@@ -574,10 +583,12 @@ Deoptimizer::Deoptimizer(Isolate* isolate, Tagged<JSFunction> function,
   // non-lazy deopt, so we use <=, similarly for the last non-lazy deopt and
   // the first deopt with resume entry.
   if (from_ <= lazy_deopt_start) {
+    DCHECK_EQ(kind, DeoptimizeKind::kEager);
     int offset = static_cast<int>(from_ - kEagerDeoptExitSize - deopt_start);
     DCHECK_EQ(0, offset % kEagerDeoptExitSize);
     deopt_exit_index_ = offset / kEagerDeoptExitSize;
   } else {
+    DCHECK_EQ(kind, DeoptimizeKind::kLazy);
     int offset =
         static_cast<int>(from_ - kLazyDeoptExitSize - lazy_deopt_start);
     DCHECK_EQ(0, offset % kLazyDeoptExitSize);
@@ -844,10 +855,7 @@ void Deoptimizer::DoComputeOutputFrames() {
   }
 
   DCHECK_NULL(output_);
-  output_ = new FrameDescription*[count];
-  for (size_t i = 0; i < count; ++i) {
-    output_[i] = nullptr;
-  }
+  output_ = new FrameDescription* [count] {};
   output_count_ = static_cast<int>(count);
 
   // Translate each output frame.
@@ -890,7 +898,9 @@ void Deoptimizer::DoComputeOutputFrames() {
         break;
 #if V8_ENABLE_WEBASSEMBLY
       case TranslatedFrame::kWasmInlinedIntoJS:
-        FATAL("inlined wasm frames may not appear in deopts for built-ins");
+        FATAL("inlined wasm frames may not appear in JS deopts");
+      case TranslatedFrame::kLiftoffFunction:
+        FATAL("wasm liftoff frames may not appear in JS deopts");
 #endif
       case TranslatedFrame::kInvalid:
         FATAL("invalid frame");
@@ -1371,7 +1381,7 @@ void Deoptimizer::DoComputeInlinedExtraArguments(
     // The receiver and arguments with index below the formal parameter
     // count are in the fake adaptor frame, because they are used to create the
     // arguments object. We should however not push them, since the interpreter
-    // frame with do that.
+    // frame will do that.
     value_iterator++;  // Skip function.
     value_iterator++;  // Skip receiver.
     for (int i = 0; i < formal_parameter_count; i++) value_iterator++;
@@ -1718,11 +1728,11 @@ TranslatedValue Deoptimizer::TranslatedValueForWasmReturnKind(
       case wasm::kI32:
         return TranslatedValue::NewInt32(
             &translated_state_,
-            (int32_t)input_->GetRegister(kReturnRegister0.code()));
+            static_cast<int32_t>(input_->GetRegister(kReturnRegister0.code())));
       case wasm::kI64:
         return TranslatedValue::NewInt64ToBigInt(
             &translated_state_,
-            (int64_t)input_->GetRegister(kReturnRegister0.code()));
+            static_cast<int64_t>(input_->GetRegister(kReturnRegister0.code())));
       case wasm::kF32:
         return TranslatedValue::NewFloat(
             &translated_state_,

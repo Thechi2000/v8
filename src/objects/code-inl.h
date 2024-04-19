@@ -91,14 +91,15 @@ INT_ACCESSORS(Code, metadata_size, kMetadataSizeOffset)
 INT_ACCESSORS(Code, handler_table_offset, kHandlerTableOffsetOffset)
 INT_ACCESSORS(Code, code_comments_offset, kCodeCommentsOffsetOffset)
 INT32_ACCESSORS(Code, unwinding_info_offset, kUnwindingInfoOffsetOffset)
+UINT16_ACCESSORS(Code, parameter_count, kParameterCountOffset)
 
-inline Tagged<TrustedFixedArray> Code::deoptimization_data() const {
+inline Tagged<ProtectedFixedArray> Code::deoptimization_data() const {
   DCHECK(uses_deoptimization_data());
-  return TrustedFixedArray::cast(
+  return ProtectedFixedArray::cast(
       ReadProtectedPointerField(kDeoptimizationDataOrInterpreterDataOffset));
 }
 
-inline void Code::set_deoptimization_data(Tagged<TrustedFixedArray> value,
+inline void Code::set_deoptimization_data(Tagged<ProtectedFixedArray> value,
                                           WriteBarrierMode mode) {
   DCHECK(uses_deoptimization_data());
   DCHECK(!ObjectInYoungGeneration(value));
@@ -280,8 +281,8 @@ int Code::constant_pool_size() const {
 
 bool Code::has_constant_pool() const { return constant_pool_size() > 0; }
 
-Tagged<TrustedFixedArray> Code::unchecked_deoptimization_data() const {
-  return TrustedFixedArray::unchecked_cast(
+Tagged<ProtectedFixedArray> Code::unchecked_deoptimization_data() const {
+  return ProtectedFixedArray::unchecked_cast(
       ReadProtectedPointerField(kDeoptimizationDataOrInterpreterDataOffset));
 }
 
@@ -682,18 +683,23 @@ void Code::set_instruction_start(IsolateForSandbox isolate, Address value) {
 }
 
 CodeEntrypointTag Code::entrypoint_tag() const {
-  // Currently we only distinguish between bytecode handlers and other Code. In
-  // the future, we'll probably also want to distinguish between Wasm, RegExp,
-  // and JavaScript Code.
-  if (kind() == CodeKind::BYTECODE_HANDLER) {
-    return kBytecodeHandlerEntrypointTag;
-  } else if (kind() == CodeKind::BUILTIN) {
-    return Builtins::EntrypointTagFor(builtin_id());
-  } else if (kind() == CodeKind::REGEXP) {
-    return kRegExpEntrypointTag;
+  switch (kind()) {
+    case CodeKind::BYTECODE_HANDLER:
+      return kBytecodeHandlerEntrypointTag;
+    case CodeKind::BUILTIN:
+      return Builtins::EntrypointTagFor(builtin_id());
+    case CodeKind::REGEXP:
+      return kRegExpEntrypointTag;
+    case CodeKind::WASM_FUNCTION:
+    case CodeKind::WASM_TO_CAPI_FUNCTION:
+    case CodeKind::WASM_TO_JS_FUNCTION:
+      return kWasmEntrypointTag;
+    case CodeKind::JS_TO_WASM_FUNCTION:
+      return kJSEntrypointTag;
+    default:
+      // TODO(saelo): eventually we'll want this to be UNREACHABLE().
+      return kDefaultCodeEntrypointTag;
   }
-  // TODO(saelo): eventually we'll want this to be UNREACHABLE().
-  return kDefaultCodeEntrypointTag;
 }
 
 void Code::SetInstructionStreamAndInstructionStart(

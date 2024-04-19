@@ -33,13 +33,13 @@ WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
   }
 
   if (result.succeeded() && counters) {
+    // TODO(mliedtke): Add counter for deopt data size.
     counters->wasm_generated_code_size()->Increment(
         result.code_desc.instr_size);
     counters->wasm_reloc_size()->Increment(result.code_desc.reloc_size);
   }
 
   result.func_index = func_index_;
-  result.requested_tier = tier_;
 
   return result;
 }
@@ -115,7 +115,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
     case ExecutionTier::kNone:
       UNREACHABLE();
 
-    case ExecutionTier::kLiftoff:
+    case ExecutionTier::kLiftoff: {
       // The --wasm-tier-mask-for-testing flag can force functions to be
       // compiled with TurboFan, and the --wasm-debug-mask-for-testing can force
       // them to be compiled for debugging, see documentation.
@@ -149,9 +149,9 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
       // If Liftoff failed, fall back to TurboFan.
       // TODO(wasm): We could actually stop or remove the tiering unit for this
       // function to avoid compiling it twice with TurboFan.
-      V8_FALLTHROUGH;
-
-    case ExecutionTier::kTurbofan:
+      [[fallthrough]];
+    }
+    case ExecutionTier::kTurbofan: {
       compiler::WasmCompilationData data(func_body);
       data.func_index = func_index_;
       data.wire_bytes_storage = wire_bytes_storage;
@@ -171,6 +171,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
                                                         detected);
       result.for_debugging = for_debugging_;
       break;
+    }
   }
 
   DCHECK(result.succeeded());

@@ -31,6 +31,7 @@
 #include "src/logging/log.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/debug-objects.h"
+#include "src/objects/objects.h"
 #include "src/objects/smi.h"
 #include "src/objects/template-objects.h"
 #include "src/parsing/parse-info.h"
@@ -1202,6 +1203,82 @@ class V8_NODISCARD BytecodeGenerator::LoopScope final {
   LoopBuilder* const loop_builder_;
 };
 
+class V8_NODISCARD BytecodeGenerator::ForInScope final {
+ public:
+  explicit ForInScope(BytecodeGenerator* bytecode_generator,
+                      ForInStatement* stmt, Register enum_index,
+                      Register cache_type)
+      : bytecode_generator_(bytecode_generator),
+        parent_for_in_scope_(bytecode_generator_->current_for_in_scope()),
+        each_var_(nullptr),
+        enum_index_(enum_index),
+        cache_type_(cache_type) {
+    if (v8_flags.enable_enumerated_keyed_access_bytecode) {
+      Expression* each = stmt->each();
+      if (each->IsVariableProxy()) {
+        Variable* each_var = each->AsVariableProxy()->var();
+        if (each_var->IsStackLocal()) {
+          each_var_ = each_var;
+          bytecode_generator_->SetVariableInRegister(
+              each_var_,
+              bytecode_generator_->builder()->Local(each_var_->index()));
+        }
+      }
+      bytecode_generator_->set_current_for_in_scope(this);
+    }
+  }
+
+  ~ForInScope() {
+    if (v8_flags.enable_enumerated_keyed_access_bytecode) {
+      bytecode_generator_->set_current_for_in_scope(parent_for_in_scope_);
+    }
+  }
+
+  // Get corresponding {ForInScope} for a given {each} variable.
+  ForInScope* GetForInScope(Variable* each) {
+    DCHECK(v8_flags.enable_enumerated_keyed_access_bytecode);
+    ForInScope* scope = this;
+    do {
+      if (each == scope->each_var_) break;
+      scope = scope->parent_for_in_scope_;
+    } while (scope != nullptr);
+    return scope;
+  }
+
+  Register enum_index() { return enum_index_; }
+  Register cache_type() { return cache_type_; }
+
+ private:
+  BytecodeGenerator* const bytecode_generator_;
+  ForInScope* const parent_for_in_scope_;
+  Variable* each_var_;
+  Register enum_index_;
+  Register cache_type_;
+};
+
+class V8_NODISCARD BytecodeGenerator::DisposablesStackScope final {
+ public:
+  explicit DisposablesStackScope(BytecodeGenerator* bytecode_generator)
+      : bytecode_generator_(bytecode_generator),
+        prev_disposables_stack_(
+            bytecode_generator_->current_disposables_stack()) {
+    bytecode_generator_->current_disposables_stack_ =
+        bytecode_generator->register_allocator()->NewRegister();
+    bytecode_generator->builder()->CallRuntime(
+        Runtime::kInitializeDisposableStack);
+    bytecode_generator->builder()->StoreAccumulatorInRegister(
+        bytecode_generator_->current_disposables_stack_);
+  }
+
+  ~DisposablesStackScope() {
+    bytecode_generator_->set_current_disposables_stack(prev_disposables_stack_);
+  }
+
+ private:
+  BytecodeGenerator* const bytecode_generator_;
+  Register prev_disposables_stack_;
+};
+
 namespace {
 
 template <typename PropertyT>
@@ -1291,6 +1368,7 @@ BytecodeGenerator::BytecodeGenerator(
       execution_context_(nullptr),
       execution_result_(nullptr),
       incoming_new_target_or_generator_(),
+      current_disposables_stack_(),
       optional_chaining_null_labels_(nullptr),
       dummy_feedback_slot_(feedback_spec(), FeedbackSlotKind::kCompareOp),
       generator_jump_table_(nullptr),
@@ -1298,6 +1376,7 @@ BytecodeGenerator::BytecodeGenerator(
       loop_depth_(0),
       hole_check_bitmap_(0),
       current_loop_scope_(nullptr),
+      current_for_in_scope_(nullptr),
       catch_prediction_(HandlerTable::UNCAUGHT) {
   DCHECK_EQ(closure_scope(), closure_scope()->GetClosureScope());
   if (info->has_source_range_map()) {
@@ -1620,6 +1699,17 @@ void BytecodeGenerator::GenerateBytecodeBody() {
 }
 
 void BytecodeGenerator::GenerateBytecodeBodyWithoutImplicitFinalReturn() {
+  if (v8_flags.js_explicit_resource_management && closure_scope() != nullptr &&
+      closure_scope()->has_using_declaration()) {
+    BuildDisposeScope(
+        [&]() { GenerateBytecodeBodyWithoutImplicitFinalReturnOrDispose(); });
+  } else {
+    GenerateBytecodeBodyWithoutImplicitFinalReturnOrDispose();
+  }
+}
+
+void BytecodeGenerator::
+    GenerateBytecodeBodyWithoutImplicitFinalReturnOrDispose() {
   // Build the arguments object if it is used.
   VisitArgumentsObject(closure_scope()->arguments());
 
@@ -1723,7 +1813,16 @@ void BytecodeGenerator::VisitBlock(Block* stmt) {
   if (stmt->scope() != nullptr && stmt->scope()->NeedsContext()) {
     BuildNewLocalBlockContext(stmt->scope());
     ContextScope scope(this, stmt->scope());
-    VisitBlockDeclarationsAndStatements(stmt);
+    VisitBlockMaybeDispose(stmt);
+  } else {
+    VisitBlockMaybeDispose(stmt);
+  }
+}
+
+void BytecodeGenerator::VisitBlockMaybeDispose(Block* stmt) {
+  if (v8_flags.js_explicit_resource_management && stmt->scope() != nullptr &&
+      stmt->scope()->has_using_declaration()) {
+    BuildDisposeScope([&]() { VisitBlockDeclarationsAndStatements(stmt); });
   } else {
     VisitBlockDeclarationsAndStatements(stmt);
   }
@@ -2509,6 +2608,22 @@ void BytecodeGenerator::BuildTryFinally(
   commands.ApplyDeferredCommands();
 }
 
+template <typename WrappedFunc>
+void BytecodeGenerator::BuildDisposeScope(WrappedFunc wrapped_func) {
+  RegisterAllocationScope allocation_scope(this);
+  DisposablesStackScope disposables_stack_scope(this);
+
+  BuildTryFinally(
+      // Try block
+      [&]() { wrapped_func(); },
+      // Finally block
+      [&](Register body_continuation_token) {
+        builder()->CallRuntime(Runtime::kDisposeDisposableStack,
+                               current_disposables_stack_);
+      },
+      catch_prediction());
+}
+
 void BytecodeGenerator::VisitIterationBody(IterationStatement* stmt,
                                            LoopBuilder* loop_builder) {
   loop_builder->LoopBody();
@@ -2655,8 +2770,7 @@ void BytecodeGenerator::VisitForInStatement(ForInStatement* stmt) {
     LoopScope loop_scope(this, &loop_builder);
     HoleCheckElisionScope elider(this);
     builder()->SetExpressionAsStatementPosition(stmt->each());
-    builder()->ForInContinue(index, cache_length);
-    loop_builder.BreakIfFalse(ToBooleanMode::kAlreadyBoolean);
+    loop_builder.BreakIfForInDone(index, cache_length);
     builder()->ForInNext(receiver, index, triple.Truncate(2),
                          feedback_index(slot));
     loop_builder.ContinueIfUndefined();
@@ -2672,9 +2786,12 @@ void BytecodeGenerator::VisitForInStatement(ForInStatement* stmt) {
       BuildAssignment(lhs_data, Token::kAssign, LookupHoistingMode::kNormal);
     }
 
-    VisitIterationBody(stmt, &loop_builder);
-    builder()->ForInStep(index);
-    builder()->StoreAccumulatorInRegister(index);
+    {
+      Register cache_type = triple[0];
+      ForInScope scope(this, stmt, index, cache_type);
+      VisitIterationBody(stmt, &loop_builder);
+      builder()->ForInStep(index);
+    }
   }
   builder()->Bind(&subject_undefined_label);
 }
@@ -3492,7 +3609,7 @@ void BytecodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
       case ObjectLiteral::Property::CONSTANT:
       case ObjectLiteral::Property::MATERIALIZED_LITERAL:
         DCHECK(clone_object_spread || !property->value()->IsCompileTimeValue());
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       case ObjectLiteral::Property::COMPUTED: {
         // It is safe to use [[Put]] here because the boilerplate already
         // contains computed properties with an uninitialized value.
@@ -3925,6 +4042,14 @@ void BytecodeGenerator::SetVariableInRegister(Variable* var, Register reg) {
   }
 }
 
+Variable* BytecodeGenerator::GetVariableInAccumulator() {
+  BytecodeRegisterOptimizer* optimizer = builder()->GetRegisterOptimizer();
+  if (optimizer) {
+    return optimizer->GetVariableInAccumulator();
+  }
+  return nullptr;
+}
+
 void BytecodeGenerator::BuildVariableLoad(Variable* variable,
                                           HoleCheckMode hole_check_mode,
                                           TypeofMode typeof_mode) {
@@ -4172,7 +4297,6 @@ void BytecodeGenerator::BuildVariableAssignment(
     LookupHoistingMode lookup_hoisting_mode) {
   VariableMode mode = variable->mode();
   RegisterAllocationScope assignment_register_scope(this);
-  BytecodeLabel end_label;
   switch (variable->location()) {
     case VariableLocation::PARAMETER:
     case VariableLocation::LOCAL: {
@@ -4198,16 +4322,28 @@ void BytecodeGenerator::BuildVariableAssignment(
         builder()->LoadAccumulatorWithRegister(value_temp);
       }
 
-      if (mode != VariableMode::kConst || op == Token::kInit) {
+      if ((mode != VariableMode::kConst && mode != VariableMode::kUsing) ||
+          op == Token::kInit) {
         if (op == Token::kInit &&
             variable->HasHoleCheckUseInSameClosureScope()) {
           // After initializing a variable it won't be the hole anymore, so
           // elide subsequent checks.
           RememberHoleCheckInCurrentBlock(variable);
         }
+        if (op == Token::kInit && mode == VariableMode::kUsing) {
+          RegisterList args = register_allocator()->NewRegisterList(2);
+          builder()
+              ->MoveRegister(current_disposables_stack_, args[0])
+              .StoreAccumulatorInRegister(args[1])
+              .CallRuntime(Runtime::kAddDisposableValue, args);
+        }
         builder()->StoreAccumulatorInRegister(destination);
-      } else if (variable->throw_on_const_assignment(language_mode())) {
+      } else if (variable->throw_on_const_assignment(language_mode()) &&
+                 mode == VariableMode::kConst) {
         builder()->CallRuntime(Runtime::kThrowConstAssignError);
+      } else if (variable->throw_on_const_assignment(language_mode()) &&
+                 mode == VariableMode::kUsing) {
+        builder()->CallRuntime(Runtime::kThrowUsingAssignError);
       }
       break;
     }
@@ -4355,6 +4491,25 @@ void BytecodeGenerator::BuildStoreGlobal(Variable* variable) {
   if (!execution_result()->IsEffect()) {
     builder()->LoadAccumulatorWithRegister(value);
   }
+}
+
+void BytecodeGenerator::BuildLoadKeyedProperty(Register object,
+                                               FeedbackSlot slot) {
+  if (v8_flags.enable_enumerated_keyed_access_bytecode &&
+      current_for_in_scope() != nullptr) {
+    Variable* key = GetVariableInAccumulator();
+    if (key != nullptr) {
+      ForInScope* scope = current_for_in_scope()->GetForInScope(key);
+      if (scope != nullptr) {
+        Register enum_index = scope->enum_index();
+        Register cache_type = scope->cache_type();
+        builder()->LoadEnumeratedKeyedProperty(object, enum_index, cache_type,
+                                               feedback_index(slot));
+        return;
+      }
+    }
+  }
+  builder()->LoadKeyedProperty(object, feedback_index(slot));
 }
 
 // static
@@ -5065,9 +5220,8 @@ void BytecodeGenerator::VisitCompoundAssignment(CompoundAssignment* expr) {
     }
     case KEYED_PROPERTY: {
       FeedbackSlot slot = feedback_spec()->AddKeyedLoadICSlot();
-      builder()
-          ->LoadAccumulatorWithRegister(lhs_data.key())
-          .LoadKeyedProperty(lhs_data.object(), feedback_index(slot));
+      builder()->LoadAccumulatorWithRegister(lhs_data.key());
+      BuildLoadKeyedProperty(lhs_data.object(), slot);
       break;
     }
     case NAMED_SUPER_PROPERTY: {
@@ -5606,8 +5760,7 @@ void BytecodeGenerator::VisitPropertyLoad(Register obj, Property* property) {
     case KEYED_PROPERTY: {
       VisitForAccumulatorValue(property->key());
       builder()->SetExpressionPosition(property);
-      builder()->LoadKeyedProperty(
-          obj, feedback_index(feedback_spec()->AddKeyedLoadICSlot()));
+      BuildLoadKeyedProperty(obj, feedback_spec()->AddKeyedLoadICSlot());
       break;
     }
     case NAMED_SUPER_PROPERTY:

@@ -132,12 +132,12 @@ class HeapEntryVerifier {
     // Read-only objects can't ever retain normal read-write objects, so these
     // are fine to skip.
     for (Tagged<HeapObject> obj : reference_summary_.strong_references()) {
-      if (!BasicMemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
+      if (!MemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
         CHECK_NE(checked_objects_.find(obj), checked_objects_.end());
       }
     }
     for (Tagged<HeapObject> obj : reference_summary_.weak_references()) {
-      if (!BasicMemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
+      if (!MemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
         CHECK_NE(checked_objects_.find(obj), checked_objects_.end());
       }
     }
@@ -158,7 +158,7 @@ class HeapEntryVerifier {
           level == 0 ? reference_summary_.strong_references()
                      : indirect_strong_references_[level - 1];
       for (Tagged<HeapObject> obj : previous) {
-        if (BasicMemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
+        if (MemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
           // Marking visitors don't expect to visit objects in read-only space,
           // and will fail DCHECKs if they are used on those objects. Read-only
           // objects can never retain anything outside read-only space, so
@@ -264,7 +264,7 @@ void HeapEntry::VerifyReference(HeapGraphEdge::Type type, HeapEntry* entry,
   }
   Tagged<HeapObject> from_obj = HeapObject::cast(Tagged<Object>(from_address));
   Tagged<HeapObject> to_obj = HeapObject::cast(Tagged<Object>(to_address));
-  if (BasicMemoryChunk::FromHeapObject(to_obj)->InReadOnlySpace()) {
+  if (MemoryChunk::FromHeapObject(to_obj)->InReadOnlySpace()) {
     // We can't verify pointers into read-only space, because marking visitors
     // might not mark those. For example, every Map has a pointer to the
     // MetaMap, but marking visitors don't bother with following that link.
@@ -481,6 +481,17 @@ HeapEntry* HeapSnapshot::AddEntry(HeapEntry::Type type, const char* name,
   entries_.emplace_back(this, static_cast<int>(entries_.size()), type, name, id,
                         size, trace_node_id);
   return &entries_.back();
+}
+
+void HeapSnapshot::AddScriptLineEnds(int script_id,
+                                     String::LineEndsVector&& line_ends) {
+  scripts_line_ends_map_.emplace(script_id, std::move(line_ends));
+}
+
+String::LineEndsVector& HeapSnapshot::GetScriptLineEnds(int script_id) {
+  DCHECK(scripts_line_ends_map_.find(script_id) !=
+         scripts_line_ends_map_.end());
+  return scripts_line_ends_map_[script_id];
 }
 
 void HeapSnapshot::FillChildren() {
@@ -829,9 +840,13 @@ void V8HeapExplorer::ExtractLocationForJSFunction(HeapEntry* entry,
   Tagged<Script> script = Script::cast(func->shared()->script());
   int scriptId = script->id();
   int start = func->shared()->StartPosition();
-  DCHECK(script->has_line_ends());
   Script::PositionInfo info;
-  script->GetPositionInfo(start, &info);
+  if (script->has_line_ends()) {
+    script->GetPositionInfo(start, &info);
+  } else {
+    script->GetPositionInfoWithLineEnds(
+        start, &info, snapshot_->GetScriptLineEnds(script->id()));
+  }
   snapshot_->AddLocation(entry, scriptId, info.line, info.column);
 }
 
@@ -1040,7 +1055,7 @@ HeapEntry::Type V8HeapExplorer::GetSystemEntryType(Tagged<HeapObject> object) {
   // Maps in read-only space are for internal V8 data, not user-defined object
   // shapes.
   if ((InstanceTypeChecker::IsMap(type) &&
-       !BasicMemoryChunk::FromHeapObject(object)->InReadOnlySpace()) ||
+       !MemoryChunk::FromHeapObject(object)->InReadOnlySpace()) ||
       InstanceTypeChecker::IsDescriptorArray(type) ||
       InstanceTypeChecker::IsTransitionArray(type) ||
       InstanceTypeChecker::IsPrototypeInfo(type) ||
@@ -1065,9 +1080,9 @@ void V8HeapExplorer::PopulateLineEnds() {
     }
   }
 
-  DCHECK(AllowHeapAllocation::IsAllowed());
   for (auto& script : scripts) {
-    Script::InitLineEnds(isolate(), script);
+    snapshot_->AddScriptLineEnds(script->id(),
+                                 Script::GetLineEnds(isolate(), script));
   }
 }
 
@@ -2307,7 +2322,7 @@ bool V8HeapExplorer::IterateAndExtractReferences(
     // never retain read-write objects, so there is no risk in skipping
     // verification for them.
     if (v8_flags.heap_snapshot_verify &&
-        !BasicMemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
+        !MemoryChunk::FromHeapObject(obj)->InReadOnlySpace()) {
       verifier = std::make_unique<HeapEntryVerifier>(generator, obj);
     }
 #endif
@@ -2597,10 +2612,11 @@ const char* V8HeapExplorer::GetStrongGcSubrootName(Tagged<HeapObject> object) {
 }
 
 void V8HeapExplorer::TagObject(Tagged<Object> obj, const char* tag,
-                               base::Optional<HeapEntry::Type> type) {
+                               base::Optional<HeapEntry::Type> type,
+                               bool overwrite_existing_name) {
   if (IsEssentialObject(obj)) {
     HeapEntry* entry = GetEntry(obj);
-    if (entry->name()[0] == '\0') {
+    if (overwrite_existing_name || entry->name()[0] == '\0') {
       entry->set_name(tag);
     }
     if (type.has_value()) {
@@ -2617,6 +2633,13 @@ void V8HeapExplorer::RecursivelyTagConstantPool(Tagged<Object> obj,
   if (IsFixedArrayExact(obj, isolate())) {
     Tagged<FixedArray> arr = FixedArray::cast(obj);
     TagObject(arr, tag, type);
+    if (recursion_limit <= 0) return;
+    for (int i = 0; i < arr->length(); ++i) {
+      RecursivelyTagConstantPool(arr->get(i), tag, type, recursion_limit);
+    }
+  } else if (IsTrustedFixedArray(obj, isolate())) {
+    Tagged<TrustedFixedArray> arr = TrustedFixedArray::cast(obj);
+    TagObject(arr, tag, type, /*overwrite_existing_name=*/true);
     if (recursion_limit <= 0) return;
     for (int i = 0; i < arr->length(); ++i) {
       RecursivelyTagConstantPool(arr->get(i), tag, type, recursion_limit);
@@ -2973,7 +2996,6 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
   IsolateSafepointScope scope(heap_);
 
   Isolate* isolate = heap_->isolate();
-  v8_heap_explorer_.PopulateLineEnds();
   auto temporary_global_object_tags =
       v8_heap_explorer_.CollectTemporaryGlobalObjectsTags();
 
@@ -2985,6 +3007,7 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
   // DisallowGarbageCollection scope as the HeapObjectIterator used during
   // snapshot creation enters a safepoint as well. However, in practice we
   // already enter a safepoint above so that should never trigger a GC.
+  DisallowPositionInfoSlow no_position_info_slow;
 
   NullContextForSnapshotScope null_context_scope(isolate);
 
@@ -2995,6 +3018,7 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
 
   snapshot_->AddSyntheticRootEntries();
 
+  v8_heap_explorer_.PopulateLineEnds();
   if (!FillReferences()) return false;
 
   snapshot_->FillChildren();
@@ -3065,12 +3089,9 @@ bool HeapSnapshotGenerator::FillReferences() {
 const int HeapSnapshotJSONSerializer::kNodeFieldsCount = 7;
 
 void HeapSnapshotJSONSerializer::Serialize(v8::OutputStream* stream) {
+  DisallowHeapAllocation no_heap_allocation;
   v8::base::ElapsedTimer timer;
   timer.Start();
-  if (AllocationTracker* allocation_tracker =
-          snapshot_->profiler()->allocation_tracker()) {
-    allocation_tracker->PrepareForSerialization();
-  }
   DCHECK_NULL(writer_);
   writer_ = new OutputStreamWriter(stream);
   SerializeImpl();
@@ -3428,10 +3449,17 @@ void HeapSnapshotJSONSerializer::SerializeTraceNodeInfos() {
     // The cast is safe because script id is a non-negative Smi.
     buffer_pos =
         utoa(static_cast<unsigned>(info->script_id), buffer, buffer_pos);
+
+    auto& line_ends = snapshot_->GetScriptLineEnds(info->script_id);
+    int line = -1;
+    int column = -1;
+    Script::GetLineColumnWithLineEnds(info->start_position, line, column,
+                                      line_ends);
+
     buffer[buffer_pos++] = ',';
-    buffer_pos = SerializePosition(info->line, buffer, buffer_pos);
+    buffer_pos = SerializePosition(line, buffer, buffer_pos);
     buffer[buffer_pos++] = ',';
-    buffer_pos = SerializePosition(info->column, buffer, buffer_pos);
+    buffer_pos = SerializePosition(column, buffer, buffer_pos);
     buffer[buffer_pos++] = '\n';
     buffer[buffer_pos++] = '\0';
     writer_->AddString(buffer.begin());

@@ -24,8 +24,9 @@
 #include "src/heap/large-spaces.h"
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/memory-allocator.h"
+#include "src/heap/memory-chunk-inl.h"
 #include "src/heap/memory-chunk-layout.h"
-#include "src/heap/memory-chunk.h"
+#include "src/heap/mutable-page.h"
 #include "src/heap/new-spaces-inl.h"
 #include "src/heap/paged-spaces-inl.h"
 #include "src/heap/read-only-heap.h"
@@ -257,7 +258,7 @@ void Heap::FinalizeExternalString(Tagged<String> string) {
   Tagged<ExternalString> ext_string = Tagged<ExternalString>::cast(string);
 
   if (!v8_flags.enable_third_party_heap) {
-    Page* page = Page::FromHeapObject(string);
+    PageMetadata* page = PageMetadata::FromHeapObject(string);
     page->DecrementExternalBackingStoreBytes(
         ExternalBackingStoreType::kExternalString,
         ext_string->ExternalPayloadSize());
@@ -289,8 +290,7 @@ bool Heap::InYoungGeneration(Tagged<MaybeObject> object) {
 // static
 bool Heap::InYoungGeneration(Tagged<HeapObject> heap_object) {
   if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) return false;
-  bool result =
-      BasicMemoryChunk::FromHeapObject(heap_object)->InYoungGeneration();
+  bool result = MemoryChunk::FromHeapObject(heap_object)->InYoungGeneration();
 #ifdef DEBUG
   // If in the young generation, then check we're either not in the middle of
   // GC or the object is in to-space.
@@ -318,7 +318,7 @@ bool Heap::InFromPage(Tagged<MaybeObject> object) {
 
 // static
 bool Heap::InFromPage(Tagged<HeapObject> heap_object) {
-  return BasicMemoryChunk::FromHeapObject(heap_object)->IsFromPage();
+  return MemoryChunk::FromHeapObject(heap_object)->IsFromPage();
 }
 
 // static
@@ -335,7 +335,7 @@ bool Heap::InToPage(Tagged<MaybeObject> object) {
 
 // static
 bool Heap::InToPage(Tagged<HeapObject> heap_object) {
-  return BasicMemoryChunk::FromHeapObject(heap_object)->IsToPage();
+  return MemoryChunk::FromHeapObject(heap_object)->IsToPage();
 }
 
 bool Heap::InOldSpace(Tagged<Object> object) {
@@ -351,7 +351,7 @@ Heap* Heap::FromWritableHeapObject(Tagged<HeapObject> obj) {
   if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) {
     return Heap::GetIsolateFromWritableObject(obj)->heap();
   }
-  BasicMemoryChunk* chunk = BasicMemoryChunk::FromHeapObject(obj);
+  MemoryChunkMetadata* chunk = MemoryChunkMetadata::FromHeapObject(obj);
   // RO_SPACE can be shared between heaps, so we can't use RO_SPACE objects to
   // find a heap. The exception is when the ReadOnlySpace is writeable, during
   // bootstrapping, so explicitly allow this case.
@@ -373,10 +373,10 @@ bool Heap::IsPendingAllocationInternal(Tagged<HeapObject> object) {
     return tp_heap_->IsPendingAllocation(object);
   }
 
-  BasicMemoryChunk* chunk = BasicMemoryChunk::FromHeapObject(object);
+  MemoryChunk* chunk = MemoryChunk::FromHeapObject(object);
   if (chunk->InReadOnlySpace()) return false;
 
-  BaseSpace* base_space = chunk->owner();
+  BaseSpace* base_space = chunk->Metadata()->owner();
   Address addr = object.address();
 
   switch (base_space->identity()) {

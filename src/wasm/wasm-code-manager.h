@@ -176,6 +176,9 @@ class V8_EXPORT_PRIVATE WasmCode final {
     return {source_positions().end(),
             static_cast<size_t>(inlining_positions_size_)};
   }
+  base::Vector<const uint8_t> deopt_data() const {
+    return {inlining_positions().end(), static_cast<size_t>(deopt_data_size_)};
+  }
 
   int index() const { return index_; }
   // Anonymous functions are functions that don't carry an index.
@@ -306,6 +309,8 @@ class V8_EXPORT_PRIVATE WasmCode final {
 
   enum FlushICache : bool { kFlushICache = true, kNoFlushICache = false };
 
+  size_t EstimateCurrentMemoryConsumption() const;
+
  private:
   friend class NativeModule;
 
@@ -317,18 +322,20 @@ class V8_EXPORT_PRIVATE WasmCode final {
            base::Vector<const uint8_t> protected_instructions_data,
            base::Vector<const uint8_t> reloc_info,
            base::Vector<const uint8_t> source_position_table,
-           base::Vector<const uint8_t> inlining_positions, Kind kind,
+           base::Vector<const uint8_t> inlining_positions,
+           base::Vector<const uint8_t> deopt_data, Kind kind,
            ExecutionTier tier, ForDebugging for_debugging,
            bool frame_has_feedback_slot = false)
       : native_module_(native_module),
         instructions_(instructions.begin()),
-        meta_data_(
-            ConcatenateBytes({protected_instructions_data, reloc_info,
-                              source_position_table, inlining_positions})),
+        meta_data_(ConcatenateBytes({protected_instructions_data, reloc_info,
+                                     source_position_table, inlining_positions,
+                                     deopt_data})),
         instructions_size_(instructions.length()),
         reloc_info_size_(reloc_info.length()),
         source_positions_size_(source_position_table.length()),
         inlining_positions_size_(inlining_positions.length()),
+        deopt_data_size_(deopt_data.length()),
         protected_instructions_size_(protected_instructions_data.length()),
         index_(index),
         constant_pool_offset_(constant_pool_offset),
@@ -381,14 +388,16 @@ class V8_EXPORT_PRIVATE WasmCode final {
   //  - protected instructions data of size {protected_instructions_size_}
   //  - relocation info of size {reloc_info_size_}
   //  - source positions of size {source_positions_size_}
+  //  - deopt data of size {deopt_data_size_}
   // Note that the protected instructions come first to ensure alignment.
   std::unique_ptr<const uint8_t[]> meta_data_;
   const int instructions_size_;
   const int reloc_info_size_;
   const int source_positions_size_;
   const int inlining_positions_size_;
+  const int deopt_data_size_;
   const int protected_instructions_size_;
-  const int index_;
+  const int index_;  // The wasm function-index within the module.
   const int constant_pool_offset_;
   const int stack_slots_;
   // Number and position of tagged parameters passed to this function via the
@@ -492,6 +501,8 @@ class WasmCodeAllocator {
 
 class V8_EXPORT_PRIVATE NativeModule final {
  public:
+  static constexpr ExternalPointerTag kManagedTag = kWasmNativeModuleTag;
+
 #if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_S390X || V8_TARGET_ARCH_ARM64 || \
     V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_RISCV64
   static constexpr bool kNeedsFarJumpsBetweenCodeSpaces = true;
@@ -510,7 +521,9 @@ class V8_EXPORT_PRIVATE NativeModule final {
       int index, const CodeDesc& desc, int stack_slots,
       uint32_t tagged_parameter_slots,
       base::Vector<const uint8_t> protected_instructions,
-      base::Vector<const uint8_t> source_position_table, WasmCode::Kind kind,
+      base::Vector<const uint8_t> source_position_table,
+      base::Vector<const uint8_t> inlining_positions,
+      base::Vector<const uint8_t> deopt_data, WasmCode::Kind kind,
       ExecutionTier tier, ForDebugging for_debugging);
 
   // {PublishCode} makes the code available to the system by entering it into
@@ -547,7 +560,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
       base::Vector<const uint8_t> protected_instructions_data,
       base::Vector<const uint8_t> reloc_info,
       base::Vector<const uint8_t> source_position_table,
-      base::Vector<const uint8_t> inlining_positions, WasmCode::Kind kind,
+      base::Vector<const uint8_t> inlining_positions,
+      base::Vector<const uint8_t> deopt_data, WasmCode::Kind kind,
       ExecutionTier tier);
 
   // Adds anonymous code for testing purposes.
@@ -779,11 +793,13 @@ class V8_EXPORT_PRIVATE NativeModule final {
     return fast_api_targets_.get();
   }
 
-  void set_fast_api_sig(int index, const CFunctionInfo* sig) {
-    fast_api_sigs_[index] = sig;
+  void set_fast_api_return_is_bool(int index, bool return_is_bool) {
+    fast_api_return_is_bool_[index] = return_is_bool;
   }
 
-  const CFunctionInfo** fast_api_sigs() const { return fast_api_sigs_.get(); }
+  std::atomic<bool>* fast_api_return_is_bool() const {
+    return fast_api_return_is_bool_.get();
+  }
 
  private:
   friend class WasmCode;
@@ -810,7 +826,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
       uint32_t tagged_parameter_slots,
       base::Vector<const uint8_t> protected_instructions_data,
       base::Vector<const uint8_t> source_position_table,
-      base::Vector<const uint8_t> inlining_positions, WasmCode::Kind kind,
+      base::Vector<const uint8_t> inlining_positions,
+      base::Vector<const uint8_t> deopt_data, WasmCode::Kind kind,
       ExecutionTier tier, ForDebugging for_debugging,
       bool frame_has_feedback_slot, base::Vector<uint8_t> code_space,
       const JumpTablesRef& jump_tables_ref);
@@ -977,7 +994,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   std::atomic<bool> log_code_{false};
 
   std::unique_ptr<std::atomic<Address>[]> fast_api_targets_;
-  std::unique_ptr<const v8::CFunctionInfo*[]> fast_api_sigs_;
+  std::unique_ptr<std::atomic<bool>[]> fast_api_return_is_bool_;
 };
 
 class V8_EXPORT_PRIVATE WasmCodeManager final {
@@ -1048,8 +1065,7 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
       CompileTimeImports compile_imports, size_t code_size_estimate,
       std::shared_ptr<const WasmModule> module);
 
-  V8_WARN_UNUSED_RESULT VirtualMemory TryAllocate(size_t size,
-                                                  void* hint = nullptr);
+  V8_WARN_UNUSED_RESULT VirtualMemory TryAllocate(size_t size);
   void Commit(base::AddressRegion);
   void Decommit(base::AddressRegion);
 
@@ -1078,6 +1094,14 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
 
   // End of fields protected by {native_modules_mutex_}.
   //////////////////////////////////////////////////////////////////////////////
+
+  // We remember the end address of the last allocated code space and use that
+  // as a hint for the next code space. As the WasmCodeManager is shared by the
+  // whole process this ensures that Wasm code spaces are allocated next to each
+  // other with a high likelyhood. This improves the performance of cross-module
+  // calls as the branch predictor can only predict indirect call targets within
+  // a certain range around the call instruction.
+  std::atomic<Address> next_code_space_hint_;
 };
 
 // {WasmCodeRefScope}s form a perfect stack. New {WasmCode} pointers generated

@@ -406,6 +406,13 @@ class JSDataViewData : public JSObjectData {
       : JSObjectData(broker, storage, object, kind) {}
 };
 
+class JSPrimitiveWrapperData : public JSObjectData {
+ public:
+  JSPrimitiveWrapperData(JSHeapBroker* broker, ObjectData** storage,
+                         Handle<JSPrimitiveWrapper> object, ObjectDataKind kind)
+      : JSObjectData(broker, storage, object, kind) {}
+};
+
 class JSBoundFunctionData : public JSObjectData {
  public:
   JSBoundFunctionData(JSHeapBroker* broker, ObjectData** storage,
@@ -1597,11 +1604,16 @@ StringRef RegExpBoilerplateDescriptionRef::source(JSHeapBroker* broker) const {
 
 int RegExpBoilerplateDescriptionRef::flags() const { return object()->flags(); }
 
-OptionalCallHandlerInfoRef FunctionTemplateInfoRef::call_code(
+Address FunctionTemplateInfoRef::callback(JSHeapBroker* broker) const {
+  return object()->callback(broker->isolate());
+}
+
+OptionalObjectRef FunctionTemplateInfoRef::callback_data(
     JSHeapBroker* broker) const {
-  Tagged<HeapObject> call_code = object()->call_code(kAcquireLoad);
-  if (i::IsUndefined(call_code)) return base::nullopt;
-  return TryMakeRef(broker, CallHandlerInfo::cast(call_code));
+  ObjectRef data =
+      MakeRefAssumeMemoryFence(broker, object()->callback_data(kAcquireLoad));
+  if (data.IsTheHole()) return {};
+  return data;
 }
 
 bool FunctionTemplateInfoRef::is_signature_undefined(
@@ -1645,10 +1657,6 @@ HolderLookupResult FunctionTemplateInfoRef::LookupHolderOfExpectedType(
   }
   return HolderLookupResult(CallOptimization::kHolderFound,
                             prototype.AsJSObject());
-}
-
-ObjectRef CallHandlerInfoRef::data(JSHeapBroker* broker) const {
-  return MakeRefAssumeMemoryFence(broker, object()->data());
 }
 
 HEAP_ACCESSOR_C(ScopeInfo, int, ContextLength)
@@ -1764,6 +1772,12 @@ void* JSTypedArrayRef::data_ptr() const {
   return object()->DataPtr();
 }
 
+bool JSPrimitiveWrapperRef::IsStringWrapper(JSHeapBroker* broker) const {
+  auto elements_kind = map(broker).elements_kind();
+  return elements_kind == FAST_STRING_WRAPPER_ELEMENTS ||
+         elements_kind == SLOW_STRING_WRAPPER_ELEMENTS;
+}
+
 bool MapRef::IsInobjectSlackTrackingInProgress() const {
   return construction_counter() != Map::kNoSlackTracking;
 }
@@ -1792,10 +1806,6 @@ int MapRef::GetInObjectProperties() const {
 
 bool StringRef::IsExternalString() const {
   return i::IsExternalString(*object());
-}
-
-Address CallHandlerInfoRef::callback(JSHeapBroker* broker) const {
-  return object()->callback(broker->isolate());
 }
 
 ZoneVector<Address> FunctionTemplateInfoRef::c_functions(
@@ -2152,13 +2162,14 @@ HeapObjectType HeapObjectRef::GetHeapObjectType(JSHeapBroker* broker) const {
     HeapObjectType::Flags flags(0);
     if (map->is_undetectable()) flags |= HeapObjectType::kUndetectable;
     if (map->is_callable()) flags |= HeapObjectType::kCallable;
-    return HeapObjectType(map->instance_type(), flags,
+    return HeapObjectType(map->instance_type(), map->elements_kind(), flags,
                           GetOddballType(broker->isolate(), map), HoleType());
   }
   HeapObjectType::Flags flags(0);
   if (map(broker).is_undetectable()) flags |= HeapObjectType::kUndetectable;
   if (map(broker).is_callable()) flags |= HeapObjectType::kCallable;
-  return HeapObjectType(map(broker).instance_type(), flags,
+  return HeapObjectType(map(broker).instance_type(),
+                        map(broker).elements_kind(), flags,
                         map(broker).oddball_type(broker), HoleType());
 }
 

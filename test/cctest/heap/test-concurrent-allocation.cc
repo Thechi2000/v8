@@ -397,8 +397,8 @@ UNINITIALIZED_TEST(ConcurrentBlackAllocation) {
     CHECK(thread->Start());
 
     sema_white.Wait();
-    heap->TryStartIncrementalMarking(i::GCFlag::kNoFlags,
-                                     i::GarbageCollectionReason::kTesting);
+    heap->StartIncrementalMarking(i::GCFlag::kNoFlags,
+                                  i::GarbageCollectionReason::kTesting);
     sema_marking_started.Signal();
 
     thread->Join();
@@ -465,8 +465,8 @@ UNINITIALIZED_TEST(ConcurrentWriteBarrier) {
       fixed_array = *fixed_array_handle;
       value = *value_handle;
     }
-    heap->TryStartIncrementalMarking(i::GCFlag::kNoFlags,
-                                     i::GarbageCollectionReason::kTesting);
+    heap->StartIncrementalMarking(i::GCFlag::kNoFlags,
+                                  i::GarbageCollectionReason::kTesting);
     CHECK(heap->marking_state()->IsUnmarked(value));
 
     // Mark host |fixed_array| to trigger the barrier.
@@ -557,12 +557,13 @@ UNINITIALIZED_TEST(ConcurrentRecordRelocSlot) {
       heap::AbandonCurrentlyFreeMemory(heap->old_space());
       Handle<HeapNumber> value_handle(
           i_isolate->factory()->NewHeapNumber<AllocationType::kOld>(1.1));
-      heap::ForceEvacuationCandidate(Page::FromHeapObject(*value_handle));
+      heap::ForceEvacuationCandidate(
+          PageMetadata::FromHeapObject(*value_handle));
       code = *code_handle;
       value = *value_handle;
     }
-    heap->TryStartIncrementalMarking(i::GCFlag::kNoFlags,
-                                     i::GarbageCollectionReason::kTesting);
+    heap->StartIncrementalMarking(i::GCFlag::kNoFlags,
+                                  i::GarbageCollectionReason::kTesting);
     CHECK(heap->marking_state()->IsUnmarked(value));
 
     // Advance marking to make sure |code| is marked.
