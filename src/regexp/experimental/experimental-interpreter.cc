@@ -21,7 +21,10 @@ namespace internal {
 namespace {
 
 constexpr int kUndefinedRegisterValue = -1;
-constexpr size_t maxMemoryUsage = 2 << 30;  // 1GiB
+
+// Maximum memory that the intepreter is allowed to use. It is an approximative
+// mesure (see NfaInterpreter::AppromativeTotalMemoryUsage).
+constexpr size_t maxMemoryUsage = 1 << 30;  // 1GiB
 
 template <class Character>
 bool SatisfiesAssertion(RegExpAssertion::Type type,
@@ -799,6 +802,8 @@ class NfaInterpreter {
            MemoryUsagePerThread();
   }
 
+  // Checks that the approximative memory usage does not goes past a fixed
+  // threshold. Returns the appropriate error code.
   int CheckMemoryConsumption() {
     return (AppromativeTotalMemoryUsage() < maxMemoryUsage)
                ? RegExp::kInternalRegExpSuccess
