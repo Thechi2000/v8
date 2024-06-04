@@ -1134,6 +1134,27 @@ ArchOpcode GetSeqCstStoreOpcode(StoreRepresentation store_rep) {
   }
 }
 
+// Used for pmin/pmax and relaxed min/max.
+template <typename Adapter, VectorLength vec_len>
+void VisitMinOrMax(InstructionSelectorT<Adapter>* selector,
+                   typename Adapter::node_t node, ArchOpcode opcode,
+                   bool flip_inputs) {
+  X64OperandGeneratorT<Adapter> g(selector);
+  DCHECK_EQ(selector->value_input_count(node), 2);
+  InstructionOperand dst = selector->IsSupported(AVX)
+                               ? g.DefineAsRegister(node)
+                               : g.DefineSameAsFirst(node);
+  InstructionCode instr_code = opcode | VectorLengthField::encode(vec_len);
+  if (flip_inputs) {
+    // Due to the way minps/minpd work, we want the dst to be same as the second
+    // input: b = pmin(a, b) directly maps to minps b a.
+    selector->Emit(instr_code, dst, g.UseRegister(selector->input_at(node, 1)),
+                   g.UseRegister(selector->input_at(node, 0)));
+  } else {
+    selector->Emit(instr_code, dst, g.UseRegister(selector->input_at(node, 0)),
+                   g.UseRegister(selector->input_at(node, 1)));
+  }
+}
 }  // namespace
 
 template <typename Adapter>
@@ -1488,6 +1509,50 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitSimd256LoadTransform(
   VisitLoad(node, node, code);
 }
 
+template <>
+void InstructionSelectorT<TurbofanAdapter>::VisitF32x8RelaxedMin(Node* node) {
+  UNREACHABLE();
+}
+
+template <>
+void InstructionSelectorT<TurbofanAdapter>::VisitF32x8RelaxedMax(Node* node) {
+  UNREACHABLE();
+}
+
+template <>
+void InstructionSelectorT<TurbofanAdapter>::VisitF64x4RelaxedMin(Node* node) {
+  UNREACHABLE();
+}
+
+template <>
+void InstructionSelectorT<TurbofanAdapter>::VisitF64x4RelaxedMax(Node* node) {
+  UNREACHABLE();
+}
+
+template <>
+void InstructionSelectorT<TurboshaftAdapter>::VisitF32x8RelaxedMin(
+    node_t node) {
+  VisitMinOrMax<TurboshaftAdapter, kV256>(this, node, kX64Minps, false);
+}
+
+template <>
+void InstructionSelectorT<TurboshaftAdapter>::VisitF32x8RelaxedMax(
+    node_t node) {
+  VisitMinOrMax<TurboshaftAdapter, kV256>(this, node, kX64Maxps, false);
+}
+
+template <>
+void InstructionSelectorT<TurboshaftAdapter>::VisitF64x4RelaxedMin(
+    node_t node) {
+  VisitMinOrMax<TurboshaftAdapter, kV256>(this, node, kX64Minpd, false);
+}
+
+template <>
+void InstructionSelectorT<TurboshaftAdapter>::VisitF64x4RelaxedMax(
+    node_t node) {
+  VisitMinOrMax<TurboshaftAdapter, kV256>(this, node, kX64Maxpd, false);
+}
+
 #ifdef V8_TARGET_ARCH_X64
 template <>
 void InstructionSelectorT<TurbofanAdapter>::VisitSimd256Shufd(Node* node) {
@@ -1499,6 +1564,10 @@ void InstructionSelectorT<TurbofanAdapter>::VisitSimd256Shufps(Node* node) {
 }
 template <>
 void InstructionSelectorT<TurbofanAdapter>::VisitSimd256Unpack(Node* node) {
+  UNIMPLEMENTED();
+}
+template <>
+void InstructionSelectorT<TurbofanAdapter>::VisitSimdPack128To256(Node* node) {
   UNIMPLEMENTED();
 }
 
@@ -1550,6 +1619,27 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitSimd256Unpack(node_t node) {
   Emit(code, 1, &dst, 2, inputs);
 }
 
+template <>
+void InstructionSelectorT<TurboshaftAdapter>::VisitSimdPack128To256(
+    node_t node) {
+  X64OperandGeneratorT<TurboshaftAdapter> g(this);
+
+  const turboshaft::SimdPack128To256Op& op =
+      Get(node).Cast<turboshaft::SimdPack128To256Op>();
+
+  turboshaft::OpIndex input0 = op.input(0);
+  turboshaft::OpIndex input1 = op.input(1);
+  constexpr int kHighLaneIndex = 1;
+
+  InstructionOperand dst = g.DefineAsRegister(node);
+  InstructionOperand src0 = g.UseUniqueRegister(input0);
+  InstructionOperand src1 = g.UseUniqueRegister(input1);
+  InstructionOperand imm = g.UseImmediate(kHighLaneIndex);
+
+  InstructionOperand inputs[] = {src0, src1, imm};
+
+  Emit(kX64InsertI128, 1, &dst, 3, inputs);
+}
 #endif  // V8_TARGET_ARCH_X64
 
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
@@ -6418,8 +6508,12 @@ template <>
 void InstructionSelectorT<TurbofanAdapter>::VisitExtractF128(node_t node) {
   X64OperandGeneratorT<TurbofanAdapter> g(this);
   int32_t lane = OpParameter<int32_t>(node->op());
-  Emit(kX64ExtractF128, g.DefineAsRegister(node),
-       g.UseRegister(node->InputAt(0)), g.UseImmediate(lane));
+  if (lane == 0) {
+    EmitIdentity(node);
+  } else {
+    Emit(kX64ExtractF128, g.DefineAsRegister(node),
+         g.UseRegister(node->InputAt(0)), g.UseImmediate(lane));
+  }
 }
 
 #if V8_ENABLE_WASM_SIMD256_REVEC
@@ -6428,8 +6522,12 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitExtractF128(node_t node) {
   X64OperandGeneratorT<TurboshaftAdapter> g(this);
   const turboshaft::Simd256Extract128LaneOp& op =
       this->Get(node).template Cast<turboshaft::Simd256Extract128LaneOp>();
-  Emit(kX64ExtractF128, g.DefineAsRegister(node), g.UseRegister(op.input()),
-       g.UseImmediate(op.lane));
+  if (op.lane == 0) {
+    EmitIdentity(node);
+  } else {
+    Emit(kX64ExtractF128, g.DefineAsRegister(node), g.UseRegister(op.input()),
+         g.UseImmediate(op.lane));
+  }
 }
 
 template <>
@@ -6829,87 +6927,64 @@ void InstructionSelectorT<Adapter>::VisitI64x4RelaxedLaneSelect(node_t node) {
 }
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
-namespace {
-// Used for pmin/pmax and relaxed min/max.
-template <typename Adapter>
-void VisitMinOrMax(InstructionSelectorT<Adapter>* selector,
-                   typename Adapter::node_t node, ArchOpcode opcode,
-                   bool flip_inputs) {
-  X64OperandGeneratorT<Adapter> g(selector);
-  DCHECK_EQ(selector->value_input_count(node), 2);
-  InstructionOperand dst = selector->IsSupported(AVX)
-                               ? g.DefineAsRegister(node)
-                               : g.DefineSameAsFirst(node);
-  if (flip_inputs) {
-    // Due to the way minps/minpd work, we want the dst to be same as the second
-    // input: b = pmin(a, b) directly maps to minps b a.
-    selector->Emit(opcode, dst, g.UseRegister(selector->input_at(node, 1)),
-                   g.UseRegister(selector->input_at(node, 0)));
-  } else {
-    selector->Emit(opcode, dst, g.UseRegister(selector->input_at(node, 0)),
-                   g.UseRegister(selector->input_at(node, 1)));
-  }
-}
-}  // namespace
-
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF32x4Pmin(node_t node) {
-  VisitMinOrMax(this, node, kX64Minps, true);
+  VisitMinOrMax<Adapter, kV128>(this, node, kX64Minps, true);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF32x4Pmax(node_t node) {
-  VisitMinOrMax(this, node, kX64Maxps, true);
+  VisitMinOrMax<Adapter, kV128>(this, node, kX64Maxps, true);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF64x2Pmin(node_t node) {
-  VisitMinOrMax(this, node, kX64Minpd, true);
+  VisitMinOrMax<Adapter, kV128>(this, node, kX64Minpd, true);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF64x2Pmax(node_t node) {
-  VisitMinOrMax(this, node, kX64Maxpd, true);
+  VisitMinOrMax<Adapter, kV128>(this, node, kX64Maxpd, true);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF32x8Pmin(node_t node) {
-  VisitMinOrMax(this, node, kX64F32x8Pmin, true);
+  VisitMinOrMax<Adapter, kV256>(this, node, kX64F32x8Pmin, true);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF32x8Pmax(node_t node) {
-  VisitMinOrMax(this, node, kX64F32x8Pmax, true);
+  VisitMinOrMax<Adapter, kV256>(this, node, kX64F32x8Pmax, true);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF64x4Pmin(node_t node) {
-  VisitMinOrMax(this, node, kX64F64x4Pmin, true);
+  VisitMinOrMax<Adapter, kV256>(this, node, kX64F64x4Pmin, true);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF64x4Pmax(node_t node) {
-  VisitMinOrMax(this, node, kX64F64x4Pmax, true);
+  VisitMinOrMax<Adapter, kV256>(this, node, kX64F64x4Pmax, true);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF32x4RelaxedMin(node_t node) {
-  VisitMinOrMax(this, node, kX64Minps, false);
+  VisitMinOrMax<Adapter, kV128>(this, node, kX64Minps, false);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF32x4RelaxedMax(node_t node) {
-  VisitMinOrMax(this, node, kX64Maxps, false);
+  VisitMinOrMax<Adapter, kV128>(this, node, kX64Maxps, false);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF64x2RelaxedMin(node_t node) {
-  VisitMinOrMax(this, node, kX64Minpd, false);
+  VisitMinOrMax<Adapter, kV128>(this, node, kX64Minpd, false);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitF64x2RelaxedMax(node_t node) {
-  VisitMinOrMax(this, node, kX64Maxpd, false);
+  VisitMinOrMax<Adapter, kV128>(this, node, kX64Maxpd, false);
 }
 
 template <typename Adapter>
@@ -7184,12 +7259,48 @@ template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitI32x4DotI8x16I7x16AddS(node_t node) {
   X64OperandGeneratorT<Adapter> g(this);
   DCHECK_EQ(this->value_input_count(node), 3);
-  InstructionOperand temps[] = {g.TempSimd128Register()};
-  Emit(kX64I32x4DotI8x16I7x16AddS, g.DefineSameAsInput(node, 2),
-       g.UseUniqueRegister(this->input_at(node, 0)),
-       g.UseUniqueRegister(this->input_at(node, 1)),
-       g.UseUniqueRegister(this->input_at(node, 2)), arraysize(temps), temps);
+  if (CpuFeatures::IsSupported(AVX_VNNI)) {
+    Emit(kX64I32x4DotI8x16I7x16AddS, g.DefineSameAsInput(node, 2),
+         g.UseRegister(this->input_at(node, 0)),
+         g.UseRegister(this->input_at(node, 1)),
+         g.UseRegister(this->input_at(node, 2)));
+  } else {
+    InstructionOperand temps[] = {g.TempSimd128Register()};
+    Emit(kX64I32x4DotI8x16I7x16AddS, g.DefineSameAsInput(node, 2),
+         g.UseUniqueRegister(this->input_at(node, 0)),
+         g.UseUniqueRegister(this->input_at(node, 1)),
+         g.UseUniqueRegister(this->input_at(node, 2)), arraysize(temps), temps);
+  }
 }
+
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitI16x16DotI8x32I7x32S(node_t node) {
+  X64OperandGeneratorT<Adapter> g(this);
+  DCHECK_EQ(this->value_input_count(node), 2);
+  Emit(kX64I16x16DotI8x32I7x32S, g.DefineAsRegister(node),
+       g.UseUniqueRegister(this->input_at(node, 0)),
+       g.UseRegister(this->input_at(node, 1)));
+}
+
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitI32x8DotI8x32I7x32AddS(node_t node) {
+  X64OperandGeneratorT<Adapter> g(this);
+  DCHECK_EQ(this->value_input_count(node), 3);
+  if (CpuFeatures::IsSupported(AVX_VNNI)) {
+    Emit(kX64I32x8DotI8x32I7x32AddS, g.DefineSameAsInput(node, 2),
+         g.UseRegister(this->input_at(node, 0)),
+         g.UseRegister(this->input_at(node, 1)),
+         g.UseRegister(this->input_at(node, 2)));
+  } else {
+    InstructionOperand temps[] = {g.TempSimd256Register()};
+    Emit(kX64I32x8DotI8x32I7x32AddS, g.DefineSameAsInput(node, 2),
+         g.UseUniqueRegister(this->input_at(node, 0)),
+         g.UseUniqueRegister(this->input_at(node, 1)),
+         g.UseUniqueRegister(this->input_at(node, 2)), arraysize(temps), temps);
+  }
+}
+#endif
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitSetStackPointer(node_t node) {

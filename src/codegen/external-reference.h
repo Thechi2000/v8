@@ -111,6 +111,8 @@ class StatsCounter;
   V(address_of_double_neg_constant, "double_negate_constant")                  \
   V(address_of_enable_experimental_regexp_engine,                              \
     "address_of_enable_experimental_regexp_engine")                            \
+  V(address_of_fp16_abs_constant, "fp16_absolute_constant")                    \
+  V(address_of_fp16_neg_constant, "fp16_negate_constant")                      \
   V(address_of_float_abs_constant, "float_absolute_constant")                  \
   V(address_of_float_neg_constant, "float_negate_constant")                    \
   V(address_of_log10_offset_table, "log10_offset_table")                       \
@@ -122,8 +124,8 @@ class StatsCounter;
   V(address_of_shared_string_table_flag, "v8_flags.shared_string_table")       \
   V(address_of_the_hole_nan, "the_hole_nan")                                   \
   V(address_of_uint32_bias, "uint32_bias")                                     \
-  V(allocate_and_initialize_external_pointer_table_entry,                      \
-    "AllocateAndInitializeExternalPointerTableEntry")                          \
+  V(allocate_and_initialize_young_external_pointer_table_entry,                \
+    "AllocateAndInitializeYoungExternalPointerTableEntry")                     \
   V(baseline_pc_for_bytecode_offset, "BaselinePCForBytecodeOffset")            \
   V(baseline_pc_for_next_executed_bytecode,                                    \
     "BaselinePCForNextExecutedBytecode")                                       \
@@ -255,6 +257,7 @@ class StatsCounter;
     "name_to_index_hashtable_lookup_forwarded_string")                         \
   V(name_to_index_hashtable_find_insertion_entry_forwarded_string,             \
     "name_to_index_hashtable_find_insertion_entry_forwarded_string")           \
+  IF_WASM(V, wasm_delete_deoptimizer, "Deoptimizer::DeleteForWasm()")          \
   IF_WASM(V, wasm_sync_stack_limit, "wasm_sync_stack_limit")                   \
   IF_WASM(V, wasm_switch_to_the_central_stack,                                 \
           "wasm::switch_to_the_central_stack")                                 \

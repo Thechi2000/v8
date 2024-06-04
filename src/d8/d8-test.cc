@@ -63,7 +63,7 @@ class FastCApiObject {
     self->fast_call_count_++;
     v8::Isolate* isolate = receiver->GetIsolate();
     v8::HandleScope scope(isolate);
-    v8::Local<v8::Context> context = LoadContextFromFastCApiObject(receiver);
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
     v8::Context::Scope context_scope(context);
     isolate->ThrowError("Exception from fast callback");
     return 0;
@@ -957,17 +957,10 @@ class FastCApiObject {
   }
 
   static bool IsFastCApiObjectFastCallback(v8::Local<v8::Object> receiver,
-                                           bool should_fallback,
-                                           v8::Local<v8::Value> arg,
-                                           FastApiCallbackOptions& options) {
+                                           v8::Local<v8::Value> arg) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_FALLBACK(false);
-    self->fast_call_count_++;
 
-    if (should_fallback) {
-      options.fallback = true;
-      return false;
-    }
+    self->fast_call_count_++;
 
     if (!arg->IsObject()) {
       return false;
@@ -998,13 +991,13 @@ class FastCApiObject {
     HandleScope handle_scope(isolate);
 
     bool result = false;
-    if (info.Length() < 2) {
+    if (info.Length() < 1) {
       info.GetIsolate()->ThrowError(
-          "is_valid_api_object should be called with 2 arguments");
+          "is_valid_api_object should be called with an argument");
       return;
     }
-    if (info[1]->IsObject()) {
-      Local<Object> object = info[1].As<Object>();
+    if (info[0]->IsObject()) {
+      Local<Object> object = info[0].As<Object>();
       if (!IsValidApiObject(object)) {
         result = false;
       } else {
@@ -1399,7 +1392,6 @@ class FastCApiObject {
   }
 
   static const int kV8WrapperObjectIndex = 1;
-  static const int kV8WrapperContextIndex = 2;
 
  private:
   static bool IsValidApiObject(Local<Object> object) {
@@ -1417,13 +1409,6 @@ class FastCApiObject {
         object->GetAlignedPointerFromInternalField(kV8WrapperObjectIndex));
     CHECK_NOT_NULL(wrapped);
     return wrapped;
-  }
-
-  static Local<Context> LoadContextFromFastCApiObject(Local<Object> object) {
-    if (!IsValidApiObject(object)) {
-      return {};
-    }
-    return object->GetInternalField(kV8WrapperContextIndex).As<v8::Context>();
   }
 
   int fast_call_count_ = 0, slow_call_count_ = 0;
@@ -1456,8 +1441,6 @@ void CreateFastCAPIObject(const FunctionCallbackInfo<Value>& info) {
   api_object->SetAlignedPointerInInternalField(
       FastCApiObject::kV8WrapperObjectIndex,
       reinterpret_cast<void*>(&kFastCApiObject));
-  api_object->SetInternalField(FastCApiObject::kV8WrapperContextIndex,
-                               info.GetIsolate()->GetCurrentContext());
   api_object->SetAccessorProperty(
       String::NewFromUtf8Literal(info.GetIsolate(), "supports_fp_params"),
       FunctionTemplate::New(info.GetIsolate(), FastCApiObject::SupportsFPParams)
@@ -1944,7 +1927,7 @@ Local<FunctionTemplate> Shell::CreateTestFastCApiTemplate(Isolate* isolate) {
             &add_all_32bit_int_5args_enforce_range_c_func));
   }
   api_obj_ctor->InstanceTemplate()->SetInternalFieldCount(
-      FastCApiObject::kV8WrapperContextIndex + 1);
+      FastCApiObject::kV8WrapperObjectIndex + 1);
 
   return api_obj_ctor;
 }

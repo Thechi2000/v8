@@ -18,7 +18,7 @@
 #include "src/handles/maybe-handles.h"
 #include "src/heap/factory-inl.h"
 #include "src/heap/heap-inl.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
@@ -434,9 +434,7 @@ Maybe<bool> JSReceiver::SetOrCopyDataProperties(
       Nothing<bool>());
 
   if (!from->HasFastProperties() && target->HasFastProperties() &&
-      !IsJSGlobalProxy(*target)) {
-    // JSProxy is always in slow-mode.
-    DCHECK(!IsJSProxy(*target));
+      IsJSObject(*target) && !IsJSGlobalProxy(*target)) {
     // Convert to slow properties if we're guaranteed to overflow the number of
     // descriptors.
     int source_length;
@@ -659,8 +657,7 @@ MaybeHandle<NativeContext> JSReceiver::GetFunctionRealm(
       Tagged<JSProxy> proxy = JSProxy::cast(current);
       if (proxy->IsRevoked()) {
         AllowGarbageCollection allow_allocating_errors;
-        THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kProxyRevoked),
-                        NativeContext);
+        THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kProxyRevoked));
       }
       current = JSReceiver::cast(proxy->target());
       continue;
@@ -1053,15 +1050,14 @@ MaybeHandle<Object> JSReceiver::DefineProperties(Isolate* isolate,
   if (!IsJSReceiver(*object)) {
     Handle<String> fun_name =
         isolate->factory()->InternalizeUtf8String("Object.defineProperties");
-    THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kCalledOnNonObject, fun_name),
-                    Object);
+    THROW_NEW_ERROR(
+        isolate, NewTypeError(MessageTemplate::kCalledOnNonObject, fun_name));
   }
   // 2. Let props be ToObject(Properties).
   // 3. ReturnIfAbrupt(props).
   Handle<JSReceiver> props;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, props,
-                             Object::ToObject(isolate, properties), Object);
+                             Object::ToObject(isolate, properties));
 
   // 4. Let keys be props.[[OwnPropertyKeys]]().
   // 5. ReturnIfAbrupt(keys).
@@ -1069,8 +1065,7 @@ MaybeHandle<Object> JSReceiver::DefineProperties(Isolate* isolate,
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, keys,
       KeyAccumulator::GetKeys(isolate, props, KeyCollectionMode::kOwnOnly,
-                              ALL_PROPERTIES),
-      Object);
+                              ALL_PROPERTIES));
   // 6. Let descriptors be an empty List.
   int capacity = keys->length();
   std::vector<PropertyDescriptor> descriptors(capacity);
@@ -1091,8 +1086,7 @@ MaybeHandle<Object> JSReceiver::DefineProperties(Isolate* isolate,
     // 7c i. Let descObj be Get(props, nextKey).
     // 7c ii. ReturnIfAbrupt(descObj).
     Handle<Object> desc_obj;
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, desc_obj, Object::GetProperty(&it),
-                               Object);
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, desc_obj, Object::GetProperty(&it));
     // 7c iii. Let desc be ToPropertyDescriptor(descObj).
     bool success = PropertyDescriptor::ToPropertyDescriptor(
         isolate, desc_obj, &descriptors[descriptors_index]);
@@ -1188,8 +1182,8 @@ MaybeHandle<Object> GetPropertyWithInterceptorInternal(
   Handle<Object> result;
   Handle<Object> receiver = it->GetReceiver();
   if (!IsJSReceiver(*receiver)) {
-    ASSIGN_RETURN_ON_EXCEPTION(
-        isolate, receiver, Object::ConvertReceiver(isolate, receiver), Object);
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
+                               Object::ConvertReceiver(isolate, receiver));
   }
   PropertyCallbackArguments args(isolate, interceptor->data(), *receiver,
                                  *holder, Just(kDontThrow));
@@ -1454,8 +1448,6 @@ Maybe<bool> JSReceiver::ValidateAndApplyPropertyDescriptor(
     Maybe<ShouldThrow> should_throw, Handle<Name> property_name) {
   // We either need a LookupIterator, or a property name.
   DCHECK((it == nullptr) != property_name.is_null());
-  Handle<JSObject> object;
-  if (it != nullptr) object = Handle<JSObject>::cast(it->GetReceiver());
   bool desc_is_data_descriptor = PropertyDescriptor::IsDataDescriptor(desc);
   bool desc_is_accessor_descriptor =
       PropertyDescriptor::IsAccessorDescriptor(desc);
@@ -2095,20 +2087,17 @@ MaybeHandle<Object> JSReceiver::ToPrimitive(Isolate* isolate,
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, exotic_to_prim,
       Object::GetMethod(isolate, receiver,
-                        isolate->factory()->to_primitive_symbol()),
-      Object);
+                        isolate->factory()->to_primitive_symbol()));
   if (!IsUndefined(*exotic_to_prim, isolate)) {
     Handle<Object> hint_string =
         isolate->factory()->ToPrimitiveHintString(hint);
     Handle<Object> result;
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, result,
-        Execution::Call(isolate, exotic_to_prim, receiver, 1, &hint_string),
-        Object);
+        Execution::Call(isolate, exotic_to_prim, receiver, 1, &hint_string));
     if (IsPrimitive(*result)) return result;
     THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kCannotConvertToPrimitive),
-                    Object);
+                    NewTypeError(MessageTemplate::kCannotConvertToPrimitive));
   }
   return OrdinaryToPrimitive(isolate, receiver,
                              (hint == ToPrimitiveHint::kString)
@@ -2133,20 +2122,18 @@ MaybeHandle<Object> JSReceiver::OrdinaryToPrimitive(
   }
   for (Handle<String> name : method_names) {
     Handle<Object> method;
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, method,
-                               JSReceiver::GetProperty(isolate, receiver, name),
-                               Object);
+    ASSIGN_RETURN_ON_EXCEPTION(
+        isolate, method, JSReceiver::GetProperty(isolate, receiver, name));
     if (IsCallable(*method)) {
       Handle<Object> result;
       ASSIGN_RETURN_ON_EXCEPTION(
           isolate, result,
-          Execution::Call(isolate, method, receiver, 0, nullptr), Object);
+          Execution::Call(isolate, method, receiver, 0, nullptr));
       if (IsPrimitive(*result)) return result;
     }
   }
   THROW_NEW_ERROR(isolate,
-                  NewTypeError(MessageTemplate::kCannotConvertToPrimitive),
-                  Object);
+                  NewTypeError(MessageTemplate::kCannotConvertToPrimitive));
 }
 
 V8_WARN_UNUSED_RESULT Maybe<bool> FastGetOwnValuesOrEntries(
@@ -2381,7 +2368,7 @@ MaybeHandle<JSObject> JSObject::New(Handle<JSFunction> constructor,
   Handle<Map> initial_map;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, initial_map,
-      JSFunction::GetDerivedMap(isolate, constructor, new_target), JSObject);
+      JSFunction::GetDerivedMap(isolate, constructor, new_target));
   constexpr int initial_capacity = PropertyDictionary::kInitialCapacity;
   Handle<JSObject> result = isolate->factory()->NewFastOrSlowJSObjectFromMap(
       initial_map, initial_capacity, AllocationType::kYoung, site,
@@ -2656,7 +2643,7 @@ MaybeHandle<Object> JSObject::GetPropertyWithFailedAccessCheck(
     bool done;
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, result,
-        GetPropertyWithInterceptorInternal(it, interceptor, &done), Object);
+        GetPropertyWithInterceptorInternal(it, interceptor, &done));
     if (done) return result;
   }
 
@@ -2667,8 +2654,7 @@ MaybeHandle<Object> JSObject::GetPropertyWithFailedAccessCheck(
     return it->factory()->undefined_value();
   }
 
-  RETURN_ON_EXCEPTION(isolate, isolate->ReportFailedAccessCheck(checked),
-                      Object);
+  RETURN_ON_EXCEPTION(isolate, isolate->ReportFailedAccessCheck(checked));
   UNREACHABLE();
 }
 
@@ -2795,7 +2781,7 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
     case JS_ARRAY_TYPE: {
       double length = IsUndefined(JSArray::cast(*this)->length())
                           ? 0
-                          : Object::Number(JSArray::cast(*this)->length());
+                          : Object::NumberValue(JSArray::cast(*this)->length());
       accumulator->Add("<JSArray[%u]>", static_cast<uint32_t>(length));
       break;
     }
@@ -3551,7 +3537,12 @@ bool TryFastAddDataProperty(Isolate* isolate, Handle<JSObject> object,
   DCHECK(!map->is_dictionary_map());
 
   Handle<Map> new_map = handle(map, isolate);
-  InternalIndex descriptor = map->LastAdded();
+  if (map->is_deprecated()) {
+    new_map = Map::Update(isolate, new_map);
+    if (new_map->is_dictionary_map()) return false;
+  }
+
+  InternalIndex descriptor = new_map->LastAdded();
   new_map = Map::PrepareForDataProperty(isolate, new_map, descriptor,
                                         PropertyConstness::kConst, value);
   JSObject::MigrateToMap(isolate, object, new_map);
@@ -3579,6 +3570,7 @@ void JSObject::AddProperty(Isolate* isolate, Handle<JSObject> object,
 #ifdef DEBUG
   uint32_t index;
   DCHECK(!IsJSProxy(*object));
+  DCHECK(!IsWasmObject(*object));
   DCHECK(!name->AsArrayIndex(&index));
   Maybe<PropertyAttributes> maybe = GetPropertyAttributes(&it);
   DCHECK(maybe.IsJust());
@@ -3773,8 +3765,9 @@ void JSObject::NormalizeProperties(Isolate* isolate, Handle<JSObject> object,
   if (!object->HasFastProperties()) return;
 
   Handle<Map> map(object->map(), isolate);
-  Handle<Map> new_map = Map::Normalize(isolate, map, map->elements_kind(), mode,
-                                       use_cache, reason);
+  Handle<Map> new_map =
+      Map::Normalize(isolate, map, map->elements_kind(), Handle<HeapObject>(),
+                     mode, use_cache, reason);
 
   JSObject::MigrateToMap(isolate, object, new_map,
                          expected_additional_properties);
@@ -4442,9 +4435,9 @@ Maybe<bool> JSObject::PreventExtensionsWithTransition(
   Handle<Map> old_map(object->map(), isolate);
   old_map = Map::Update(isolate, old_map);
   Handle<Map> transition_map;
-  MaybeHandle<Map> maybe_transition_map =
-      TransitionsAccessor::SearchSpecial(isolate, old_map, *transition_marker);
-  if (maybe_transition_map.ToHandle(&transition_map)) {
+  if (auto maybe_transition_map = TransitionsAccessor::SearchSpecial(
+          isolate, old_map, *transition_marker)) {
+    transition_map = *maybe_transition_map;
     DCHECK(transition_map->has_dictionary_elements() ||
            transition_map->has_typed_array_or_rab_gsab_typed_array_elements() ||
            transition_map->elements_kind() == SLOW_STRING_WRAPPER_ELEMENTS ||
@@ -4691,8 +4684,7 @@ MaybeHandle<Object> JSObject::DefineOwnAccessorIgnoreAttributes(
   if (it->state() == LookupIterator::ACCESS_CHECK) {
     if (!it->HasAccess()) {
       RETURN_ON_EXCEPTION(
-          isolate, isolate->ReportFailedAccessCheck(it->GetHolder<JSObject>()),
-          Object);
+          isolate, isolate->ReportFailedAccessCheck(it->GetHolder<JSObject>()));
       UNREACHABLE();
     }
     it->Next();
@@ -4726,8 +4718,7 @@ MaybeHandle<Object> JSObject::SetAccessor(Handle<JSObject> object,
   // the FailedAccessCheckCallbackFunction doesn't throw an exception.
   if (it.state() == LookupIterator::ACCESS_CHECK) {
     if (!it.HasAccess()) {
-      RETURN_ON_EXCEPTION(isolate, isolate->ReportFailedAccessCheck(object),
-                          Object);
+      RETURN_ON_EXCEPTION(isolate, isolate->ReportFailedAccessCheck(object));
       UNREACHABLE();
     }
     it.Next();
@@ -4788,7 +4779,7 @@ Tagged<Object> JSObject::SlowReverseLookup(Tagged<Object> value) {
         if (field_index.is_double()) {
           DCHECK(IsHeapNumber(property));
           if (value_is_number &&
-              Object::Number(property) == Object::Number(value)) {
+              Object::NumberValue(property) == Object::NumberValue(value)) {
             return descs->GetKey(i);
           }
         } else if (property == value) {
@@ -5177,7 +5168,7 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
     DCHECK(!IsAccessCheckNeeded(*object));
   }
 
-  // Silently ignore the change if value is not a JSObject or null.
+  // Silently ignore the change if value is not a JSReceiver or null.
   // SpiderMonkey behaves this way.
   if (!IsJSReceiver(*value) && !IsNull(*value, isolate)) return Just(true);
 
@@ -5244,12 +5235,21 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
 
   isolate->UpdateProtectorsOnSetPrototype(real_receiver, value);
 
+#ifdef V8_MOVE_PROTOYPE_TRANSITIONS_FIRST
+  Handle<Map> new_map =
+      MapUpdater(isolate, map)
+          .ApplyPrototypeTransition(Handle<HeapObject>::cast(value));
+#else
   Handle<Map> new_map = Map::TransitionToUpdatePrototype(
       isolate, map, Handle<HeapObject>::cast(value));
+#endif  // V8_MOVE_PROTOYPE_TRANSITIONS_FIRST
+
   DCHECK(new_map->prototype() == *value);
   JSObject::MigrateToMap(isolate, real_receiver, new_map);
 
-  DCHECK(size == object->Size());
+  DCHECK_IMPLIES(!new_map->is_dictionary_map() && !map->is_deprecated() &&
+                     !IsUndefined(new_map->GetBackPointer()),
+                 size == object->Size());
   return Just(true);
 }
 
@@ -5607,8 +5607,7 @@ MaybeHandle<JSDate> JSDate::New(Handle<JSFunction> constructor,
   Handle<JSObject> result;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, result,
-      JSObject::New(constructor, new_target, Handle<AllocationSite>::null()),
-      JSDate);
+      JSObject::New(constructor, new_target, Handle<AllocationSite>::null()));
   if (-DateCache::kMaxTimeInMs <= tv && tv <= DateCache::kMaxTimeInMs) {
     tv = DoubleToInteger(tv) + 0.0;
   } else {
@@ -5655,8 +5654,8 @@ Tagged<Object> JSDate::DoGetField(Isolate* isolate, FieldIndex index) {
     Tagged<Object> stamp = cache_stamp();
     if (stamp != date_cache->stamp() && IsSmi(stamp)) {
       // Since the stamp is not NaN, the value is also not NaN.
-      int64_t local_time_ms =
-          date_cache->ToLocal(static_cast<int64_t>(Object::Number(value())));
+      int64_t local_time_ms = date_cache->ToLocal(
+          static_cast<int64_t>(Object::NumberValue(value())));
       SetCachedFields(local_time_ms, date_cache);
     }
     switch (index) {
@@ -5680,10 +5679,10 @@ Tagged<Object> JSDate::DoGetField(Isolate* isolate, FieldIndex index) {
   }
 
   if (index >= kFirstUTCField) {
-    return GetUTCField(index, Object::Number(value()), date_cache);
+    return GetUTCField(index, Object::NumberValue(value()), date_cache);
   }
 
-  double time = Object::Number(value());
+  double time = Object::NumberValue(value());
   if (std::isnan(time)) return GetReadOnlyRoots().nan_value();
 
   int64_t local_time_ms = date_cache->ToLocal(static_cast<int64_t>(time));

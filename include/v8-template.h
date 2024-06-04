@@ -60,17 +60,13 @@ class V8_EXPORT Template : public Data {
   V8_INLINE void Set(Isolate* isolate, const char* name, Local<Data> value,
                      PropertyAttribute attributes = None);
 
-  void SetAccessorProperty(
-      Local<Name> name,
-      Local<FunctionTemplate> getter = Local<FunctionTemplate>(),
-      Local<FunctionTemplate> setter = Local<FunctionTemplate>(),
-      PropertyAttribute attribute = None);
-
   /**
+   * Sets an "accessor property" on the object template, see
+   * https://tc39.es/ecma262/#sec-object-type.
+   *
    * Whenever the property with the given name is accessed on objects
-   * created from this Template the getter and setter callbacks
-   * are called instead of getting and setting the property directly
-   * on the JavaScript object.
+   * created from this ObjectTemplate the getter and setter functions
+   * are called.
    *
    * \param name The name of the property for which an accessor is added.
    * \param getter The callback to invoke when getting the property.
@@ -80,27 +76,32 @@ class V8_EXPORT Template : public Data {
    * \param attribute The attributes of the property for which an accessor
    *   is added.
    */
-  V8_DEPRECATED("Use SetNativeDataProperty without AccessControl instead")
-  void SetNativeDataProperty(
-      Local<String> name, AccessorGetterCallback getter,
-      AccessorSetterCallback setter, Local<Value> data,
-      PropertyAttribute attribute, AccessControl settings,
-      SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
-      SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
-  V8_DEPRECATED("Use SetNativeDataProperty without AccessControl instead")
-  void SetNativeDataProperty(
-      Local<Name> name, AccessorNameGetterCallback getter,
-      AccessorNameSetterCallback setter, Local<Value> data,
-      PropertyAttribute attribute, AccessControl settings,
-      SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
-      SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
-  V8_DEPRECATED("Use SetNativeDataProperty with Local<Name> instead")
-  void SetNativeDataProperty(
-      Local<String> name, AccessorGetterCallback getter,
-      AccessorSetterCallback setter = nullptr,
-      Local<Value> data = Local<Value>(), PropertyAttribute attribute = None,
-      SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
-      SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
+  void SetAccessorProperty(
+      Local<Name> name,
+      Local<FunctionTemplate> getter = Local<FunctionTemplate>(),
+      Local<FunctionTemplate> setter = Local<FunctionTemplate>(),
+      PropertyAttribute attribute = None);
+
+  /**
+   * Sets a "data property" on the object template, see
+   * https://tc39.es/ecma262/#sec-object-type.
+   *
+   * Whenever the property with the given name is accessed on objects
+   * created from this Template the getter and setter callbacks
+   * are called instead of getting and setting the property directly
+   * on the JavaScript object.
+   * Note that in case a property is written via a "child" object, the setter
+   * will not be called according to the JavaScript specification. See
+   * https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots-set-p-v-receiver.
+   *
+   * \param name The name of the data property for which an accessor is added.
+   * \param getter The callback to invoke when getting the property.
+   * \param setter The callback to invoke when setting the property.
+   * \param data A piece of data that will be passed to the getter and setter
+   *   callbacks whenever they are invoked.
+   * \param attribute The attributes of the property for which an accessor
+   *   is added.
+   */
   void SetNativeDataProperty(
       Local<Name> name, AccessorNameGetterCallback getter,
       AccessorNameSetterCallback setter = nullptr,
@@ -495,8 +496,8 @@ enum class ConstructorBehavior { kThrow, kAllow };
  *    proto_t->Set(isolate, "proto_const", v8::Number::New(isolate, 2));
  *
  *    v8::Local<v8::ObjectTemplate> instance_t = t->InstanceTemplate();
- *    instance_t->SetAccessor(
-          String::NewFromUtf8Literal(isolate, "instance_accessor"),
+ *    instance_t->SetNativeDataProperty(
+ *        String::NewFromUtf8Literal(isolate, "instance_accessor"),
  *        InstanceAccessorCallback);
  *    instance_t->SetHandler(
  *        NamedPropertyHandlerConfiguration(PropertyHandlerCallback));
@@ -768,7 +769,7 @@ struct NamedPropertyHandlerConfiguration {
         data(data),
         flags(WithNewSignatureFlag(flags)) {}
 
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "Provide interceptor callbacks with new signatures instead "
       "(NamedPropertyXxxCallback)")
   NamedPropertyHandlerConfiguration(
@@ -809,7 +810,7 @@ struct NamedPropertyHandlerConfiguration {
         data(data),
         flags(WithNewSignatureFlag(flags)) {}
 
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "Provide interceptor callbacks with new signatures instead "
       "(NamedPropertyXxxCallback)")
   explicit NamedPropertyHandlerConfiguration(
@@ -849,7 +850,7 @@ struct NamedPropertyHandlerConfiguration {
         data(data),
         flags(WithNewSignatureFlag(flags)) {}
 
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "Provide interceptor callbacks with new signatures instead "
       "(NamedPropertyXxxCallback)")
   NamedPropertyHandlerConfiguration(
@@ -913,7 +914,7 @@ struct IndexedPropertyHandlerConfiguration {
         data(data),
         flags(WithNewSignatureFlag(flags)) {}
 
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "Provide interceptor callbacks with new signatures instead "
       "(IndexedPropertyXxxCallbackV2)")
   IndexedPropertyHandlerConfiguration(
@@ -954,7 +955,7 @@ struct IndexedPropertyHandlerConfiguration {
         data(data),
         flags(WithNewSignatureFlag(flags)) {}
 
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "Provide interceptor callbacks with new signatures instead "
       "(IndexedPropertyXxxCallbackV2)")
   explicit IndexedPropertyHandlerConfiguration(
@@ -994,7 +995,7 @@ struct IndexedPropertyHandlerConfiguration {
         data(data),
         flags(WithNewSignatureFlag(flags)) {}
 
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "Provide interceptor callbacks with new signatures instead "
       "(IndexedPropertyXxxCallbackV2)")
   IndexedPropertyHandlerConfiguration(
@@ -1063,13 +1064,10 @@ class V8_EXPORT ObjectTemplate : public Template {
    * \param attribute The attributes of the property for which an accessor
    *   is added.
    */
-  V8_DEPRECATED("Use SetAccessor with Local<Name> instead")
-  void SetAccessor(
-      Local<String> name, AccessorGetterCallback getter,
-      AccessorSetterCallback setter = nullptr,
-      Local<Value> data = Local<Value>(), PropertyAttribute attribute = None,
-      SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
-      SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
+  V8_DEPRECATED(
+      "Use SetNativeDataProperty or SetAccessorProperty instead depending on "
+      "the required semantics. See http://crbug.com/336325111. This method "
+      "will be removed in V8 12.8.")
   void SetAccessor(
       Local<Name> name, AccessorNameGetterCallback getter,
       AccessorNameSetterCallback setter = nullptr,
@@ -1089,34 +1087,6 @@ class V8_EXPORT ObjectTemplate : public Template {
    * callbacks to invoke when accessing a property.
    */
   void SetHandler(const NamedPropertyHandlerConfiguration& configuration);
-
-  /**
-   * Sets an indexed property handler on the object template.
-   *
-   * Whenever an indexed property is accessed on objects created from
-   * this object template, the provided callback is invoked instead of
-   * accessing the property directly on the JavaScript object.
-   *
-   * \param getter The callback to invoke when getting a property.
-   * \param setter The callback to invoke when setting a property.
-   * \param query The callback to invoke to check if an object has a property.
-   * \param deleter The callback to invoke when deleting a property.
-   * \param enumerator The callback to invoke to enumerate all the indexed
-   *   properties of an object.
-   * \param data A piece of data that will be passed to the callbacks
-   *   whenever they are invoked.
-   */
-  V8_DEPRECATED("Use SetHandler instead")
-  void SetIndexedPropertyHandler(
-      IndexedPropertyGetterCallback getter,
-      IndexedPropertySetterCallback setter = nullptr,
-      IndexedPropertyQueryCallback query = nullptr,
-      IndexedPropertyDeleterCallback deleter = nullptr,
-      IndexedPropertyEnumeratorCallback enumerator = nullptr,
-      Local<Value> data = Local<Value>()) {
-    SetHandler(IndexedPropertyHandlerConfiguration(getter, setter, query,
-                                                   deleter, enumerator, data));
-  }
 
   /**
    * Sets an indexed property handler on the object template.

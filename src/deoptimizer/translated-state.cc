@@ -17,6 +17,7 @@
 #include "src/heap/heap.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/arguments.h"
+#include "src/objects/deoptimization-data.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/oddball.h"
@@ -83,7 +84,6 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
          << ", height=" << height << "}";
       break;
     }
-
 #endif
     case TranslationOpcode::CONSTRUCT_CREATE_STUB_FRAME: {
       DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 2);
@@ -135,10 +135,12 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
     }
 
     case v8::internal::TranslationOpcode::LIFTOFF_FRAME: {
-      DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 2);
+      DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 3);
       int bailout_id = iterator.NextOperand();
       unsigned height = iterator.NextOperand();
-      os << "{bailout_id=" << bailout_id << ", height=" << height << "}";
+      unsigned function_id = iterator.NextOperand();
+      os << "{bailout_id=" << bailout_id << ", height=" << height
+         << ", function_id=" << function_id << "}";
       break;
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -226,6 +228,13 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
       break;
     }
 
+    case TranslationOpcode::SIMD128_REGISTER: {
+      DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
+      int reg_code = iterator.NextOperandUnsigned();
+      os << "{input=" << Simd128Register::from_code(reg_code) << " (Simd128)}";
+      break;
+    }
+
     case TranslationOpcode::TAGGED_STACK_SLOT: {
       DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
       int input_slot_index = iterator.NextOperand();
@@ -276,7 +285,8 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
     }
 
     case TranslationOpcode::FLOAT_STACK_SLOT:
-    case TranslationOpcode::DOUBLE_STACK_SLOT: {
+    case TranslationOpcode::DOUBLE_STACK_SLOT:
+    case TranslationOpcode::SIMD128_STACK_SLOT: {
       DCHECK_EQ(TranslationOpcodeOperandCount(opcode), 1);
       int input_slot_index = iterator.NextOperand();
       os << "{input=" << input_slot_index << "}";
@@ -391,6 +401,14 @@ TranslatedValue TranslatedValue::NewHoleyDouble(TranslatedState* container,
 }
 
 // static
+TranslatedValue TranslatedValue::NewSimd128(TranslatedState* container,
+                                            Simd128 value) {
+  TranslatedValue slot(container, kSimd128);
+  slot.simd128_value_ = value;
+  return slot;
+}
+
+// static
 TranslatedValue TranslatedValue::NewInt32(TranslatedState* container,
                                           int32_t value) {
   TranslatedValue slot(container, kInt32);
@@ -423,10 +441,17 @@ TranslatedValue TranslatedValue::NewUint64ToBigInt(TranslatedState* container,
 }
 
 // static
-TranslatedValue TranslatedValue::NewUInt32(TranslatedState* container,
+TranslatedValue TranslatedValue::NewUint32(TranslatedState* container,
                                            uint32_t value) {
-  TranslatedValue slot(container, kUInt32);
+  TranslatedValue slot(container, kUint32);
   slot.uint32_value_ = value;
+  return slot;
+}
+
+TranslatedValue TranslatedValue::NewUint64(TranslatedState* container,
+                                           uint64_t value) {
+  TranslatedValue slot(container, kUint64);
+  slot.uint64_value_ = value;
   return slot;
 }
 
@@ -474,7 +499,7 @@ uint64_t TranslatedValue::uint64_value() const {
 }
 
 uint32_t TranslatedValue::uint32_value() const {
-  DCHECK(kind() == kUInt32 || kind() == kBoolBit);
+  DCHECK(kind() == kUint32 || kind() == kBoolBit);
   return uint32_value_;
 }
 
@@ -486,6 +511,11 @@ Float32 TranslatedValue::float_value() const {
 Float64 TranslatedValue::double_value() const {
   DCHECK(kDouble == kind() || kHoleyDouble == kind());
   return double_value_;
+}
+
+Simd128 TranslatedValue::simd_value() const {
+  DCHECK_EQ(kind(), kSimd128);
+  return simd128_value_;
 }
 
 int TranslatedValue::object_length() const {
@@ -503,7 +533,7 @@ Tagged<Object> TranslatedValue::GetRawValue() const {
   if (materialization_state() == kFinished) {
     int smi;
     if (IsHeapNumber(*storage_) &&
-        DoubleToSmiInteger(Object::Number(*storage_), &smi)) {
+        DoubleToSmiInteger(Object::NumberValue(*storage_), &smi)) {
       return Smi::FromInt(smi);
     }
     return *storage_;
@@ -582,7 +612,7 @@ Tagged<Object> TranslatedValue::GetRawValue() const {
       // Return the arguments marker.
       break;
 
-    case kUInt32: {
+    case kUint32: {
       bool is_smi = (uint32_value() <= static_cast<uintptr_t>(Smi::kMaxValue));
       if (is_smi) {
         return Smi::FromInt(static_cast<int32_t>(uint32_value()));
@@ -650,7 +680,7 @@ Handle<Object> TranslatedValue::GetValue() {
     // just always allocate a HeapNumber and later extract the Smi again if we
     // don't need a HeapObject.
     set_initialized_storage(
-        isolate()->factory()->NewHeapNumber(Object::Number(*value)));
+        isolate()->factory()->NewHeapNumber(Object::NumberValue(*value)));
     return value;
   }
 
@@ -697,7 +727,7 @@ Handle<Object> TranslatedValue::GetValue() {
     case TranslatedValue::kUint64ToBigInt:
       heap_object = BigInt::FromUint64(isolate(), uint64_value());
       break;
-    case TranslatedValue::kUInt32:
+    case TranslatedValue::kUint32:
       number = uint32_value();
       heap_object = isolate()->factory()->NewHeapNumber(number);
       break;
@@ -773,6 +803,10 @@ Float64 TranslatedState::GetDoubleSlot(Address fp, int slot_offset) {
   return Float64::FromBits(GetUInt64Slot(fp, slot_offset));
 }
 
+Simd128 TranslatedState::getSimd128Slot(Address fp, int slot_offset) {
+  return base::ReadUnalignedValue<Simd128>(fp + slot_offset);
+}
+
 void TranslatedValue::Handlify() {
   if (kind() == kTagged && IsHeapObject(raw_literal())) {
     set_initialized_storage(
@@ -831,13 +865,14 @@ TranslatedFrame TranslatedFrame::JSToWasmBuiltinContinuationFrame(
   return frame;
 }
 
-TranslatedFrame TranslatedFrame::LiftoffFrame(
-    BytecodeOffset bytecode_offset, int height) {
+TranslatedFrame TranslatedFrame::LiftoffFrame(BytecodeOffset bytecode_offset,
+                                              int height, int function_index) {
   // WebAssembly functions do not have a SharedFunctionInfo on the stack.
   // The deoptimizer has to recover the function-specific data based on the PC.
   Tagged<SharedFunctionInfo> shared_info;
   TranslatedFrame frame(kLiftoffFunction, shared_info, height);
   frame.bytecode_offset_ = bytecode_offset;
+  frame.wasm_function_index_ = function_index;
   return frame;
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -859,7 +894,7 @@ TranslatedFrame TranslatedFrame::JavaScriptBuiltinContinuationWithCatchFrame(
   return frame;
 }
 
-int TranslatedFrame::GetValueCount() {
+int TranslatedFrame::GetValueCount() const {
   // The function is added to all frame state descriptors in
   // InstructionSelector::AddInputsToFrameStateDescriptor.
   static constexpr int kTheFunction = 1;
@@ -914,17 +949,62 @@ void TranslatedFrame::Handlify(Isolate* isolate) {
   }
 }
 
+DeoptimizationLiteralProvider::DeoptimizationLiteralProvider(
+    Tagged<DeoptimizationLiteralArray> literal_array)
+    : literals_on_heap_(literal_array) {}
+
+DeoptimizationLiteralProvider::DeoptimizationLiteralProvider(
+    std::vector<DeoptimizationLiteral> literals)
+    : literals_off_heap_(std::move(literals)) {}
+
+DeoptimizationLiteralProvider::~DeoptimizationLiteralProvider() = default;
+
+TranslatedValue DeoptimizationLiteralProvider::Get(TranslatedState* container,
+                                                   int literal_index) const {
+  if (V8_LIKELY(!literals_on_heap_.is_null())) {
+    return TranslatedValue::NewTagged(container,
+                                      literals_on_heap_->get(literal_index));
+  }
+#if !V8_ENABLE_WEBASSEMBLY
+  UNREACHABLE();
+#else
+  CHECK(v8_flags.wasm_deopt);
+  CHECK_LT(literal_index, literals_off_heap_.size());
+  const DeoptimizationLiteral& literal = literals_off_heap_[literal_index];
+  // TODO(mliedtke): We also need to support simd literals.
+  switch (literal.kind()) {
+    case DeoptimizationLiteralKind::kWasmInt32:
+      return TranslatedValue::NewInt32(container, literal.GetInt32());
+    case DeoptimizationLiteralKind::kWasmInt64:
+      return TranslatedValue::NewInt64(container, literal.GetInt64());
+    case DeoptimizationLiteralKind::kWasmFloat:
+      // TODO(mliedtke): What about NaNs? Seems like we may change bit patterns
+      // here...
+      return TranslatedValue::NewFloat(container, Float32(literal.GetFloat()));
+    case DeoptimizationLiteralKind::kWasmDouble:
+      // TODO(mliedtke): What about NaNs? Seems like we may change bit patterns
+      // here...
+      return TranslatedValue::NewDouble(container,
+                                        Float64(literal.GetDouble()));
+    case DeoptimizationLiteralKind::kWasmI31Ref:
+      return TranslatedValue::NewTagged(container, literal.GetSmi());
+    default:
+      UNIMPLEMENTED();
+  }
+#endif
+}
+
 TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
-    DeoptimizationFrameTranslation::Iterator* iterator,
-    Tagged<DeoptimizationLiteralArray> literal_array, Address fp,
+    DeoptTranslationIterator* iterator,
+    const DeoptimizationLiteralProvider& literal_array, Address fp,
     FILE* trace_file) {
   TranslationOpcode opcode = iterator->NextOpcode();
   switch (opcode) {
     case TranslationOpcode::INTERPRETED_FRAME_WITH_RETURN:
     case TranslationOpcode::INTERPRETED_FRAME_WITHOUT_RETURN: {
       BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info =
-          SharedFunctionInfo::cast(literal_array->get(iterator->NextOperand()));
+      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+          literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       int return_value_offset = 0;
       int return_value_count = 0;
@@ -949,8 +1029,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     }
 
     case TranslationOpcode::INLINED_EXTRA_ARGUMENTS: {
-      Tagged<SharedFunctionInfo> shared_info =
-          SharedFunctionInfo::cast(literal_array->get(iterator->NextOperand()));
+      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+          literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info->DebugNameCStr();
@@ -961,8 +1041,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     }
 
     case TranslationOpcode::CONSTRUCT_CREATE_STUB_FRAME: {
-      Tagged<SharedFunctionInfo> shared_info =
-          SharedFunctionInfo::cast(literal_array->get(iterator->NextOperand()));
+      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+          literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info->DebugNameCStr();
@@ -975,8 +1055,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     }
 
     case TranslationOpcode::CONSTRUCT_INVOKE_STUB_FRAME: {
-      Tagged<SharedFunctionInfo> shared_info =
-          SharedFunctionInfo::cast(literal_array->get(iterator->NextOperand()));
+      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+          literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info->DebugNameCStr();
         PrintF(trace_file,
@@ -988,8 +1068,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 
     case TranslationOpcode::BUILTIN_CONTINUATION_FRAME: {
       BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info =
-          SharedFunctionInfo::cast(literal_array->get(iterator->NextOperand()));
+      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+          literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info->DebugNameCStr();
@@ -1005,8 +1085,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 #if V8_ENABLE_WEBASSEMBLY
     case TranslationOpcode::WASM_INLINED_INTO_JS_FRAME: {
       BytecodeOffset bailout_id = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info =
-          SharedFunctionInfo::cast(literal_array->get(iterator->NextOperand()));
+      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+          literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info->DebugNameCStr();
@@ -1021,8 +1101,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 
     case TranslationOpcode::JS_TO_WASM_BUILTIN_CONTINUATION_FRAME: {
       BytecodeOffset bailout_id = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info =
-          SharedFunctionInfo::cast(literal_array->get(iterator->NextOperand()));
+      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+          literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       int return_kind_code = iterator->NextOperand();
       base::Optional<wasm::ValueKind> return_kind;
@@ -1045,19 +1125,21 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     case TranslationOpcode::LIFTOFF_FRAME: {
       BytecodeOffset bailout_id = BytecodeOffset(iterator->NextOperand());
       int height = iterator->NextOperand();
+      int function_id = iterator->NextOperand();
       if (trace_file != nullptr) {
         PrintF(trace_file, "  reading input for liftoff frame");
-        PrintF(trace_file, " => bailout_id=%d, height=%d ; inputs:\n",
-               bailout_id.ToInt(), height);
+        PrintF(trace_file,
+               " => bailout_id=%d, height=%d, function_id=%d ; inputs:\n",
+               bailout_id.ToInt(), height, function_id);
       }
-      return TranslatedFrame::LiftoffFrame(bailout_id, height);
+      return TranslatedFrame::LiftoffFrame(bailout_id, height, function_id);
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
     case TranslationOpcode::JAVA_SCRIPT_BUILTIN_CONTINUATION_FRAME: {
       BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info =
-          SharedFunctionInfo::cast(literal_array->get(iterator->NextOperand()));
+      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+          literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info->DebugNameCStr();
@@ -1072,8 +1154,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 
     case TranslationOpcode::JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH_FRAME: {
       BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info =
-          SharedFunctionInfo::cast(literal_array->get(iterator->NextOperand()));
+      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+          literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info->DebugNameCStr();
@@ -1104,6 +1186,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     case TranslationOpcode::FLOAT_REGISTER:
     case TranslationOpcode::DOUBLE_REGISTER:
     case TranslationOpcode::HOLEY_DOUBLE_REGISTER:
+    case TranslationOpcode::SIMD128_REGISTER:
     case TranslationOpcode::TAGGED_STACK_SLOT:
     case TranslationOpcode::INT32_STACK_SLOT:
     case TranslationOpcode::INT64_STACK_SLOT:
@@ -1113,6 +1196,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     case TranslationOpcode::BOOL_STACK_SLOT:
     case TranslationOpcode::FLOAT_STACK_SLOT:
     case TranslationOpcode::DOUBLE_STACK_SLOT:
+    case TranslationOpcode::SIMD128_STACK_SLOT:
     case TranslationOpcode::HOLEY_DOUBLE_STACK_SLOT:
     case TranslationOpcode::LITERAL:
     case TranslationOpcode::OPTIMIZED_OUT:
@@ -1196,14 +1280,14 @@ void TranslatedState::CreateArgumentsElementsTranslatedValues(
 // infrastracture is not GC safe.
 // Thus we build a temporary structure in malloced space.
 // The TranslatedValue objects created correspond to the static translation
-// instructions from the DeoptimizationFrameTranslation::Iterator, except for
+// instructions from the DeoptTranslationIterator, except for
 // TranslationOpcode::ARGUMENTS_ELEMENTS, where the number and values of the
 // FixedArray elements depend on dynamic information from the optimized frame.
 // Returns the number of expected nested translations from the
-// DeoptimizationFrameTranslation::Iterator.
+// DeoptTranslationIterator.
 int TranslatedState::CreateNextTranslatedValue(
-    int frame_index, DeoptimizationFrameTranslation::Iterator* iterator,
-    Tagged<DeoptimizationLiteralArray> literal_array, Address fp,
+    int frame_index, DeoptTranslationIterator* iterator,
+    const DeoptimizationLiteralProvider& literal_array, Address fp,
     RegisterValues* registers, FILE* trace_file) {
   disasm::NameConverter converter;
 
@@ -1390,7 +1474,7 @@ int TranslatedState::CreateNextTranslatedValue(
                converter.NameOfCPURegister(input_reg));
       }
       TranslatedValue translated_value =
-          TranslatedValue::NewUInt32(this, static_cast<uint32_t>(value));
+          TranslatedValue::NewUint32(this, static_cast<uint32_t>(value));
       frame.Add(translated_value);
       return translated_value.GetChildrenCount();
     }
@@ -1467,6 +1551,30 @@ int TranslatedState::CreateNextTranslatedValue(
       }
       TranslatedValue translated_value =
           TranslatedValue::NewHoleyDouble(this, value);
+      frame.Add(translated_value);
+      return translated_value.GetChildrenCount();
+    }
+
+    case TranslationOpcode::SIMD128_REGISTER: {
+      int input_reg = iterator->NextOperandUnsigned();
+      if (registers == nullptr) {
+        TranslatedValue translated_value = TranslatedValue::NewInvalid(this);
+        frame.Add(translated_value);
+        return translated_value.GetChildrenCount();
+      }
+      Simd128 value = registers->GetSimd128Register(input_reg);
+      if (trace_file != nullptr) {
+        int8x16 val = value.to_i8x16();
+        PrintF(trace_file,
+               "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x "
+               "%02x %02x %02x %02x ; %s (Simd128)",
+               val.val[0], val.val[1], val.val[2], val.val[3], val.val[4],
+               val.val[5], val.val[6], val.val[7], val.val[8], val.val[9],
+               val.val[10], val.val[11], val.val[12], val.val[13], val.val[14],
+               val.val[15], RegisterName(DoubleRegister::from_code(input_reg)));
+      }
+      TranslatedValue translated_value =
+          TranslatedValue::NewSimd128(this, value);
       frame.Add(translated_value);
       return translated_value.GetChildrenCount();
     }
@@ -1555,7 +1663,7 @@ int TranslatedState::CreateNextTranslatedValue(
                slot_offset < 0 ? '-' : '+', std::abs(slot_offset));
       }
       TranslatedValue translated_value =
-          TranslatedValue::NewUInt32(this, value);
+          TranslatedValue::NewUint32(this, value);
       frame.Add(translated_value);
       return translated_value.GetChildrenCount();
     }
@@ -1600,6 +1708,26 @@ int TranslatedState::CreateNextTranslatedValue(
       return translated_value.GetChildrenCount();
     }
 
+    case TranslationOpcode::SIMD128_STACK_SLOT: {
+      int slot_offset =
+          OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
+      Simd128 value = getSimd128Slot(fp, slot_offset);
+      if (trace_file != nullptr) {
+        int8x16 val = value.to_i8x16();
+        PrintF(trace_file,
+               "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x "
+               "%02x %02x %02x %02x ; (Simd128) [fp %c %d]",
+               val.val[0], val.val[1], val.val[2], val.val[3], val.val[4],
+               val.val[5], val.val[6], val.val[7], val.val[8], val.val[9],
+               val.val[10], val.val[11], val.val[12], val.val[13], val.val[14],
+               val.val[15], slot_offset < 0 ? '-' : '+', std::abs(slot_offset));
+      }
+      TranslatedValue translated_value =
+          TranslatedValue::NewSimd128(this, value);
+      frame.Add(translated_value);
+      return translated_value.GetChildrenCount();
+    }
+
     case TranslationOpcode::HOLEY_DOUBLE_STACK_SLOT: {
       int slot_offset =
           OptimizedFrame::StackSlotOffsetRelativeToFp(iterator->NextOperand());
@@ -1621,15 +1749,36 @@ int TranslatedState::CreateNextTranslatedValue(
 
     case TranslationOpcode::LITERAL: {
       int literal_index = iterator->NextOperand();
-      Tagged<Object> value = literal_array->get(literal_index);
+      TranslatedValue translated_value = literal_array.Get(this, literal_index);
       if (trace_file != nullptr) {
-        PrintF(trace_file, V8PRIxPTR_FMT " ; (literal %2d) ", value.ptr(),
-               literal_index);
-        ShortPrint(value, trace_file);
+        if (translated_value.kind() == TranslatedValue::Kind::kTagged) {
+          PrintF(trace_file, V8PRIxPTR_FMT " ; (literal %2d) ",
+                 translated_value.raw_literal().ptr(), literal_index);
+          ShortPrint(translated_value.raw_literal(), trace_file);
+        } else {
+          switch (translated_value.kind()) {
+            case TranslatedValue::Kind::kDouble:
+              PrintF(trace_file, "(wasm double literal %f)",
+                     translated_value.double_value().get_scalar());
+              break;
+            case TranslatedValue::Kind::kFloat:
+              PrintF(trace_file, "(wasm float literal %f)",
+                     translated_value.float_value().get_scalar());
+              break;
+            case TranslatedValue::Kind::kInt64:
+              PrintF(trace_file, "(wasm int64 literal %lld)",
+                     static_cast<long long>(translated_value.int64_value()));
+              break;
+            case TranslatedValue::Kind::kInt32:
+              PrintF(trace_file, "(wasm int32 literal %d)",
+                     translated_value.int32_value());
+              break;
+            default:
+              PrintF(trace_file, " (wasm literal) ");
+              break;
+          }
+        }
       }
-
-      TranslatedValue translated_value =
-          TranslatedValue::NewTagged(this, value);
       frame.Add(translated_value);
       return translated_value.GetChildrenCount();
     }
@@ -1650,7 +1799,8 @@ int TranslatedState::CreateNextTranslatedValue(
 }
 
 Address TranslatedState::DecompressIfNeeded(intptr_t value) {
-  if (COMPRESS_POINTERS_BOOL) {
+  if (COMPRESS_POINTERS_BOOL &&
+      static_cast<uintptr_t>(value) <= std::numeric_limits<uint32_t>::max()) {
     return V8HeapCompressionScheme::DecompressTagged(
         isolate(), static_cast<uint32_t>(value));
   } else {
@@ -1661,25 +1811,24 @@ Address TranslatedState::DecompressIfNeeded(intptr_t value) {
 TranslatedState::TranslatedState(const JavaScriptFrame* frame)
     : purpose_(kFrameInspection) {
   int deopt_index = SafepointEntry::kNoDeoptIndex;
+  Tagged<Code> code = frame->LookupCode();
   Tagged<DeoptimizationData> data =
       static_cast<const OptimizedFrame*>(frame)->GetDeoptimizationData(
-          &deopt_index);
+          code, &deopt_index);
   DCHECK(!data.is_null() && deopt_index != SafepointEntry::kNoDeoptIndex);
   DeoptimizationFrameTranslation::Iterator it(
       data->FrameTranslation(), data->TranslationIndex(deopt_index).value());
   int actual_argc = frame->GetActualArgumentCount();
-  Init(frame->isolate(), frame->fp(), frame->fp(), &it, data->LiteralArray(),
+  DeoptimizationLiteralProvider literals(data->LiteralArray());
+  Init(frame->isolate(), frame->fp(), frame->fp(), &it, literals,
        nullptr /* registers */, nullptr /* trace file */,
-       frame->function()
-           ->shared()
-           ->internal_formal_parameter_count_without_receiver(),
-       actual_argc);
+       code->parameter_count_without_receiver(), actual_argc);
 }
 
 void TranslatedState::Init(Isolate* isolate, Address input_frame_pointer,
                            Address stack_frame_pointer,
-                           DeoptimizationFrameTranslation::Iterator* iterator,
-                           Tagged<DeoptimizationLiteralArray> literal_array,
+                           DeoptTranslationIterator* iterator,
+                           const DeoptimizationLiteralProvider& literal_array,
                            RegisterValues* registers, FILE* trace_file,
                            int formal_parameter_count,
                            int actual_argument_count) {
@@ -1699,7 +1848,8 @@ void TranslatedState::Init(Isolate* isolate, Address input_frame_pointer,
   iterator->NextOperand();  // Drop JS frames count.
 
   if (opcode == TranslationOpcode::BEGIN_WITH_FEEDBACK) {
-    ReadUpdateFeedback(iterator, literal_array, trace_file);
+    ReadUpdateFeedback(iterator, literal_array.get_on_heap_literals(),
+                       trace_file);
   }
 
   std::stack<int> nested_counts;
@@ -1908,7 +2058,7 @@ void TranslatedState::MaterializeFixedDoubleArray(TranslatedFrame* frame,
              frame->values_[*value_index].kind());
     Handle<Object> value = frame->values_[*value_index].GetValue();
     if (IsNumber(*value)) {
-      array->set(i, Object::Number(*value));
+      array->set(i, Object::NumberValue(*value));
     } else {
       CHECK(value.is_identical_to(isolate()->factory()->the_hole_value()));
       array->set_the_hole(isolate(), i);
@@ -1926,7 +2076,7 @@ void TranslatedState::MaterializeHeapNumber(TranslatedFrame* frame,
   Handle<Object> value = frame->values_[*value_index].GetValue();
   CHECK(IsNumber(*value));
   Handle<HeapNumber> box =
-      isolate()->factory()->NewHeapNumber(Object::Number(*value));
+      isolate()->factory()->NewHeapNumber(Object::NumberValue(*value));
   (*value_index)++;
   slot->set_storage(box);
 }
@@ -2295,7 +2445,7 @@ void TranslatedState::InitializeJSObjectAt(
       CHECK_EQ(kStoreTagged, marker);
       Handle<Object> field_value = slot->GetValue();
       DCHECK_IMPLIES(IsHeapNumber(*field_value),
-                     !IsSmiDouble(Object::Number(*field_value)));
+                     !IsSmiDouble(Object::NumberValue(*field_value)));
       WRITE_FIELD(*object_storage, offset, *field_value);
       WRITE_BARRIER(*object_storage, offset, *field_value);
     }
@@ -2347,7 +2497,7 @@ void TranslatedState::InitializeObjectWithTaggedFieldsAt(
       CHECK(marker == kStoreTagged || i == 1);
       field_value = slot->GetValue();
       DCHECK_IMPLIES(IsHeapNumber(*field_value),
-                     !IsSmiDouble(Object::Number(*field_value)));
+                     !IsSmiDouble(Object::NumberValue(*field_value)));
     }
     WRITE_FIELD(*object_storage, offset, *field_value);
     WRITE_BARRIER(*object_storage, offset, *field_value);
@@ -2469,14 +2619,16 @@ void TranslatedState::StoreMaterializedValuesAndDeopt(JavaScriptFrame* frame) {
     } else {
       if (*previous_value == *marker) {
         if (IsSmi(*value)) {
-          value = isolate()->factory()->NewHeapNumber(Object::Number(*value));
+          value =
+              isolate()->factory()->NewHeapNumber(Object::NumberValue(*value));
         }
         previously_materialized_objects->set(i, *value);
         value_changed = true;
       } else {
         CHECK(*previous_value == *value ||
               (IsHeapNumber(*previous_value) && IsSmi(*value) &&
-               Object::Number(*previous_value) == Object::Number(*value)));
+               Object::NumberValue(*previous_value) ==
+                   Object::NumberValue(*value)));
       }
     }
   }
@@ -2554,7 +2706,7 @@ bool TranslatedState::DoUpdateFeedback() {
 }
 
 void TranslatedState::ReadUpdateFeedback(
-    DeoptimizationFrameTranslation::Iterator* iterator,
+    DeoptTranslationIterator* iterator,
     Tagged<DeoptimizationLiteralArray> literal_array, FILE* trace_file) {
   CHECK_EQ(TranslationOpcode::UPDATE_FEEDBACK, iterator->NextOpcode());
   feedback_vector_ =

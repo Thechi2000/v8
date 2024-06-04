@@ -53,16 +53,27 @@ struct GraphBuilder {
   Schedule& schedule;
   Linkage* linkage;
 
-  Isolate* isolate = PipelineData::Get().isolate();
-  JSHeapBroker* broker = PipelineData::Get().broker();
-  Zone* graph_zone = PipelineData::Get().graph_zone();
+  Isolate* isolate;
+  JSHeapBroker* broker;
+  Zone* graph_zone;
   using AssemblerT = TSAssembler<ExplicitTruncationReducer>;
-  AssemblerT assembler{PipelineData::Get().graph(), PipelineData::Get().graph(),
-                       phase_zone};
-  SourcePositionTable* source_positions =
-      PipelineData::Get().source_positions();
-  NodeOriginTable* origins = PipelineData::Get().node_origins();
-  TurboshaftPipelineKind pipeline_kind = PipelineData::Get().pipeline_kind();
+  AssemblerT assembler;
+  SourcePositionTable* source_positions;
+  NodeOriginTable* origins;
+  TurboshaftPipelineKind pipeline_kind;
+
+  GraphBuilder(PipelineData* data, Zone* phase_zone, Schedule& schedule,
+               Linkage* linkage)
+      : phase_zone(phase_zone),
+        schedule(schedule),
+        linkage(linkage),
+        isolate(data->isolate()),
+        broker(data->broker()),
+        graph_zone(data->graph_zone()),
+        assembler(data, data->graph(), data->graph(), phase_zone),
+        source_positions(data->source_positions()),
+        origins(data->node_origins()),
+        pipeline_kind(data->pipeline_kind()) {}
 
   struct BlockData {
     Block* block;
@@ -1933,8 +1944,9 @@ OpIndex GraphBuilder::Process(
       const int c_arg_count = params.argument_count();
 
       base::SmallVector<OpIndex, 16> slow_call_arguments;
-      DCHECK_EQ(node->op()->ValueInputCount() - c_arg_count,
-                n.SlowCallArgumentCount());
+      DCHECK_EQ(node->op()->ValueInputCount(),
+                c_arg_count + FastApiCallNode::kCallbackData +
+                    n.SlowCallArgumentCount());
       OpIndex slow_call_callee = Map(n.SlowCallArgument(0));
       for (int i = 1; i < n.SlowCallArgumentCount(); ++i) {
         slow_call_arguments.push_back(Map(n.SlowCallArgument(i)));
@@ -1975,15 +1987,17 @@ OpIndex GraphBuilder::Process(
       for (int i = 0; i < c_arg_count; ++i) {
         arguments.push_back(Map(NodeProperties::GetValueInput(node, i)));
       }
-      OpIndex data_argument =
-          Map(n.SlowCallArgument(FastApiCallNode::kSlowCallDataArgumentIndex));
+      OpIndex data_argument = Map(n.CallbackData());
+
+      V<Context> context = Map(n.Context());
+
       const FastApiCallParameters* parameters = FastApiCallParameters::Create(
           c_functions, resolution_result, __ graph_zone());
 
       Label<Object> done(this);
 
       V<Tuple<Word32, Any>> fast_call_result =
-          __ FastApiCall(dominating_frame_state, data_argument,
+          __ FastApiCall(dominating_frame_state, data_argument, context,
                          base::VectorOf(arguments), parameters);
 
       V<Word32> result_state = __ template Projection<0>(fast_call_result);
@@ -2263,29 +2277,31 @@ OpIndex GraphBuilder::Process(
                                  : Simd128BinopOp::Kind::kI8x16Swizzle);
     }
 
-#define SIMD128_UNOP(name)                        \
-  case IrOpcode::k##name:                         \
-    return __ Simd128Unary(Map(node->InputAt(0)), \
+#define SIMD128_UNOP(name)                                 \
+  case IrOpcode::k##name:                                  \
+    return __ Simd128Unary(Map<Simd128>(node->InputAt(0)), \
                            Simd128UnaryOp::Kind::k##name);
       FOREACH_SIMD_128_UNARY_OPCODE(SIMD128_UNOP)
 #undef SIMD128_UNOP
 
-#define SIMD128_SHIFT(name)                                              \
-  case IrOpcode::k##name:                                                \
-    return __ Simd128Shift(Map(node->InputAt(0)), Map(node->InputAt(1)), \
+#define SIMD128_SHIFT(name)                                \
+  case IrOpcode::k##name:                                  \
+    return __ Simd128Shift(Map<Simd128>(node->InputAt(0)), \
+                           Map<Word32>(node->InputAt(1)),  \
                            Simd128ShiftOp::Kind::k##name);
       FOREACH_SIMD_128_SHIFT_OPCODE(SIMD128_SHIFT)
 #undef SIMD128_UNOP
 
-#define SIMD128_TEST(name) \
-  case IrOpcode::k##name:  \
-    return __ Simd128Test(Map(node->InputAt(0)), Simd128TestOp::Kind::k##name);
+#define SIMD128_TEST(name)                                \
+  case IrOpcode::k##name:                                 \
+    return __ Simd128Test(Map<Simd128>(node->InputAt(0)), \
+                          Simd128TestOp::Kind::k##name);
       FOREACH_SIMD_128_TEST_OPCODE(SIMD128_TEST)
 #undef SIMD128_UNOP
 
-#define SIMD128_SPLAT(name)                       \
-  case IrOpcode::k##name##Splat:                  \
-    return __ Simd128Splat(Map(node->InputAt(0)), \
+#define SIMD128_SPLAT(name)                            \
+  case IrOpcode::k##name##Splat:                       \
+    return __ Simd128Splat(Map<Any>(node->InputAt(0)), \
                            Simd128SplatOp::Kind::k##name);
       FOREACH_SIMD_128_SPLAT_OPCODE(SIMD128_SPLAT)
 #undef SIMD128_SPLAT
@@ -2300,7 +2316,7 @@ OpIndex GraphBuilder::Process(
 
 #define SIMD128_EXTRACT_LANE(name, suffix)                                    \
   case IrOpcode::k##name##ExtractLane##suffix:                                \
-    return __ Simd128ExtractLane(Map(node->InputAt(0)),                       \
+    return __ Simd128ExtractLane(Map<Simd128>(node->InputAt(0)),              \
                                  Simd128ExtractLaneOp::Kind::k##name##suffix, \
                                  OpParameter<int32_t>(node->op()));
       SIMD128_EXTRACT_LANE(I8x16, S)
@@ -2313,10 +2329,11 @@ OpIndex GraphBuilder::Process(
       SIMD128_EXTRACT_LANE(F64x2, )
 #undef SIMD128_LANE
 
-#define SIMD128_REPLACE_LANE(name)                                             \
-  case IrOpcode::k##name##ReplaceLane:                                         \
-    return __ Simd128ReplaceLane(Map(node->InputAt(0)), Map(node->InputAt(1)), \
-                                 Simd128ReplaceLaneOp::Kind::k##name,          \
+#define SIMD128_REPLACE_LANE(name)                                    \
+  case IrOpcode::k##name##ReplaceLane:                                \
+    return __ Simd128ReplaceLane(Map<Simd128>(node->InputAt(0)),      \
+                                 Map<Any>(node->InputAt(1)),          \
+                                 Simd128ReplaceLaneOp::Kind::k##name, \
                                  OpParameter<int32_t>(node->op()));
       SIMD128_REPLACE_LANE(I8x16)
       SIMD128_REPLACE_LANE(I16x8)
@@ -2330,8 +2347,7 @@ OpIndex GraphBuilder::Process(
       return __ LoadStackPointer();
 
     case IrOpcode::kSetStackPointer:
-      __ SetStackPointer(Map(node->InputAt(0)),
-                         OpParameter<wasm::FPRelativeScope>(node->op()));
+      __ SetStackPointer(Map(node->InputAt(0)));
       return OpIndex::Invalid();
 
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -2389,11 +2405,11 @@ OpIndex GraphBuilder::Process(
 
 }  // namespace
 
-base::Optional<BailoutReason> BuildGraph(Schedule* schedule, Zone* phase_zone,
-                                         Linkage* linkage) {
-  GraphBuilder builder{phase_zone, *schedule, linkage};
+base::Optional<BailoutReason> BuildGraph(PipelineData* data, Schedule* schedule,
+                                         Zone* phase_zone, Linkage* linkage) {
+  GraphBuilder builder{data, phase_zone, *schedule, linkage};
 #if DEBUG
-  PipelineData::Get().graph().SetCreatedFromTurbofan();
+  data->graph().SetCreatedFromTurbofan();
 #endif
   return builder.Run();
 }

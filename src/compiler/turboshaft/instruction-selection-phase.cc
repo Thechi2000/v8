@@ -293,10 +293,9 @@ void PropagateDeferred(Graph& graph) {
 }
 
 base::Optional<BailoutReason> InstructionSelectionPhase::Run(
-    Zone* temp_zone, const CallDescriptor* call_descriptor, Linkage* linkage,
-    CodeTracer* code_tracer) {
-  PipelineData* data = &PipelineData::Get();
-  Graph& graph = PipelineData::Get().graph();
+    PipelineData* data, Zone* temp_zone, const CallDescriptor* call_descriptor,
+    Linkage* linkage, CodeTracer* code_tracer) {
+  Graph& graph = data->graph();
 
   // Compute special RPO order....
   TurboshaftSpecialRPONumberer numberer(graph, temp_zone);
@@ -310,11 +309,11 @@ base::Optional<BailoutReason> InstructionSelectionPhase::Run(
   PropagateDeferred(graph);
 
   // Print graph once before instruction selection.
-  turboshaft::PrintTurboshaftGraph(temp_zone, code_tracer,
+  turboshaft::PrintTurboshaftGraph(data, temp_zone, code_tracer,
                                    "before instruction selection");
 
   // Initialize an instruction sequence.
-  data->InitializeInstructionSequence(call_descriptor);
+  data->InitializeInstructionComponent(call_descriptor);
 
   // Run the actual instruction selection.
   InstructionSelector selector = InstructionSelector::ForTurboshaft(
@@ -324,8 +323,7 @@ base::Optional<BailoutReason> InstructionSelectionPhase::Run(
           ? InstructionSelector::kEnableSwitchJumpTable
           : InstructionSelector::kDisableSwitchJumpTable,
       &data->info()->tick_counter(), data->broker(),
-      data->address_of_max_unoptimized_frame_height(),
-      data->address_of_max_pushed_argument_count(),
+      &data->max_unoptimized_frame_height(), &data->max_pushed_argument_count(),
       data->info()->source_positions()
           ? InstructionSelector::kAllSourcePositions
           : InstructionSelector::kCallSourcePositions,

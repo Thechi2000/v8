@@ -51,6 +51,7 @@
 #include "src/roots/roots.h"
 #include "src/sandbox/bounded-size-inl.h"
 #include "src/sandbox/code-pointer-inl.h"
+#include "src/sandbox/cppheap-pointer-inl.h"
 #include "src/sandbox/external-pointer-inl.h"
 #include "src/sandbox/indirect-pointer-inl.h"
 #include "src/sandbox/isolate-inl.h"
@@ -239,8 +240,8 @@ Tagged<Object> HeapObject::SeqCst_CompareAndSwapField(
         !IsNumber(actual_expected)) {
       return old_value;
     }
-    if (!Object::SameNumberValue(Object::Number(old_value),
-                                 Object::Number(actual_expected))) {
+    if (!Object::SameNumberValue(Object::NumberValue(old_value),
+                                 Object::NumberValue(actual_expected))) {
       return old_value;
     }
     // The pointer comparison failed, but the numbers are equal. This can
@@ -297,7 +298,7 @@ bool IsJSApiWrapperObject(Tagged<Map> map) {
          InstanceTypeChecker::IsJSSpecialObject(instance_type);
 }
 
-bool IsJSApiWrapperObject(Tagged<JSObject> js_obj) {
+bool IsJSApiWrapperObject(Tagged<HeapObject> js_obj) {
   return IsJSApiWrapperObject(js_obj->map());
 }
 
@@ -550,7 +551,7 @@ STRUCT_LIST(MAKE_STRUCT_PREDICATE)
 #undef MAKE_STRUCT_PREDICATE
 
 // static
-double Object::Number(Tagged<Object> obj) {
+double Object::NumberValue(Tagged<Object> obj) {
   DCHECK(IsNumber(obj));
   return IsSmi(obj)
              ? static_cast<double>(Tagged<Smi>::unchecked_cast(obj).value())
@@ -717,10 +718,22 @@ MaybeHandle<Object> Object::ToUint32(Isolate* isolate, Handle<Object> input) {
 }
 
 // static
-MaybeHandle<String> Object::ToString(Isolate* isolate, Handle<Object> input) {
+template <typename T, typename>
+MaybeHandle<String> Object::ToString(Isolate* isolate, Handle<T> input) {
+  // T should be a subtype of Object, which is enforced by the second template
+  // argument.
   if (IsString(*input)) return Handle<String>::cast(input);
   return ConvertToString(isolate, input);
 }
+
+#ifdef V8_ENABLE_DIRECT_HANDLE
+template <typename T, typename>
+MaybeDirectHandle<String> Object::ToString(Isolate* isolate,
+                                           DirectHandle<T> input) {
+  if (IsString(*input)) return DirectHandle<String>::cast(input);
+  return ConvertToString(isolate, indirect_handle(input, isolate));
+}
+#endif
 
 // static
 MaybeHandle<Object> Object::ToLength(Isolate* isolate, Handle<Object> input) {
@@ -800,16 +813,17 @@ Address HeapObject::ReadExternalPointerField(size_t offset,
   return i::ReadExternalPointerField<tag>(field_address(offset), isolate);
 }
 
-template <ExternalPointerTag tag>
-Address HeapObject::TryReadCppHeapPointerField(
+template <CppHeapPointerTag lower_bound, CppHeapPointerTag upper_bound>
+Address HeapObject::ReadCppHeapPointerField(
     size_t offset, IsolateForPointerCompression isolate) const {
-  return i::TryReadCppHeapPointerField<tag>(field_address(offset), isolate);
+  return i::ReadCppHeapPointerField<lower_bound, upper_bound>(
+      field_address(offset), isolate);
 }
 
-Address HeapObject::TryReadCppHeapPointerField(
+Address HeapObject::ReadCppHeapPointerField(
     size_t offset, IsolateForPointerCompression isolate,
-    ExternalPointerTag tag) const {
-  return i::TryReadCppHeapPointerField(field_address(offset), isolate, tag);
+    CppHeapPointerTagRange tag_range) const {
+  return i::ReadCppHeapPointerField(field_address(offset), isolate, tag_range);
 }
 
 template <ExternalPointerTag tag>
@@ -826,15 +840,15 @@ void HeapObject::WriteLazilyInitializedExternalPointerField(
       address(), field_address(offset), isolate, value);
 }
 
-void HeapObject::ResetLazilyInitializedExternalPointerField(size_t offset) {
-  i::ResetLazilyInitializedExternalPointerField(field_address(offset));
+void HeapObject::SetupLazilyInitializedExternalPointerField(size_t offset) {
+  i::SetupLazilyInitializedExternalPointerField(field_address(offset));
 }
 
-void HeapObject::ResetLazilyInitializedCppHeapPointerField(size_t offset) {
-  CppHeapPointerSlot(field_address(offset), kAnyExternalPointerTag).reset();
+void HeapObject::SetupLazilyInitializedCppHeapPointerField(size_t offset) {
+  CppHeapPointerSlot(field_address(offset)).init();
 }
 
-template <ExternalPointerTag tag>
+template <CppHeapPointerTag tag>
 void HeapObject::WriteLazilyInitializedCppHeapPointerField(
     size_t offset, IsolateForPointerCompression isolate, Address value) {
   i::WriteLazilyInitializedCppHeapPointerField<tag>(field_address(offset),
@@ -843,7 +857,7 @@ void HeapObject::WriteLazilyInitializedCppHeapPointerField(
 
 void HeapObject::WriteLazilyInitializedCppHeapPointerField(
     size_t offset, IsolateForPointerCompression isolate, Address value,
-    ExternalPointerTag tag) {
+    CppHeapPointerTag tag) {
   i::WriteLazilyInitializedCppHeapPointerField(field_address(offset), isolate,
                                                value, tag);
 }
@@ -959,9 +973,8 @@ ExternalPointerSlot HeapObject::RawExternalPointerField(
   return ExternalPointerSlot(field_address(byte_offset), tag);
 }
 
-CppHeapPointerSlot HeapObject::RawCppHeapPointerField(
-    int byte_offset, ExternalPointerTag tag) const {
-  return CppHeapPointerSlot(field_address(byte_offset), tag);
+CppHeapPointerSlot HeapObject::RawCppHeapPointerField(int byte_offset) const {
+  return CppHeapPointerSlot(field_address(byte_offset));
 }
 
 IndirectPointerSlot HeapObject::RawIndirectPointerField(

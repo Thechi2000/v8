@@ -8,10 +8,11 @@
 #include "src/common/globals.h"
 #include "src/heap/marking-worklist-inl.h"
 #include "src/heap/minor-mark-sweep.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/heap/objects-visiting-inl.h"
 #include "src/heap/objects-visiting.h"
 #include "src/heap/pretenuring-handler-inl.h"
+#include "src/heap/remembered-set-inl.h"
 #include "src/heap/young-generation-marking-visitor.h"
 #include "src/objects/js-objects.h"
 
@@ -47,6 +48,20 @@ YoungGenerationMarkingVisitor<marking_mode>::~YoungGenerationMarkingVisitor() {
     if (pair.first) {
       pair.first->IncrementLiveBytesAtomically(pair.second);
     }
+  }
+}
+
+template <YoungGenerationMarkingVisitationMode marking_mode>
+void YoungGenerationMarkingVisitor<marking_mode>::VisitCppHeapPointer(
+    Tagged<HeapObject> host, CppHeapPointerSlot slot) {
+  if (!marking_worklists_local_.cpp_marking_state()) return;
+
+  // The table is not reclaimed in the young generation, so we only need to mark
+  // through to the C++ pointer.
+
+  if (auto cpp_heap_pointer = slot.try_load(isolate_, kAnyCppHeapPointer)) {
+    marking_worklists_local_.cpp_marking_state()->MarkAndPush(
+        reinterpret_cast<void*>(cpp_heap_pointer));
   }
 }
 
@@ -140,6 +155,36 @@ int YoungGenerationMarkingVisitor<marking_mode>::VisitEphemeronHashTable(
   }
   return EphemeronHashTable::BodyDescriptor::SizeOf(map, table);
 }
+
+#ifdef V8_COMPRESS_POINTERS
+template <YoungGenerationMarkingVisitationMode marking_mode>
+void YoungGenerationMarkingVisitor<marking_mode>::VisitExternalPointer(
+    Tagged<HeapObject> host, ExternalPointerSlot slot) {
+  // With sticky mark-bits the host object was already marked (old).
+  DCHECK_IMPLIES(!v8_flags.sticky_mark_bits, Heap::InYoungGeneration(host));
+  DCHECK_NE(slot.tag(), kExternalPointerNullTag);
+  DCHECK(!IsSharedExternalPointerType(slot.tag()));
+
+  // TODO(chromium:337580006): Remove when pointer compression always uses
+  // EPT.
+  if (!slot.HasExternalPointerHandle()) return;
+
+  ExternalPointerHandle handle = slot.Relaxed_LoadHandle();
+  if (handle != kNullExternalPointerHandle) {
+    ExternalPointerTable& table = isolate_->external_pointer_table();
+    auto* space = isolate_->heap()->young_external_pointer_space();
+    table.Mark(space, handle, slot.address());
+  }
+
+  // Add to the remset whether the handle is null or not, as the slot could be
+  // set to a non-null value before the marking pause.
+  // TODO(342905179): Avoid adding null handle locations to the remset, and
+  // instead make external pointer writes invoke a marking barrier.
+  auto slot_chunk = MutablePageMetadata::FromHeapObject(host);
+  RememberedSet<SURVIVOR_TO_EXTERNAL_POINTER>::template Insert<
+      AccessMode::ATOMIC>(slot_chunk, slot_chunk->Offset(slot.address()));
+}
+#endif  // V8_COMPRESS_POINTERS
 
 template <YoungGenerationMarkingVisitationMode marking_mode>
 template <typename TSlot>

@@ -3169,6 +3169,8 @@ static void CheckAlignedPointerInInternalField(Local<v8::Object> obj,
   obj->SetAlignedPointerInInternalField(0, value);
   i::heap::InvokeMajorGC(CcTest::heap());
   CHECK_EQ(value, obj->GetAlignedPointerFromInternalField(0));
+  CHECK_EQ(value,
+           obj->GetAlignedPointerFromInternalField(CcTest::isolate(), 0));
 }
 
 THREADED_TEST(InternalFieldsAlignedPointers) {
@@ -3229,6 +3231,11 @@ THREADED_TEST(SetAlignedPointerInInternalFields) {
     v8::SealHandleScope no_handle_leak(isolate);
     CHECK_EQ(heap_allocated_1, obj->GetAlignedPointerFromInternalField(0));
     CHECK_EQ(heap_allocated_2, obj->GetAlignedPointerFromInternalField(1));
+
+    CHECK_EQ(heap_allocated_1,
+             obj->GetAlignedPointerFromInternalField(isolate, 0));
+    CHECK_EQ(heap_allocated_2,
+             obj->GetAlignedPointerFromInternalField(isolate, 1));
   }
 
   indices[0] = 1;
@@ -3237,6 +3244,11 @@ THREADED_TEST(SetAlignedPointerInInternalFields) {
   i::heap::InvokeMajorGC(CcTest::heap());
   CHECK_EQ(heap_allocated_2, obj->GetAlignedPointerFromInternalField(0));
   CHECK_EQ(heap_allocated_1, obj->GetAlignedPointerFromInternalField(1));
+
+  CHECK_EQ(heap_allocated_2,
+           obj->GetAlignedPointerFromInternalField(isolate, 0));
+  CHECK_EQ(heap_allocated_1,
+           obj->GetAlignedPointerFromInternalField(isolate, 1));
 
   delete[] heap_allocated_1;
   delete[] heap_allocated_2;
@@ -3251,6 +3263,8 @@ static void CheckAlignedPointerInEmbedderData(LocalContext* env,
   CHECK_EQ(value, (*env)->GetAlignedPointerFromEmbedderData(index));
   CHECK_EQ(value,
            some_obj->GetAlignedPointerFromEmbedderDataInCreationContext(index));
+  CHECK_EQ(value, some_obj->GetAlignedPointerFromEmbedderDataInCreationContext(
+                      CcTest::isolate(), index));
 }
 
 static void* AlignedTestPointer(int i) {
@@ -5006,6 +5020,53 @@ TEST(MessageGetSourceLine) {
             message->GetSourceLine(context).ToLocalChecked()));
         CHECK_EQ("      throw new Error();", result);
       });
+}
+
+TEST(GetStackTraceLimit) {
+  i::v8_flags.stack_trace_limit = 10;
+
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+  LocalContext context;
+
+  const int stack_trace_limit = isolate->GetStackTraceLimit();
+  CHECK_EQ(10, stack_trace_limit);
+}
+
+TEST(GetStackTraceLimitSetFromJS) {
+  i::v8_flags.stack_trace_limit = 10;
+
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+  LocalContext context;
+
+  v8::ScriptOrigin origin = v8::ScriptOrigin(v8_str("test"), 0, 0);
+  v8::Local<v8::String> script = v8_str("Error.stackTraceLimit = 5;\n");
+  v8::Script::Compile(context.local(), script, &origin)
+      .ToLocalChecked()
+      ->Run(context.local())
+      .ToLocalChecked();
+
+  const int stack_trace_limit = isolate->GetStackTraceLimit();
+  CHECK_EQ(5, stack_trace_limit);
+}
+
+TEST(GetStackTraceLimitSetNegativeFromJS) {
+  i::v8_flags.stack_trace_limit = 10;
+
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+  LocalContext context;
+
+  v8::ScriptOrigin origin = v8::ScriptOrigin(v8_str("test"), 0, 0);
+  v8::Local<v8::String> script = v8_str("Error.stackTraceLimit = -5;\n");
+  v8::Script::Compile(context.local(), script, &origin)
+      .ToLocalChecked()
+      ->Run(context.local())
+      .ToLocalChecked();
+
+  const int stack_trace_limit = isolate->GetStackTraceLimit();
+  CHECK_EQ(0, stack_trace_limit);
 }
 
 void GetCurrentStackTrace(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -8102,7 +8163,7 @@ void i::heap::HeapTester::ResetWeakHandle(bool global_gc) {
     DisableConservativeStackScanningScopeForTesting no_stack_scanning(
         CcTest::heap());
 
-    if (global_gc || v8_flags.single_generation) {
+    if (global_gc || v8_flags.single_generation || v8_flags.sticky_mark_bits) {
       i::heap::InvokeAtomicMajorGC(CcTest::heap());
     } else {
       i::heap::InvokeMinorGC(CcTest::heap());
@@ -16829,51 +16890,6 @@ TEST(RecursionWithSourceURLInMessageScriptResourceNameOrSourceURL) {
 }
 
 
-static void CreateGarbageInOldSpace() {
-  i::Factory* factory = CcTest::i_isolate()->factory();
-  v8::HandleScope scope(CcTest::isolate());
-  i::AlwaysAllocateScopeForTesting always_allocate(CcTest::i_isolate()->heap());
-  for (int i = 0; i < 1000; i++) {
-    factory->NewFixedArray(1000, i::AllocationType::kOld);
-  }
-}
-
-
-// Test that idle notification can be handled and eventually collects garbage.
-TEST(TestIdleNotification) {
-  if (!i::v8_flags.incremental_marking) return;
-  i::ManualGCScope manual_gc_scope;
-  const intptr_t MB = 1024 * 1024;
-  const double IdlePauseInSeconds = 1.0;
-  LocalContext env;
-  v8::HandleScope scope(env->GetIsolate());
-  intptr_t initial_size = CcTest::heap()->SizeOfObjects();
-  CreateGarbageInOldSpace();
-  intptr_t size_with_garbage = CcTest::heap()->SizeOfObjects();
-  CHECK_GT(size_with_garbage, initial_size + MB);
-  bool finished = false;
-  for (int i = 0; i < 200 && !finished; i++) {
-    if (i < 10 && CcTest::heap()->incremental_marking()->IsStopped()) {
-      CcTest::heap()->StartIncrementalMarking(
-          i::GCFlag::kReduceMemoryFootprint,
-          i::GarbageCollectionReason::kTesting);
-    }
-    START_ALLOW_USE_DEPRECATED();
-    finished = env->GetIsolate()->IdleNotificationDeadline(
-        (v8::base::TimeTicks::Now().ToInternalValue() /
-         static_cast<double>(v8::base::Time::kMicrosecondsPerSecond)) +
-        IdlePauseInSeconds);
-    END_ALLOW_USE_DEPRECATED();
-    if (CcTest::heap()->sweeping_in_progress()) {
-      CcTest::heap()->EnsureSweepingCompleted(
-          i::Heap::SweepingForcedFinalizationMode::kV8Only);
-    }
-  }
-  intptr_t final_size = CcTest::heap()->SizeOfObjects();
-  CHECK(finished);
-  CHECK_LT(final_size, initial_size + 1);
-}
-
 TEST(Regress2333) {
   LocalContext env;
   for (int i = 0; i < 3; i++) {
@@ -19105,21 +19121,33 @@ THREADED_TEST(CreationContext) {
     Context::Scope scope(other_context);
     CHECK(object1->GetCreationContext().ToLocalChecked() == context1);
     CHECK(object1->GetCreationContextChecked() == context1);
+    CHECK(object1->GetCreationContext(isolate).ToLocalChecked() == context1);
+    CHECK(object1->GetCreationContextChecked(isolate) == context1);
     CheckContextId(object1, 1);
     CHECK(func1->GetCreationContext().ToLocalChecked() == context1);
     CHECK(func1->GetCreationContextChecked() == context1);
+    CHECK(func1->GetCreationContext(isolate).ToLocalChecked() == context1);
+    CHECK(func1->GetCreationContextChecked(isolate) == context1);
     CheckContextId(func1, 1);
     CHECK(instance1->GetCreationContext().ToLocalChecked() == context1);
     CHECK(instance1->GetCreationContextChecked() == context1);
+    CHECK(instance1->GetCreationContext(isolate).ToLocalChecked() == context1);
+    CHECK(instance1->GetCreationContextChecked(isolate) == context1);
     CheckContextId(instance1, 1);
     CHECK(object2->GetCreationContext().ToLocalChecked() == context2);
     CHECK(object2->GetCreationContextChecked() == context2);
+    CHECK(object2->GetCreationContext(isolate).ToLocalChecked() == context2);
+    CHECK(object2->GetCreationContextChecked(isolate) == context2);
     CheckContextId(object2, 2);
     CHECK(func2->GetCreationContext().ToLocalChecked() == context2);
     CHECK(func2->GetCreationContextChecked() == context2);
+    CHECK(func2->GetCreationContext(isolate).ToLocalChecked() == context2);
+    CHECK(func2->GetCreationContextChecked(isolate) == context2);
     CheckContextId(func2, 2);
     CHECK(instance2->GetCreationContext().ToLocalChecked() == context2);
     CHECK(instance2->GetCreationContextChecked() == context2);
+    CHECK(instance2->GetCreationContext(isolate).ToLocalChecked() == context2);
+    CHECK(instance2->GetCreationContextChecked(isolate) == context2);
     CheckContextId(instance2, 2);
   }
 
@@ -24342,7 +24370,7 @@ TEST(SyntheticModuleEvaluationStepsSetExport) {
 
   Local<Value> completion_value = module->Evaluate(context).ToLocalChecked();
   CHECK(completion_value->IsUndefined());
-  CHECK_EQ(42, i::Object::Number(test_export_cell->value()));
+  CHECK_EQ(42, i::Object::NumberValue(test_export_cell->value()));
   CHECK_EQ(module->GetStatus(), Module::kEvaluated);
 }
 
@@ -26832,6 +26860,21 @@ TEST(AtomicsWaitCallback) {
 
 #if V8_ENABLE_WEBASSEMBLY
 namespace v8::internal::wasm {
+
+TEST(WasmCodeFlushingOnMemoryPressure) {
+  i::v8_flags.flush_liftoff_code = true;
+  WasmRunner<int32_t> r(TestExecutionTier::kLiftoff);
+  r.Build({WASM_I32_ADD(WASM_I32V_1(11), WASM_I32V_1(44))});
+  CHECK_EQ(55, r.Call());
+
+  // We should have some Liftoff code compiled.
+  CHECK_NE(GetWasmEngine()->GetLiftoffCodeSize(), 0);
+
+  v8::Isolate* isolate = CcTest::isolate();
+  isolate->MemoryPressureNotification(v8::MemoryPressureLevel::kCritical);
+  // When there is memory pressure, flush all Liftoff code.
+  CHECK_EQ(GetWasmEngine()->GetLiftoffCodeSize(), 0);
+}
 
 TEST(WasmI32AtomicWaitCallback) {
   WasmRunner<int32_t, int32_t, int32_t, double> r(TestExecutionTier::kTurbofan);

@@ -725,6 +725,19 @@ void EmitWordCompareZero(InstructionSelectorT<Adapter>* selector,
                                  g.UseRegisterOrImmediateZero(value), cont);
 }
 
+#ifdef V8_TARGET_ARCH_RISCV64
+template <typename Adapter>
+void EmitWord32CompareZero(InstructionSelectorT<Adapter>* selector,
+                         typename Adapter::node_t value,
+                         FlagsContinuationT<Adapter>* cont) {
+  RiscvOperandGeneratorT<Adapter> g(selector);
+  InstructionOperand inputs[] = {g.UseRegisterOrImmediateZero(value)};
+  InstructionOperand temps[] = {g.TempRegister()};
+  selector->EmitWithContinuation(kRiscvCmpZero32, 0, nullptr, arraysize(inputs),
+                                 inputs, arraysize(temps), temps, cont);
+}
+#endif
+
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitFloat32Equal(node_t node) {
@@ -2386,15 +2399,7 @@ template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitSetStackPointer(node_t node) {
   OperandGenerator g(this);
   auto input = g.UseRegister(this->input_at(node, 0));
-  wasm::FPRelativeScope fp_scope;
-  if constexpr (Adapter::IsTurboshaft) {
-    fp_scope =
-        this->Get(node).template Cast<turboshaft::SetStackPointerOp>().fp_scope;
-  } else {
-    fp_scope = OpParameter<wasm::FPRelativeScope>(node->op());
-  }
-  Emit(kArchSetStackPointer | MiscField::encode(fp_scope), 0, nullptr, 1,
-       &input);
+  Emit(kArchSetStackPointer, 0, nullptr, 1, &input);
 }
 #endif
 }  // namespace compiler

@@ -274,18 +274,6 @@ v8_flag(
     default = True,
 )
 
-# Shared RO heap. Flag has to be set to false when
-# v8_enable_pointer_compression_shared_cage is set to false.
-v8_flag(
-    name = "v8_enable_shared_ro_heap",
-    default = True,
-)
-
-v8_flag(
-    name = "v8_enable_extensible_ro_snapshot",
-    default = True,
-)
-
 # Enable shared cage if v8_enable_pointer_compression
 # and v8_enable_pointer_compression_shared_cage.
 selects.config_setting_group(
@@ -429,6 +417,8 @@ v8_config(
         "V8_ADVANCED_BIGINT_ALGORITHMS",
         "V8_CONCURRENT_MARKING",
         "V8_ENABLE_SPARKPLUG",
+        "V8_MOVE_PROTOYPE_TRANSITIONS_FIRST", # (see issue 332914927).
+        "V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT",
     ] + select({
         "@v8//bazel/config:is_debug": [
             "DEBUG",
@@ -497,13 +487,13 @@ v8_config(
         ],
         "//conditions:default": [],
     }) + select({
-        ":is_v8_enable_shared_ro_heap": [
+        # Shared RO heap is unconfigurable in bazel. However, we
+        # still have to make sure that the flag is disabled when
+        # v8_enable_pointer_compression_shared_cage is set to false.
+        ":is_v8_enable_pointer_compression_shared_cage": [
             "V8_SHARED_RO_HEAP",
         ],
-    }) + select({
-        ":is_v8_enable_extensible_ro_snapshot": [
-            "V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT",
-        ],
+        "//conditions:default": [],
     }) + select({
         ":is_v8_enable_short_builtin_calls": [
             "V8_SHORT_BUILTIN_CALLS",
@@ -800,7 +790,9 @@ filegroup(
         "src/base/sys-info.cc",
         "src/base/sys-info.h",
         "src/base/template-meta-programming/algorithm.h",
+        "src/base/template-meta-programming/functional.h",
         "src/base/template-meta-programming/list.h",
+        "src/base/template-meta-programming/string-literal.h",
         "src/base/template-utils.h",
         "src/base/threaded-list.h",
         "src/base/timezone-cache.h",
@@ -1213,15 +1205,6 @@ filegroup(
     ],
 )
 
-# Default setting for v8_enable_pointer_compression when target is x64.
-selects.config_setting_group(
-    name = "is_v8_enable_webassembly_on_non_android_posix_x64",
-    match_all = [
-        ":is_v8_enable_webassembly",
-        "@v8//bazel/config:is_non_android_posix_x64",
-    ],
-)
-
 filegroup(
     name = "v8_base_without_compiler_files",
     srcs = [
@@ -1296,6 +1279,7 @@ filegroup(
         "src/builtins/builtins-date.cc",
         "src/builtins/builtins-definitions.h",
         "src/builtins/builtins-descriptors.h",
+        "src/builtins/builtins-disposable-stack.cc",
         "src/builtins/builtins-error.cc",
         "src/builtins/builtins-function.cc",
         "src/builtins/builtins-global.cc",
@@ -1413,6 +1397,7 @@ filegroup(
         "src/common/ptr-compr.cc",
         "src/common/ptr-compr.h",
         "src/common/ptr-compr-inl.h",
+        "src/common/simd128.h",
         "src/compiler-dispatcher/lazy-compile-dispatcher.cc",
         "src/compiler-dispatcher/lazy-compile-dispatcher.h",
         "src/compiler-dispatcher/optimizing-compile-dispatcher.cc",
@@ -1626,8 +1611,6 @@ filegroup(
         "src/heap/free-list.h",
         "src/heap/free-list-inl.h",
         "src/heap/gc-callbacks.h",
-        "src/heap/gc-idle-time-handler.cc",
-        "src/heap/gc-idle-time-handler.h",
         "src/heap/gc-tracer.cc",
         "src/heap/gc-tracer.h",
         "src/heap/gc-tracer-inl.h",
@@ -1653,9 +1636,9 @@ filegroup(
         "src/heap/incremental-marking-job.h",
         "src/heap/index-generator.cc",
         "src/heap/index-generator.h",
-        "src/heap/large-page.cc",
-        "src/heap/large-page.h",
-        "src/heap/large-page-inl.h",
+        "src/heap/large-page-metadata.cc",
+        "src/heap/large-page-metadata.h",
+        "src/heap/large-page-metadata-inl.h",
         "src/heap/large-spaces.cc",
         "src/heap/large-spaces.h",
         "src/heap/linear-allocation-area.h",
@@ -1694,12 +1677,12 @@ filegroup(
         "src/heap/memory-allocator.h",
         "src/heap/memory-balancer.cc",
         "src/heap/memory-balancer.h",
-        "src/heap/mutable-page.cc",
-        "src/heap/mutable-page.h",
+        "src/heap/mutable-page-metadata.cc",
+        "src/heap/mutable-page-metadata.h",
+        "src/heap/mutable-page-metadata-inl.h",
         "src/heap/memory-chunk.cc",
         "src/heap/memory-chunk.h",
         "src/heap/memory-chunk-inl.h",
-        "src/heap/mutable-page-inl.h",
         "src/heap/memory-chunk-layout.cc",
         "src/heap/memory-chunk-layout.h",
         "src/heap/memory-measurement.cc",
@@ -1719,9 +1702,9 @@ filegroup(
         "src/heap/objects-visiting.cc",
         "src/heap/objects-visiting.h",
         "src/heap/objects-visiting-inl.h",
-        "src/heap/page.cc",
-        "src/heap/page.h",
-        "src/heap/page-inl.h",
+        "src/heap/page-metadata.cc",
+        "src/heap/page-metadata.h",
+        "src/heap/page-metadata-inl.h",
         "src/heap/paged-spaces.cc",
         "src/heap/paged-spaces.h",
         "src/heap/paged-spaces-inl.h",
@@ -1800,8 +1783,8 @@ filegroup(
         "src/interpreter/bytecode-array-writer.h",
         "src/interpreter/bytecode-decoder.cc",
         "src/interpreter/bytecode-decoder.h",
-        "src/interpreter/bytecode-flags.cc",
-        "src/interpreter/bytecode-flags.h",
+        "src/interpreter/bytecode-flags-and-tokens.cc",
+        "src/interpreter/bytecode-flags-and-tokens.h",
         "src/interpreter/bytecode-generator.cc",
         "src/interpreter/bytecode-generator.h",
         "src/interpreter/bytecode-jump-table.h",
@@ -1968,6 +1951,7 @@ filegroup(
         "src/objects/js-collection-inl.h",
         "src/objects/js-collection-iterator.h",
         "src/objects/js-collection-iterator-inl.h",
+        "src/objects/js-disposable-stack.cc",
         "src/objects/js-disposable-stack.h",
         "src/objects/js-disposable-stack-inl.h",
         "src/objects/js-function.cc",
@@ -2304,6 +2288,10 @@ filegroup(
         "src/sandbox/external-pointer-table.cc",
         "src/sandbox/external-pointer-table.h",
         "src/sandbox/external-pointer-table-inl.h",
+        "src/sandbox/cppheap-pointer-inl.h",
+        "src/sandbox/cppheap-pointer-table.cc",
+        "src/sandbox/cppheap-pointer-table.h",
+        "src/sandbox/cppheap-pointer-table-inl.h",
         "src/sandbox/code-pointer-table.cc",
         "src/sandbox/code-pointer-table.h",
         "src/sandbox/code-pointer-table-inl.h",
@@ -2321,6 +2309,7 @@ filegroup(
         "src/sandbox/indirect-pointer-inl.h",
         "src/sandbox/code-entrypoint-tag.h",
         "src/sandbox/external-buffer.h",
+        "src/sandbox/external-buffer-tag.h",
         "src/sandbox/external-buffer-inl.h",
         "src/sandbox/external-buffer-table.cc",
         "src/sandbox/external-buffer-table-inl.h",
@@ -2331,6 +2320,7 @@ filegroup(
         "src/sandbox/sandbox.h",
         "src/sandbox/sandboxed-pointer.h",
         "src/sandbox/sandboxed-pointer-inl.h",
+        "src/sandbox/tagged-payload.h",
         "src/sandbox/testing.cc",
         "src/sandbox/testing.h",
         "src/snapshot/code-serializer.cc",
@@ -2413,6 +2403,7 @@ filegroup(
         "src/torque/runtime-macro-shims.h",
         "src/tracing/trace-event.cc",
         "src/tracing/trace-event.h",
+        "src/tracing/trace-event-no-perfetto.h",
         "src/tracing/traced-value.cc",
         "src/tracing/traced-value.h",
         "src/tracing/tracing-category-observer.cc",
@@ -2683,12 +2674,7 @@ filegroup(
             "src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h",
         ],
     }) + select({
-        # Only for x64 builds and for arm64 with x64 host simulator.
-        ":is_v8_enable_webassembly_on_non_android_posix_x64": [
-            "src/trap-handler/handler-inside-posix.cc",
-            "src/trap-handler/handler-outside-posix.cc",
-        ],
-        "@v8//bazel/config:is_macos_arm64": [
+        "@v8//bazel/config:is_posix": [
             "src/trap-handler/handler-inside-posix.cc",
             "src/trap-handler/handler-outside-posix.cc",
         ],
@@ -3215,6 +3201,8 @@ filegroup(
         "src/compiler/turboshaft/dataview-lowering-reducer.h",
         "src/compiler/turboshaft/code-elimination-and-simplification-phase.cc",
         "src/compiler/turboshaft/code-elimination-and-simplification-phase.h",
+        "src/compiler/turboshaft/copying-phase.cc",
+        "src/compiler/turboshaft/copying-phase.h",
         "src/compiler/turboshaft/dead-code-elimination-reducer.h",
         "src/compiler/turboshaft/debug-feature-lowering-phase.cc",
         "src/compiler/turboshaft/debug-feature-lowering-phase.h",
@@ -3267,12 +3255,12 @@ filegroup(
         "src/compiler/turboshaft/operations.cc",
         "src/compiler/turboshaft/operations.h",
         "src/compiler/turboshaft/opmasks.h",
-        "src/compiler/turboshaft/copying-phase.cc",
-        "src/compiler/turboshaft/copying-phase.h",
         "src/compiler/turboshaft/optimize-phase.cc",
         "src/compiler/turboshaft/optimize-phase.h",
         "src/compiler/turboshaft/phase.cc",
         "src/compiler/turboshaft/phase.h",
+        "src/compiler/turboshaft/pipelines.cc",
+        "src/compiler/turboshaft/pipelines.h",
         "src/compiler/turboshaft/pretenuring-propagation-reducer.cc",
         "src/compiler/turboshaft/pretenuring-propagation-reducer.h",
         "src/compiler/turboshaft/recreate-schedule.cc",
@@ -3280,6 +3268,7 @@ filegroup(
         "src/compiler/turboshaft/recreate-schedule-phase.cc",
         "src/compiler/turboshaft/recreate-schedule-phase.h",
         "src/compiler/turboshaft/reducer-traits.h",
+        "src/compiler/turboshaft/register-allocation-phase.h",
         "src/compiler/turboshaft/representations.cc",
         "src/compiler/turboshaft/representations.h",
         "src/compiler/turboshaft/required-optimization-reducer.h",
@@ -3322,6 +3311,7 @@ filegroup(
         "src/compiler/turboshaft/value-numbering-reducer.h",
         "src/compiler/turboshaft/variable-reducer.h",
         "src/compiler/turboshaft/wasm-js-lowering-reducer.h",
+        "src/compiler/turboshaft/zone-with-name.h",
         "src/compiler/type-cache.cc",
         "src/compiler/type-cache.h",
         "src/compiler/type-narrowing-reducer.cc",
@@ -3443,6 +3433,34 @@ filegroup(
             "src/compiler/wasm-typer.h",
         ],
         "//conditions:default": [],
+    }) + select({
+        # Turboshaft's Maglev graph builder needs some Maglev files. We only
+        # include them explicitely when Maglev is disabled.
+        ":enable_maglev": [],
+        "//conditions:default": [
+            "src/maglev/maglev-basic-block.h",
+            "src/maglev/maglev-code-gen-state.h",
+            "src/maglev/maglev-compilation-info.cc",
+            "src/maglev/maglev-compilation-info.h",
+            "src/maglev/maglev-compilation-unit.cc",
+            "src/maglev/maglev-compilation-unit.h",
+            "src/maglev/maglev-graph-builder.cc",
+            "src/maglev/maglev-graph-builder.h",
+            "src/maglev/maglev-graph.h",
+            "src/maglev/maglev-graph-labeller.h",
+            "src/maglev/maglev-graph-printer.cc",
+            "src/maglev/maglev-graph-printer.h",
+            "src/maglev/maglev-graph-processor.h",
+            "src/maglev/maglev-graph-verifier.h",
+            "src/maglev/maglev-interpreter-frame-state.cc",
+            "src/maglev/maglev-interpreter-frame-state.h",
+            "src/maglev/maglev-ir.cc",
+            "src/maglev/maglev-ir.h",
+            "src/maglev/maglev-ir-inl.h",
+            "src/maglev/maglev-register-frame-array.h",
+            "src/maglev/maglev-phi-representation-selector.cc",
+            "src/maglev/maglev-phi-representation-selector.h",
+        ],
     }),
 )
 
@@ -3537,34 +3555,6 @@ filegroup(
             "src/builtins/builtins-wasm-gen.h",
         ],
         "//conditions:default": [],
-    }) + select({
-        # Turboshaft's Maglev graph builder needs some Maglev files. We only
-        # include them explicitely when Maglev is disabled.
-        ":enable_maglev": [],
-        "//conditions:default": [
-            "src/maglev/maglev-basic-block.h",
-            "src/maglev/maglev-code-gen-state.h",
-            "src/maglev/maglev-compilation-info.cc",
-            "src/maglev/maglev-compilation-info.h",
-            "src/maglev/maglev-compilation-unit.cc",
-            "src/maglev/maglev-compilation-unit.h",
-            "src/maglev/maglev-graph-builder.cc",
-            "src/maglev/maglev-graph-builder.h",
-            "src/maglev/maglev-graph.h",
-            "src/maglev/maglev-graph-labeller.h",
-            "src/maglev/maglev-graph-printer.cc",
-            "src/maglev/maglev-graph-printer.h",
-            "src/maglev/maglev-graph-processor.h",
-            "src/maglev/maglev-graph-verifier.h",
-            "src/maglev/maglev-interpreter-frame-state.cc",
-            "src/maglev/maglev-interpreter-frame-state.h",
-            "src/maglev/maglev-ir.cc",
-            "src/maglev/maglev-ir.h",
-            "src/maglev/maglev-ir-inl.h",
-            "src/maglev/maglev-register-frame-array.h",
-            "src/maglev/maglev-phi-representation-selector.cc",
-            "src/maglev/maglev-phi-representation-selector.h",
-        ],
     }),
 )
 
@@ -4208,7 +4198,6 @@ v8_library(
     deps = [
         ":lib_fp16",
         ":v8_libbase",
-        "//external:base_trace_event_common",
         "//external:absl_btree",
         "//external:absl_flat_hash_map",
         "//external:absl_flat_hash_set",
@@ -4392,6 +4381,11 @@ alias(
 
 v8_build_config(
     name = "v8_build_config",
+    arch = select({
+        "//third_party/v8/v12_4/google3/config:v8_target_arm64": "arm64",
+        "//third_party/v8/v12_4/google3/config:v8_target_x64": "x64",
+        "//conditions:default": "x64",
+    }),
 )
 
 # Runs mjsunit with d8.
@@ -4409,6 +4403,15 @@ py_test(
         "--variant=google3_noicu",
         "--outdir noicu",
         "--verbose",
+    ] + select({
+        "//third_party/v8/v12_4/google3/config:v8_target_arm64": [
+            "--arch=arm64",
+        ],
+        "//third_party/v8/v12_4/google3/config:v8_target_x64": [
+            "--arch=x64",
+        ],
+        "//conditions:default": [],
+    }) + [
         "mjsunit",
     ],
     data = [
@@ -4439,6 +4442,15 @@ py_test(
         "--variant=google3_icu",
         "--outdir icu",
         "--verbose",
+    ] + select({
+        "//third_party/v8/v12_4/google3/config:v8_target_arm64": [
+            "--arch=arm64",
+        ],
+        "//third_party/v8/v12_4/google3/config:v8_target_x64": [
+            "--arch=x64",
+        ],
+        "//conditions:default": [],
+    }) + [
         "mjsunit",
     ],
     data = [

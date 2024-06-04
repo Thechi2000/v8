@@ -5,6 +5,7 @@
 #ifndef V8_OBJECTS_FIXED_ARRAY_H_
 #define V8_OBJECTS_FIXED_ARRAY_H_
 
+#include "src/common/globals.h"
 #include "src/handles/maybe-handles.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/instance-type.h"
@@ -847,7 +848,9 @@ class TrustedByteArray
   using Shape = TrustedByteArrayShape;
 
   template <class IsolateT>
-  static inline Handle<TrustedByteArray> New(IsolateT* isolate, int capacity);
+  static inline Handle<TrustedByteArray> New(
+      IsolateT* isolate, int capacity,
+      AllocationType allocation_type = AllocationType::kTrusted);
 
   // Given the full object size in bytes, return the length that should be
   // passed to New s.t. an object of the same size is created.
@@ -942,7 +945,6 @@ class ExternalPointerArray : public FixedArrayBase {
   inline Address get(int index, Isolate* isolate);
   template <ExternalPointerTag tag>
   inline void set(int index, Isolate* isolate, Address value);
-  inline void clear(int index);
 
   static inline Handle<ExternalPointerArray> New(
       Isolate* isolate, int length,

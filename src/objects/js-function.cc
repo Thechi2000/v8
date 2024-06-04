@@ -272,7 +272,8 @@ Maybe<bool> JSFunctionOrBoundFunctionOrWrappedFunction::CopyNameAndLength(
                                        Nothing<bool>());
       if (IsNumber(*target_length)) {
         length = isolate->factory()->NewNumber(std::max(
-            0.0, DoubleToInteger(Object::Number(*target_length)) - arg_count));
+            0.0,
+            DoubleToInteger(Object::NumberValue(*target_length)) - arg_count));
       }
     }
     LookupIterator it(isolate, function, isolate->factory()->length_string(),
@@ -337,8 +338,7 @@ MaybeHandle<String> JSBoundFunction::GetName(Isolate* isolate,
   // Concatenate the "bound " up to the last non-bound target.
   while (IsJSBoundFunction(function->bound_target_function())) {
     ASSIGN_RETURN_ON_EXCEPTION(isolate, target_name,
-                               factory->NewConsString(prefix, target_name),
-                               String);
+                               factory->NewConsString(prefix, target_name));
     function = handle(JSBoundFunction::cast(function->bound_target_function()),
                       isolate);
   }
@@ -346,8 +346,8 @@ MaybeHandle<String> JSBoundFunction::GetName(Isolate* isolate,
     Handle<JSWrappedFunction> target(
         JSWrappedFunction::cast(function->bound_target_function()), isolate);
     Handle<String> name;
-    ASSIGN_RETURN_ON_EXCEPTION(
-        isolate, name, JSWrappedFunction::GetName(isolate, target), String);
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, name,
+                               JSWrappedFunction::GetName(isolate, target));
     return factory->NewConsString(target_name, name);
   }
   if (IsJSFunction(function->bound_target_function())) {
@@ -398,7 +398,8 @@ Maybe<int> JSBoundFunction::GetLength(Isolate* isolate,
 }
 
 // static
-Handle<String> JSBoundFunction::ToString(Handle<JSBoundFunction> function) {
+Handle<String> JSBoundFunction::ToString(
+    DirectHandle<JSBoundFunction> function) {
   Isolate* const isolate = function->GetIsolate();
   return isolate->factory()->function_native_code_string();
 }
@@ -443,7 +444,8 @@ Maybe<int> JSWrappedFunction::GetLength(Isolate* isolate,
 }
 
 // static
-Handle<String> JSWrappedFunction::ToString(Handle<JSWrappedFunction> function) {
+Handle<String> JSWrappedFunction::ToString(
+    DirectHandle<JSWrappedFunction> function) {
   Isolate* const isolate = function->GetIsolate();
   return isolate->factory()->function_native_code_string();
 }
@@ -490,7 +492,8 @@ MaybeHandle<Object> JSWrappedFunction::Create(
     // constructor instead of the executing Realm's.
     Handle<JSFunction> type_error_function =
         Handle<JSFunction>(creation_context->type_error_function(), isolate);
-    Handle<String> string = Object::NoSideEffectsToString(isolate, exception);
+    DirectHandle<String> string =
+        Object::NoSideEffectsToString(isolate, exception);
     THROW_NEW_ERROR_RETURN_VALUE(
         isolate,
         NewError(type_error_function, MessageTemplate::kCannotWrap, string),
@@ -1082,7 +1085,7 @@ MaybeHandle<Map> JSFunction::GetDerivedMap(Isolate* isolate,
     Handle<String> prototype_string = isolate->factory()->prototype_string();
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, prototype,
-        JSReceiver::GetProperty(isolate, new_target, prototype_string), Map);
+        JSReceiver::GetProperty(isolate, new_target, prototype_string));
     // The above prototype lookup might change the constructor and its
     // prototype, hence we have to reload the initial map.
     EnsureHasInitialMap(constructor);
@@ -1096,7 +1099,7 @@ MaybeHandle<Map> JSFunction::GetDerivedMap(Isolate* isolate,
   if (!IsJSReceiver(*prototype)) {
     Handle<NativeContext> native_context;
     ASSIGN_RETURN_ON_EXCEPTION(isolate, native_context,
-                               JSReceiver::GetFunctionRealm(new_target), Map);
+                               JSReceiver::GetFunctionRealm(new_target));
     Handle<Object> maybe_index = JSReceiver::GetDataProperty(
         isolate, constructor,
         isolate->factory()->native_context_index_symbol());
@@ -1267,7 +1270,8 @@ bool JSFunction::SetName(Handle<JSFunction> function, Handle<Name> name,
     builder.AppendString(prefix);
     builder.AppendCharacter(' ');
     builder.AppendString(function_name);
-    ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, function_name, builder.Finish(),
+    ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, function_name,
+                                     indirect_handle(builder.Finish(), isolate),
                                      false);
   }
   RETURN_ON_EXCEPTION_VALUE(
@@ -1287,13 +1291,13 @@ Handle<String> NativeCodeFunctionSourceString(
   builder.AppendCStringLiteral("function ");
   builder.AppendString(handle(shared_info->Name(), isolate));
   builder.AppendCStringLiteral("() { [native code] }");
-  return builder.Finish().ToHandleChecked();
+  return indirect_handle(builder.Finish().ToHandleChecked(), isolate);
 }
 
 }  // namespace
 
 // static
-Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
+Handle<String> JSFunction::ToString(DirectHandle<JSFunction> function) {
   Isolate* const isolate = function->GetIsolate();
   Handle<SharedFunctionInfo> shared_info(function->shared(), isolate);
 
@@ -1305,7 +1309,8 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
   if (IsClassConstructor(shared_info->kind())) {
     // Check if we should print {function} as a class.
     Handle<Object> maybe_class_positions = JSReceiver::GetDataProperty(
-        isolate, function, isolate->factory()->class_positions_symbol());
+        isolate, indirect_handle(function, isolate),
+        isolate->factory()->class_positions_symbol());
     if (IsClassPositions(*maybe_class_positions)) {
       Tagged<ClassPositions> class_positions =
           ClassPositions::cast(*maybe_class_positions);
@@ -1329,7 +1334,7 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
   if (shared_info->HasWasmExportedFunctionData()) {
     Handle<WasmExportedFunctionData> function_data(
         shared_info->wasm_exported_function_data(), isolate);
-    const wasm::WasmModule* module = function_data->instance()->module();
+    const wasm::WasmModule* module = function_data->instance_data()->module();
     if (is_asmjs_module(module)) {
       std::pair<int, int> offsets =
           module->asm_js_offset_information->GetFunctionOffsets(

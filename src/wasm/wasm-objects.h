@@ -69,7 +69,8 @@ class Managed;
 
 class V8_EXPORT_PRIVATE FunctionTargetAndRef {
  public:
-  FunctionTargetAndRef(Handle<WasmInstanceObject> target_instance_object,
+  FunctionTargetAndRef(Isolate* isolate,
+                       Handle<WasmTrustedInstanceData> target_instance_data,
                        int target_func_index);
   // The "ref" will be a WasmTrustedInstanceData or a WasmApiFunctionRef.
   Handle<ExposedTrustedObject> ref() { return ref_; }
@@ -96,9 +97,8 @@ enum class OnResume : int { kContinue, kThrow };
 //      - target = entrypoint for the function
 class ImportedFunctionEntry {
  public:
-  inline ImportedFunctionEntry(Handle<WasmInstanceObject>, int index);
-  inline ImportedFunctionEntry(Isolate*, Handle<WasmTrustedInstanceData>,
-                               int index);
+  inline ImportedFunctionEntry(Isolate*, Handle<WasmInstanceObject>, int index);
+  inline ImportedFunctionEntry(Handle<WasmTrustedInstanceData>, int index);
 
   // Initialize this entry as a Wasm to JS call. This accepts the isolate as a
   // parameter, since it must allocate a tuple.
@@ -120,8 +120,7 @@ class ImportedFunctionEntry {
   void set_target(Address new_target);
 
  private:
-  // TODO(14499): Less back-and-forth between trusted and untrusted data.
-  Handle<WasmInstanceObject> const instance_object_;
+  Handle<WasmTrustedInstanceData> const instance_data_;
   int const index_;
 };
 
@@ -248,7 +247,7 @@ class WasmTableObject
   static void GetFunctionTableEntry(
       Isolate* isolate, const wasm::WasmModule* module,
       Handle<WasmTableObject> table, int entry_index, bool* is_valid,
-      bool* is_null, MaybeHandle<WasmInstanceObject>* instance_object,
+      bool* is_null, MaybeHandle<WasmTrustedInstanceData>* instance_data,
       int* function_index, MaybeHandle<WasmJSFunction>* maybe_js_function);
 
  private:
@@ -351,7 +350,6 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
 
   DECL_ACCESSORS(instance_object, Tagged<WasmInstanceObject>)
   DECL_ACCESSORS(native_context, Tagged<Context>)
-  // WasmTrustedInstanceData|Undefined
   DECL_ACCESSORS(memory_objects, Tagged<FixedArray>)
   DECL_OPTIONAL_ACCESSORS(untagged_globals_buffer, Tagged<JSArrayBuffer>)
   DECL_OPTIONAL_ACCESSORS(tagged_globals_buffer, Tagged<FixedArray>)
@@ -371,6 +369,7 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   DECL_ACCESSORS(well_known_imports, Tagged<FixedArray>)
   DECL_PRIMITIVE_ACCESSORS(memory0_start, uint8_t*)
   DECL_PRIMITIVE_ACCESSORS(memory0_size, size_t)
+  DECL_PRIMITIVE_ACCESSORS(native_module, wasm::NativeModule*)
   DECL_PRIMITIVE_ACCESSORS(new_allocation_limit_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(new_allocation_top_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(old_allocation_limit_address, Address*)
@@ -418,6 +417,7 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   V(kJumpTableStartOffset, kSystemPointerSize)                            \
   /* End of often-accessed fields. */                                     \
   /* Continue with system pointer size fields to maintain alignment. */   \
+  V(kNativeModuleOffset, kSystemPointerSize)                              \
   V(kNewAllocationLimitAddressOffset, kSystemPointerSize)                 \
   V(kNewAllocationTopAddressOffset, kSystemPointerSize)                   \
   V(kOldAllocationLimitAddressOffset, kSystemPointerSize)                 \
@@ -510,8 +510,6 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
                 "every tagged field offset needs a name");
   static_assert(kProtectedFieldOffsets.size() == kProtectedFieldNames.size(),
                 "every protected field offset needs a name");
-
-  const wasm::WasmModule* module();
 
   static void EnsureMinimumDispatchTableSize(
       Isolate* isolate, Handle<WasmTrustedInstanceData> trusted_instance_data,
@@ -762,14 +760,15 @@ bool UseGenericWasmToJSWrapper(wasm::ImportCallKind kind,
 // Representation of WebAssembly.Function JavaScript-level object.
 class WasmExportedFunction : public JSFunction {
  public:
-  Tagged<WasmInstanceObject> instance();
+  Tagged<WasmTrustedInstanceData> instance_data();
   V8_EXPORT_PRIVATE int function_index();
 
   V8_EXPORT_PRIVATE static bool IsWasmExportedFunction(Tagged<Object> object);
 
   V8_EXPORT_PRIVATE static Handle<WasmExportedFunction> New(
       Isolate* isolate, Handle<WasmTrustedInstanceData> instance_data,
-      Handle<WasmFuncRef> func_ref, int func_index, int arity,
+      Handle<WasmFuncRef> func_ref,
+      Handle<WasmInternalFunction> internal_function, int arity,
       Handle<Code> export_wrapper);
 
   Address GetWasmCallTarget();
@@ -843,15 +842,19 @@ class WasmExternalFunction : public JSFunction {
 };
 
 class WasmFunctionData
-    : public TorqueGeneratedWasmFunctionData<WasmFunctionData, HeapObject> {
+    : public TorqueGeneratedWasmFunctionData<WasmFunctionData,
+                                             ExposedTrustedObject> {
  public:
   DECL_CODE_POINTER_ACCESSORS(wrapper_code)
+  DECL_PROTECTED_POINTER_ACCESSORS(internal, WasmInternalFunction)
 
   DECL_PRINTER(WasmFunctionData)
 
-  using BodyDescriptor =
-      StackedBodyDescriptor<FixedBodyDescriptorFor<WasmFunctionData>,
-                            WithStrongCodePointer<kWrapperCodeOffset>>;
+  using BodyDescriptor = StackedBodyDescriptor<
+      FixedExposedTrustedObjectBodyDescriptor<
+          WasmFunctionData, kWasmFunctionDataIndirectPointerTag>,
+      WithStrongCodePointer<kWrapperCodeOffset>,
+      WithProtectedPointer<kProtectedInternalOffset>>;
 
   using SuspendField = base::BitField<wasm::Suspend, 0, 2>;
   using PromiseField = base::BitField<wasm::Promise, 2, 2>;
@@ -866,9 +869,10 @@ class WasmExportedFunctionData
     : public TorqueGeneratedWasmExportedFunctionData<WasmExportedFunctionData,
                                                      WasmFunctionData> {
  public:
+  DECL_PROTECTED_POINTER_ACCESSORS(instance_data, WasmTrustedInstanceData)
   DECL_CODE_POINTER_ACCESSORS(c_wrapper_code)
 
-  DECL_EXTERNAL_POINTER_ACCESSORS(sig, wasm::FunctionSig*)
+  DECL_PRIMITIVE_ACCESSORS(sig, const wasm::FunctionSig*)
 
   // Dispatched behavior.
   DECL_PRINTER(WasmExportedFunctionData)
@@ -877,7 +881,8 @@ class WasmExportedFunctionData
   using BodyDescriptor = StackedBodyDescriptor<
       SubclassBodyDescriptor<WasmFunctionData::BodyDescriptor,
                              FixedBodyDescriptorFor<WasmExportedFunctionData>>,
-      WithExternalPointer<kSigOffset, kWasmExportedFunctionDataSignatureTag>>;
+      WithProtectedPointer<kProtectedInstanceDataOffset>,
+      WithStrongCodePointer<kCWrapperCodeOffset>>;
 
   TQ_OBJECT_CONSTRUCTORS(WasmExportedFunctionData)
 };
@@ -1273,7 +1278,9 @@ class WasmNull : public TorqueGeneratedWasmNull<WasmNull, HeapObject> {
   static constexpr int kSize = kTaggedSize;
 #endif
 
-  using BodyDescriptor = FixedBodyDescriptorFor<WasmNull>;
+  // WasmNull cannot use `FixedBodyDescriptorFor()` as its map is variable size
+  // (not fixed size) as kSize is too large for a fixed-size map.
+  class BodyDescriptor;
 
   TQ_OBJECT_CONSTRUCTORS(WasmNull)
 };

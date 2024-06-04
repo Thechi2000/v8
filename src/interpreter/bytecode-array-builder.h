@@ -9,7 +9,7 @@
 #include "src/base/export-template.h"
 #include "src/common/globals.h"
 #include "src/interpreter/bytecode-array-writer.h"
-#include "src/interpreter/bytecode-flags.h"
+#include "src/interpreter/bytecode-flags-and-tokens.h"
 #include "src/interpreter/bytecode-register-allocator.h"
 #include "src/interpreter/bytecode-register.h"
 #include "src/interpreter/bytecode-source-info.h"
@@ -57,6 +57,11 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
 
   // Get the number of parameters expected by function.
   uint16_t parameter_count() const { return parameter_count_; }
+  uint16_t max_arguments() const { return max_arguments_; }
+
+  void UpdateMaxArguments(uint16_t max_arguments) {
+    max_arguments_ = std::max(max_arguments_, max_arguments);
+  }
 
   // Get the number of locals required for bytecode array.
   int locals_count() const {
@@ -384,7 +389,7 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
 
   // Unary Operators.
   BytecodeArrayBuilder& LogicalNot(ToBooleanMode mode);
-  BytecodeArrayBuilder& TypeOf();
+  BytecodeArrayBuilder& TypeOf(int feedback_slot);
 
   // Expects a heap object in the accumulator. Returns its super constructor in
   // the register |out| if it passes the IsConstructor test. Otherwise, it
@@ -659,6 +664,7 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
   ConstantArrayBuilder constant_array_builder_;
   HandlerTableBuilder handler_table_builder_;
   uint16_t parameter_count_;
+  uint16_t max_arguments_;
   int local_register_count_;
   BytecodeRegisterAllocator register_allocator_;
   BytecodeArrayWriter bytecode_array_writer_;

@@ -1985,7 +1985,7 @@ void V8FileLogger::ICEvent(const char* type, bool keyed, Handle<Map> map,
   if (IsSmi(*key)) {
     msg << Smi::ToInt(*key);
   } else if (IsNumber(*key)) {
-    msg << Object::Number(*key);
+    msg << Object::NumberValue(*key);
   } else if (IsName(*key)) {
     msg << Name::cast(*key);
   }
@@ -2104,8 +2104,7 @@ EnumerateCompiledFunctions(Heap* heap) {
 #if V8_ENABLE_WEBASSEMBLY
       } else if (WasmJSFunction::IsWasmJSFunction(function)) {
         Tagged<WasmInternalFunction> internal_function =
-            function->shared()->wasm_js_function_data()->func_ref()->internal(
-                isolate);
+            function->shared()->wasm_js_function_data()->internal();
         Tagged<WasmApiFunctionRef> api_function_ref =
             WasmApiFunctionRef::cast(internal_function->ref());
         record(function->shared(),

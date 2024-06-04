@@ -9,7 +9,7 @@
 #include "src/common/globals.h"
 #include "src/handles/global-handles-inl.h"
 #include "src/heap/heap-inl.h"  // For Space::identity().
-#include "src/heap/mutable-page-inl.h"
+#include "src/heap/mutable-page-metadata-inl.h"
 #include "src/heap/read-only-heap.h"
 #include "src/objects/code.h"
 #include "src/objects/descriptor-array.h"
@@ -659,17 +659,6 @@ void Serializer::ObjectSerializer::SerializeJSArrayBuffer() {
     // Ensure deterministic output by setting extension to null during
     // serialization.
     buffer->set_extension(nullptr);
-
-#ifdef V8_COMPRESS_POINTERS
-    // With the above, we're effectively temporarily releasing ownership of the
-    // extension, so we should also invalidate it's entry in the external
-    // pointer table. Failure to do this here would result in DCHECK failures
-    // as set_extension takes ownership of the extension and verifies that
-    // there isn't already an owner.
-    if (extension) {
-      extension->ZapExternalPointerTableEntry();
-    }
-#endif  // V8_COMPRESS_POINTERS
   }
   SerializeObject();
   {
@@ -901,6 +890,12 @@ SnapshotSpace GetSnapshotSpace(Tagged<HeapObject> object) {
         return SnapshotSpace::kCode;
       case TRUSTED_SPACE:
       case TRUSTED_LO_SPACE:
+        return SnapshotSpace::kTrusted;
+      // Shared objects are currently encoded as 'trusteds' snapshot objects.
+      // This basically duplicates shared trusted heap objects for each isolate
+      // again.
+      case SHARED_TRUSTED_SPACE:
+      case SHARED_TRUSTED_LO_SPACE:
         return SnapshotSpace::kTrusted;
       case CODE_LO_SPACE:
       case RO_SPACE:

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <list>
 #include <memory>
 #include <queue>
 #include <unordered_map>
@@ -41,6 +42,7 @@
 #include "src/objects/debug-objects.h"
 #include "src/objects/js-objects.h"
 #include "src/objects/tagged.h"
+#include "src/objects/waiter-queue-node.h"
 #include "src/runtime/runtime.h"
 #include "src/sandbox/code-pointer-table.h"
 #include "src/sandbox/external-buffer-table.h"
@@ -172,6 +174,9 @@ class Interpreter;
 namespace compiler {
 class NodeObserver;
 class PerIsolateCompilerCache;
+namespace turboshaft {
+class WasmRevecVerifier;
+}  // namespace turboshaft
 }  // namespace compiler
 
 namespace win64_unwindinfo {
@@ -217,8 +222,8 @@ class WasmOrphanedGlobalHandle;
 #define RETURN_VALUE_IF_EXCEPTION_DETECTOR(isolate, detector, value) \
   RETURN_VALUE_IF_EXCEPTION(isolate, (detector.AcceptSideEffects(), value))
 
-#define RETURN_EXCEPTION_IF_EXCEPTION(isolate, T) \
-  RETURN_VALUE_IF_EXCEPTION(isolate, MaybeHandle<T>())
+#define RETURN_EXCEPTION_IF_EXCEPTION(isolate) \
+  RETURN_VALUE_IF_EXCEPTION(isolate, kNullMaybeHandle)
 
 #define MAYBE_RETURN_ON_EXCEPTION_VALUE(isolate, call, value) \
   do {                                                        \
@@ -248,7 +253,7 @@ class WasmOrphanedGlobalHandle;
  */
 #define RETURN_RESULT_OR_FAILURE(isolate, call)      \
   do {                                               \
-    Handle<Object> __result__;                       \
+    DirectHandle<Object> __result__;                 \
     Isolate* __isolate__ = (isolate);                \
     if (!(call).ToHandle(&__result__)) {             \
       DCHECK(__isolate__->has_exception());          \
@@ -273,14 +278,8 @@ class WasmOrphanedGlobalHandle;
                                      ReadOnlyRoots(__isolate__).exception()); \
   } while (false)
 
-#define ASSIGN_RETURN_ON_EXCEPTION(isolate, dst, call, T) \
-  ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, dst, call, MaybeHandle<T>())
-
-#define THROW_NEW_ERROR(isolate, call, T)                                \
-  do {                                                                   \
-    auto* __isolate__ = (isolate);                                       \
-    return __isolate__->template Throw<T>(__isolate__->factory()->call); \
-  } while (false)
+#define ASSIGN_RETURN_ON_EXCEPTION(isolate, dst, call) \
+  ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, dst, call, kNullMaybeHandle)
 
 #define THROW_NEW_ERROR_RETURN_FAILURE(isolate, call)         \
   do {                                                        \
@@ -294,6 +293,9 @@ class WasmOrphanedGlobalHandle;
     __isolate__->Throw(*__isolate__->factory()->call);     \
     return value;                                          \
   } while (false)
+
+#define THROW_NEW_ERROR(isolate, call) \
+  THROW_NEW_ERROR_RETURN_VALUE(isolate, call, kNullMaybeHandle)
 
 /**
  * RETURN_ON_EXCEPTION_VALUE conditionally returns the given value when the
@@ -380,8 +382,8 @@ class WasmOrphanedGlobalHandle;
  * If inside a function with return type
  * Maybe<X> or Handle<X>, use RETURN_ON_EXCEPTION_VALUE instead.
  */
-#define RETURN_ON_EXCEPTION(isolate, call, T) \
-  RETURN_ON_EXCEPTION_VALUE(isolate, call, MaybeHandle<T>())
+#define RETURN_ON_EXCEPTION(isolate, call) \
+  RETURN_ON_EXCEPTION_VALUE(isolate, call, kNullMaybeHandle)
 
 #define RETURN_FAILURE(isolate, should_throw, call) \
   do {                                              \
@@ -497,9 +499,7 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(OOMErrorCallback, oom_behavior, nullptr)                                  \
   V(LogEventCallback, event_logger, nullptr)                                  \
   V(AllowCodeGenerationFromStringsCallback, allow_code_gen_callback, nullptr) \
-  V(ModifyCodeGenerationFromStringsCallback, modify_code_gen_callback,        \
-    nullptr)                                                                  \
-  V(ModifyCodeGenerationFromStringsCallback2, modify_code_gen_callback2,      \
+  V(ModifyCodeGenerationFromStringsCallback2, modify_code_gen_callback,       \
     nullptr)                                                                  \
   V(AllowWasmCodeGenerationCallback, allow_wasm_code_gen_callback, nullptr)   \
   V(ExtensionCallback, wasm_module_callback, &NoExtension)                    \
@@ -810,6 +810,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool IsWasmStringRefEnabled(Handle<NativeContext> context);
   bool IsWasmInliningEnabled(Handle<NativeContext> context);
   bool IsWasmImportedStringsEnabled(Handle<NativeContext> context);
+  // Has the JSPI flag been requested?
+  // Used only during initialization of contexts.
+  bool IsWasmJSPIRequested(Handle<NativeContext> context);
+  // Has JSPI been enabled successfully?
   bool IsWasmJSPIEnabled(Handle<NativeContext> context);
   bool IsCompileHintsMagicEnabled(Handle<NativeContext> context);
 
@@ -920,11 +924,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   static int ArchiveSpacePerThread() { return sizeof(ThreadLocalTop); }
   void FreeThreadResources() { thread_local_top()->Free(); }
 
-  // Push and pop a promise and the current try-catch handler.
-  void PushPromise(Handle<JSObject> promise);
-  void PopPromise();
-  bool IsPromiseStackEmpty() const;
-
   // Walks the call stack and promise tree and calls a callback on every
   // function an exception is likely to hit. Used in catch prediction.
   // Returns true if the exception is expected to be caught.
@@ -978,6 +977,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // source URL. The inspected frames are the same as for the detailed stack
   // trace.
   Handle<String> CurrentScriptNameOrSourceURL();
+  bool GetStackTraceLimit(Isolate* isolate, int* result);
 
   Address GetAbstractPC(int* line, int* column);
 
@@ -997,19 +997,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
                        MessageLocation* location = nullptr);
   Tagged<Object> ThrowAt(Handle<JSObject> exception, MessageLocation* location);
   Tagged<Object> ThrowIllegalOperation();
-
-  template <typename T>
-  V8_WARN_UNUSED_RESULT MaybeHandle<T> Throw(Handle<Object> exception) {
-    Throw(*exception);
-    return MaybeHandle<T>();
-  }
-
-  template <typename T>
-  V8_WARN_UNUSED_RESULT MaybeHandle<T> ThrowAt(Handle<JSObject> exception,
-                                               MessageLocation* location) {
-    ThrowAt(exception, location);
-    return MaybeHandle<T>();
-  }
 
   void FatalProcessOutOfHeapMemory(const char* location) {
     heap()->FatalProcessOutOfMemory(location);
@@ -1213,7 +1200,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // data (for example, roots, external references, builtins, etc.).
   // The kRootRegister is set to this value.
   Address isolate_root() const { return isolate_data()->isolate_root(); }
-  static size_t isolate_root_bias() {
+  constexpr static size_t isolate_root_bias() {
     return OFFSET_OF(Isolate, isolate_data_) + IsolateData::kIsolateRootBias;
   }
   static Isolate* FromRootAddress(Address isolate_root) {
@@ -1297,6 +1284,14 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
         OFFSET_OF(Isolate, isolate_data_) +
         OFFSET_OF(IsolateData, thread_local_top_) +
         OFFSET_OF(ThreadLocalTop, thread_in_wasm_flag_address_) -
+        isolate_root_bias());
+  }
+
+  constexpr static uint32_t context_offset() {
+    return static_cast<uint32_t>(
+        OFFSET_OF(Isolate, isolate_data_) +
+        OFFSET_OF(IsolateData, thread_local_top_) +
+        OFFSET_OF(ThreadLocalTop, context_) -
         isolate_root_bias());
   }
 
@@ -2085,11 +2080,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
         &isolate_data_.shared_external_pointer_table_);
   }
 
-  ExternalPointerTable& cpp_heap_pointer_table() {
+  CppHeapPointerTable& cpp_heap_pointer_table() {
     return isolate_data_.cpp_heap_pointer_table_;
   }
 
-  const ExternalPointerTable& cpp_heap_pointer_table() const {
+  const CppHeapPointerTable& cpp_heap_pointer_table() const {
     return isolate_data_.cpp_heap_pointer_table_;
   }
 
@@ -2210,38 +2205,26 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return enable_ro_allocation_for_snapshot_;
   }
 
-  // If script calls quit(), then it is possible that the Isolate is disposed
-  // without giving on-stack objects any chance to clean up after themselves. By
-  // inheriting from this class, a class ensures that its destructor will be
-  // called before Isolate::Dispose.
-  class ToDestroyBeforeSuddenShutdown {
-   public:
-    explicit ToDestroyBeforeSuddenShutdown(Isolate* isolate);
-    virtual ~ToDestroyBeforeSuddenShutdown();
-
-    // This class only supports being allocated on the stack.
-    void* operator new(size_t) = delete;
-    void* operator new(size_t, void*) = delete;
-
-    // Copying is not allowed.
-    ToDestroyBeforeSuddenShutdown(const ToDestroyBeforeSuddenShutdown& other) =
-        delete;
-    ToDestroyBeforeSuddenShutdown& operator=(
-        const ToDestroyBeforeSuddenShutdown& other) = delete;
-
-    Isolate* isolate() const { return isolate_; }
-
-   private:
-    Isolate* isolate_;
-  };
-
-  // Called by d8 right before Dispose, if the shell is quitting with a dirty
-  // stack.
-  void PrepareForSuddenShutdown();
-
   void set_battery_saver_mode_enabled(bool battery_saver_mode_enabled) {
     battery_saver_mode_enabled_ = battery_saver_mode_enabled;
   }
+
+  std::list<std::unique_ptr<detail::WaiterQueueNode>>&
+  async_waiter_queue_nodes();
+
+  detail::SyncWaiterQueueNode* blocking_sync_waiter_queue_node();
+
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+  void set_wasm_revec_verifier_for_test(
+      compiler::turboshaft::WasmRevecVerifier* verifier) {
+    wasm_revec_verifier_for_test_ = verifier;
+  }
+
+  compiler::turboshaft::WasmRevecVerifier* wasm_revec_verifier_for_test()
+      const {
+    return wasm_revec_verifier_for_test_;
+  }
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
  private:
   explicit Isolate(IsolateGroup* isolate_group);
@@ -2695,6 +2678,14 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   ExternalBufferTable::Space* shared_external_buffer_space_ = nullptr;
 #endif  // V8_ENABLE_SANDBOX
 
+  // List to manage the lifetime of the WaiterQueueNodes used to track async
+  // waiters for JSSynchronizationPrimitives.
+  std::list<std::unique_ptr<detail::WaiterQueueNode>> async_waiter_queue_nodes_;
+  // The SyncWaiterQueueNode reused by all Atomics.Mutex.lock and
+  // Atomics.Condition.wait calls in this thread when the thread is put to
+  // sleep.
+  std::unique_ptr<detail::SyncWaiterQueueNode> blocking_sync_waiter_queue_node_;
+
   // Used to track and safepoint all client isolates attached to this shared
   // isolate.
   std::unique_ptr<GlobalSafepoint> global_safepoint_;
@@ -2721,8 +2712,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // in case of a crash.
   AddCrashKeyCallback add_crash_key_callback_ = nullptr;
 
-  std::vector<ToDestroyBeforeSuddenShutdown*>
-      to_destroy_before_sudden_shutdown_;
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+  compiler::turboshaft::WasmRevecVerifier* wasm_revec_verifier_for_test_ =
+      nullptr;
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
   // Delete new/delete operators to ensure that Isolate::New() and
   // Isolate::Delete() are used for Isolate creation and deletion.

@@ -318,9 +318,8 @@ void TrySettingEmptyEnumCache(Tagged<JSReceiver> object) {
   Tagged<Map> map = object->map();
   DCHECK_EQ(kInvalidEnumCacheSentinel, map->EnumLength());
   if (!map->OnlyHasSimpleProperties()) return;
-  if (IsJSProxyMap(map)) return;
+  DCHECK(IsJSObjectMap(map));  // Implied by {OnlyHasSimpleProperties}.
   if (map->NumberOfEnumerableProperties() > 0) return;
-  DCHECK(IsJSObject(object));
   map->SetEnumLength(0);
 }
 
@@ -619,7 +618,7 @@ MaybeHandle<FixedArray> FastKeyAccumulator::GetKeysWithPrototypeInfoCache(
           isolate_, Handle<JSObject>::cast(receiver_), keys_conversion,
           skip_indices_);
     }
-    ASSIGN_RETURN_ON_EXCEPTION(isolate_, own_keys, maybe_own_keys, FixedArray);
+    ASSIGN_RETURN_ON_EXCEPTION(isolate_, own_keys, maybe_own_keys);
   } else {
     own_keys = KeyAccumulator::GetOwnEnumPropertyKeys(
         isolate_, Handle<JSObject>::cast(receiver_));

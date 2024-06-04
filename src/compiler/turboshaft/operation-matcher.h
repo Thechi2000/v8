@@ -71,7 +71,7 @@ class OperationMatcher {
     const ConstantOp* op = TryCast<ConstantOp>(matched);
     if (!op) return false;
     if (op->kind != ConstantOp::Kind::kFloat32) return false;
-    *constant = op->float32();
+    *constant = op->storage.float32;
     return true;
   }
 
@@ -79,7 +79,7 @@ class OperationMatcher {
     const ConstantOp* op = TryCast<ConstantOp>(matched);
     if (!op) return false;
     if (op->kind != ConstantOp::Kind::kFloat64) return false;
-    *constant = op->float64();
+    *constant = op->storage.float64;
     return true;
   }
 
@@ -87,10 +87,10 @@ class OperationMatcher {
     const ConstantOp* op = TryCast<ConstantOp>(matched);
     if (!op) return false;
     if (op->kind == ConstantOp::Kind::kFloat64) {
-      *value = op->float64();
+      *value = op->storage.float64;
       return true;
     } else if (op->kind == ConstantOp::Kind::kFloat32) {
-      *value = op->float32();
+      *value = op->storage.float32;
       return true;
     }
     return false;
@@ -318,26 +318,14 @@ class OperationMatcher {
     return false;
   }
 
-  bool MatchEqual(OpIndex matched, OpIndex* left, OpIndex* right,
-                  WordRepresentation rep) const {
+  template <typename T>
+  bool MatchEqual(OpIndex matched, V<T>* left, V<T>* right) const {
     const ComparisonOp* op = TryCast<ComparisonOp>(matched);
-    if (!op || op->kind != ComparisonOp::Kind::kEqual || rep != op->rep) {
+    if (!op || op->kind != ComparisonOp::Kind::kEqual || op->rep != V<T>::rep) {
       return false;
     }
-    *left = op->left();
-    *right = op->right();
-    return true;
-  }
-
-  bool MatchComparison(OpIndex matched, OpIndex* left, OpIndex* right,
-                       ComparisonOp::Kind* kind,
-                       RegisterRepresentation* rep) const {
-    const ComparisonOp* op = TryCast<ComparisonOp>(matched);
-    if (!op) return false;
-    *kind = op->kind;
-    *rep = op->rep;
-    *left = op->left();
-    *right = op->right();
+    *left = V<T>::Cast(op->left());
+    *right = V<T>::Cast(op->right());
     return true;
   }
 

@@ -240,7 +240,7 @@ Handle<Object> Object::NewStorageFor(Isolate* isolate, Handle<Object> object,
     // Ensure that all bits of the double value are preserved.
     result->set_value_as_bits(HeapNumber::cast(*object)->value_as_bits());
   } else {
-    result->set_value(Object::Number(*object));
+    result->set_value(Object::NumberValue(*object));
   }
   return result;
 }
@@ -264,7 +264,7 @@ template Handle<Object> Object::WrapForRead<AllocationType::kOld>(
     Representation representation);
 
 MaybeHandle<JSReceiver> Object::ToObjectImpl(Isolate* isolate,
-                                             Handle<Object> object,
+                                             DirectHandle<Object> object,
                                              const char* method_name) {
   DCHECK(!IsJSReceiver(*object));  // Use ToObject() for fast path.
   Handle<Context> native_context = isolate->native_context();
@@ -272,20 +272,18 @@ MaybeHandle<JSReceiver> Object::ToObjectImpl(Isolate* isolate,
   if (IsSmi(*object)) {
     constructor = handle(native_context->number_function(), isolate);
   } else {
-    int constructor_function_index =
-        Handle<HeapObject>::cast(object)->map()->GetConstructorFunctionIndex();
+    int constructor_function_index = DirectHandle<HeapObject>::cast(object)
+                                         ->map()
+                                         ->GetConstructorFunctionIndex();
     if (constructor_function_index == Map::kNoConstructorFunctionIndex) {
       if (method_name != nullptr) {
         THROW_NEW_ERROR(
-            isolate,
-            NewTypeError(
-                MessageTemplate::kCalledOnNullOrUndefined,
-                isolate->factory()->NewStringFromAsciiChecked(method_name)),
-            JSReceiver);
+            isolate, NewTypeError(MessageTemplate::kCalledOnNullOrUndefined,
+                                  isolate->factory()->NewStringFromAsciiChecked(
+                                      method_name)));
       }
       THROW_NEW_ERROR(isolate,
-                      NewTypeError(MessageTemplate::kUndefinedOrNullToObject),
-                      JSReceiver);
+                      NewTypeError(MessageTemplate::kUndefinedOrNullToObject));
     }
     constructor = handle(
         JSFunction::cast(native_context->get(constructor_function_index)),
@@ -322,20 +320,17 @@ MaybeHandle<Object> Object::ConvertToNumberOrNumeric(Isolate* isolate,
       return Oddball::ToNumber(isolate, Handle<Oddball>::cast(input));
     }
     if (IsSymbol(*input)) {
-      THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kSymbolToNumber),
-                      Object);
+      THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kSymbolToNumber));
     }
     if (IsBigInt(*input)) {
       if (mode == Conversion::kToNumeric) return input;
       DCHECK_EQ(mode, Conversion::kToNumber);
-      THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kBigIntToNumber),
-                      Object);
+      THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kBigIntToNumber));
     }
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, input,
         JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(input),
-                                ToPrimitiveHint::kNumber),
-        Object);
+                                ToPrimitiveHint::kNumber));
   }
 }
 
@@ -344,9 +339,10 @@ MaybeHandle<Object> Object::ConvertToInteger(Isolate* isolate,
                                              Handle<Object> input) {
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, input,
-      ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber), Object);
+      ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber));
   if (IsSmi(*input)) return input;
-  return isolate->factory()->NewNumber(DoubleToInteger(Object::Number(*input)));
+  return isolate->factory()->NewNumber(
+      DoubleToInteger(Object::NumberValue(*input)));
 }
 
 // static
@@ -354,10 +350,10 @@ MaybeHandle<Object> Object::ConvertToInt32(Isolate* isolate,
                                            Handle<Object> input) {
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, input,
-      ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber), Object);
+      ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber));
   if (IsSmi(*input)) return input;
   return isolate->factory()->NewNumberFromInt(
-      DoubleToInt32(Object::Number(*input)));
+      DoubleToInt32(Object::NumberValue(*input)));
 }
 
 // static
@@ -365,11 +361,11 @@ MaybeHandle<Object> Object::ConvertToUint32(Isolate* isolate,
                                             Handle<Object> input) {
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, input,
-      ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber), Object);
+      ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber));
   if (IsSmi(*input))
     return handle(Smi::ToUint32Smi(Smi::cast(*input)), isolate);
   return isolate->factory()->NewNumberFromUint(
-      DoubleToUint32(Object::Number(*input)));
+      DoubleToUint32(Object::NumberValue(*input)));
 }
 
 // static
@@ -377,7 +373,7 @@ MaybeHandle<Name> Object::ConvertToName(Isolate* isolate,
                                         Handle<Object> input) {
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, input,
-      Object::ToPrimitive(isolate, input, ToPrimitiveHint::kString), Name);
+      Object::ToPrimitive(isolate, input, ToPrimitiveHint::kString));
   if (IsName(*input)) return Handle<Name>::cast(input);
   return ToString(isolate, input);
 }
@@ -418,8 +414,7 @@ MaybeHandle<String> Object::ConvertToString(Isolate* isolate,
       return isolate->factory()->NumberToString(input);
     }
     if (IsSymbol(*input)) {
-      THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kSymbolToString),
-                      String);
+      THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kSymbolToString));
     }
     if (IsBigInt(*input)) {
       return BigInt::ToString(isolate, Handle<BigInt>::cast(input));
@@ -434,8 +429,7 @@ MaybeHandle<String> Object::ConvertToString(Isolate* isolate,
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, input,
         JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(input),
-                                ToPrimitiveHint::kString),
-        String);
+                                ToPrimitiveHint::kString));
     // The previous isString() check happened in Object::ToString and thus we
     // put it at the end of the loop in this helper.
     if (IsString(*input)) {
@@ -457,8 +451,8 @@ Handle<String> AsStringOrEmpty(Isolate* isolate, Handle<Object> object) {
                            : isolate->factory()->empty_string();
 }
 
-Handle<String> NoSideEffectsErrorToString(Isolate* isolate,
-                                          Handle<JSReceiver> error) {
+DirectHandle<String> NoSideEffectsErrorToString(Isolate* isolate,
+                                                Handle<JSReceiver> error) {
   Handle<Name> name_key = isolate->factory()->name_string();
   Handle<Object> name = JSReceiver::GetDataProperty(isolate, error, name_key);
   Handle<String> name_str = AsStringOrEmpty(isolate, name);
@@ -499,33 +493,35 @@ Handle<String> NoSideEffectsErrorToString(Isolate* isolate,
 }  // namespace
 
 // static
-MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
-                                                       Handle<Object> input) {
+MaybeDirectHandle<String> Object::NoSideEffectsToMaybeString(
+    Isolate* isolate, DirectHandle<Object> input) {
   DisallowJavascriptExecution no_js(isolate);
 
   if (IsString(*input) || IsNumber(*input) || IsOddball(*input)) {
     return Object::ToString(isolate, input).ToHandleChecked();
   } else if (IsJSProxy(*input)) {
-    Handle<Object> currInput = input;
+    DirectHandle<Object> currInput = input;
     do {
       Tagged<HeapObject> target =
-          Handle<JSProxy>::cast(currInput)->target(isolate);
-      currInput = Handle<Object>(target, isolate);
+          DirectHandle<JSProxy>::cast(currInput)->target(isolate);
+      currInput = direct_handle(target, isolate);
     } while (IsJSProxy(*currInput));
     return NoSideEffectsToString(isolate, currInput);
   } else if (IsBigInt(*input)) {
-    return BigInt::NoSideEffectsToString(isolate, Handle<BigInt>::cast(input));
+    return BigInt::NoSideEffectsToString(isolate,
+                                         DirectHandle<BigInt>::cast(input));
   } else if (IsJSFunctionOrBoundFunctionOrWrappedFunction(*input)) {
     // -- F u n c t i o n
     Handle<String> fun_str;
     if (IsJSBoundFunction(*input)) {
-      fun_str = JSBoundFunction::ToString(Handle<JSBoundFunction>::cast(input));
-    } else if (IsJSWrappedFunction(*input)) {
       fun_str =
-          JSWrappedFunction::ToString(Handle<JSWrappedFunction>::cast(input));
+          JSBoundFunction::ToString(DirectHandle<JSBoundFunction>::cast(input));
+    } else if (IsJSWrappedFunction(*input)) {
+      fun_str = JSWrappedFunction::ToString(
+          DirectHandle<JSWrappedFunction>::cast(input));
     } else {
       DCHECK(IsJSFunction(*input));
-      fun_str = JSFunction::ToString(Handle<JSFunction>::cast(input));
+      fun_str = JSFunction::ToString(DirectHandle<JSFunction>::cast(input));
     }
 
     if (fun_str->length() > 128) {
@@ -540,10 +536,10 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
     return fun_str;
   } else if (IsSymbol(*input)) {
     // -- S y m b o l
-    Handle<Symbol> symbol = Handle<Symbol>::cast(input);
+    DirectHandle<Symbol> symbol = DirectHandle<Symbol>::cast(input);
 
     if (symbol->is_private_name()) {
-      return Handle<String>(String::cast(symbol->description()), isolate);
+      return DirectHandle<String>(String::cast(symbol->description()), isolate);
     }
 
     IncrementalStringBuilder builder(isolate);
@@ -566,22 +562,22 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
     return builder.Finish().ToHandleChecked();
   } else if (IsJSReceiver(*input)) {
     // -- J S R e c e i v e r
-    Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(input);
+    Handle<Object> indirect_input = indirect_handle(input, isolate);
+    Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(indirect_input);
     Handle<Object> to_string = JSReceiver::GetDataProperty(
         isolate, receiver, isolate->factory()->toString_string());
 
-    if (IsErrorObject(isolate, input) ||
+    if (IsErrorObject(isolate, indirect_input) ||
         *to_string == *isolate->error_to_string()) {
       // When internally formatting error objects, use a side-effects-free
       // version of Error.prototype.toString independent of the actually
       // installed toString method.
-      return NoSideEffectsErrorToString(isolate,
-                                        Handle<JSReceiver>::cast(input));
+      return NoSideEffectsErrorToString(isolate, receiver);
     } else if (*to_string == *isolate->object_to_string()) {
       Handle<Object> ctor = JSReceiver::GetDataProperty(
           isolate, receiver, isolate->factory()->constructor_string());
       if (IsJSFunctionOrBoundFunctionOrWrappedFunction(*ctor)) {
-        Handle<String> ctor_name;
+        DirectHandle<String> ctor_name;
         if (IsJSBoundFunction(*ctor)) {
           ctor_name = JSBoundFunction::GetName(
                           isolate, Handle<JSBoundFunction>::cast(ctor))
@@ -602,17 +598,18 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
       }
     }
   }
-  return MaybeHandle<String>(kNullMaybeHandle);
+  return {};
 }
 
 // static
-Handle<String> Object::NoSideEffectsToString(Isolate* isolate,
-                                             Handle<Object> input) {
+DirectHandle<String> Object::NoSideEffectsToString(Isolate* isolate,
+                                                   DirectHandle<Object> input) {
   DisallowJavascriptExecution no_js(isolate);
 
   // Try to convert input to a meaningful string.
-  MaybeHandle<String> maybe_string = NoSideEffectsToMaybeString(isolate, input);
-  Handle<String> string_handle;
+  MaybeDirectHandle<String> maybe_string =
+      NoSideEffectsToMaybeString(isolate, input);
+  DirectHandle<String> string_handle;
   if (maybe_string.ToHandle(&string_handle)) {
     return string_handle;
   }
@@ -621,12 +618,13 @@ Handle<String> Object::NoSideEffectsToString(Isolate* isolate,
 
   Handle<JSReceiver> receiver;
   if (IsJSReceiver(*input)) {
-    receiver = Handle<JSReceiver>::cast(input);
+    receiver = indirect_handle(DirectHandle<JSReceiver>::cast(input), isolate);
   } else {
     // This is the only case where Object::ToObject throws.
     DCHECK(!IsSmi(*input));
-    int constructor_function_index =
-        Handle<HeapObject>::cast(input)->map()->GetConstructorFunctionIndex();
+    int constructor_function_index = DirectHandle<HeapObject>::cast(input)
+                                         ->map()
+                                         ->GetConstructorFunctionIndex();
     if (constructor_function_index == Map::kNoConstructorFunctionIndex) {
       return isolate->factory()->NewStringFromAsciiChecked("[object Unknown]");
     }
@@ -634,11 +632,12 @@ Handle<String> Object::NoSideEffectsToString(Isolate* isolate,
     receiver = Object::ToObjectImpl(isolate, input).ToHandleChecked();
   }
 
-  Handle<String> builtin_tag = handle(receiver->class_name(), isolate);
-  Handle<Object> tag_obj = JSReceiver::GetDataProperty(
+  DirectHandle<String> builtin_tag =
+      direct_handle(receiver->class_name(), isolate);
+  DirectHandle<Object> tag_obj = JSReceiver::GetDataProperty(
       isolate, receiver, isolate->factory()->to_string_tag_symbol());
-  Handle<String> tag =
-      IsString(*tag_obj) ? Handle<String>::cast(tag_obj) : builtin_tag;
+  DirectHandle<String> tag =
+      IsString(*tag_obj) ? DirectHandle<String>::cast(tag_obj) : builtin_tag;
 
   IncrementalStringBuilder builder(isolate);
   builder.AppendCStringLiteral("[object ");
@@ -651,12 +650,12 @@ Handle<String> Object::NoSideEffectsToString(Isolate* isolate,
 // static
 MaybeHandle<Object> Object::ConvertToLength(Isolate* isolate,
                                             Handle<Object> input) {
-  ASSIGN_RETURN_ON_EXCEPTION(isolate, input, ToNumber(isolate, input), Object);
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, input, ToNumber(isolate, input));
   if (IsSmi(*input)) {
     int value = std::max(Smi::ToInt(*input), 0);
     return handle(Smi::FromInt(value), isolate);
   }
-  double len = DoubleToInteger(Object::Number(*input));
+  double len = DoubleToInteger(Object::NumberValue(*input));
   if (len <= 0.0) {
     return handle(Smi::zero(), isolate);
   } else if (len >= kMaxSafeInteger) {
@@ -670,12 +669,12 @@ MaybeHandle<Object> Object::ConvertToIndex(Isolate* isolate,
                                            Handle<Object> input,
                                            MessageTemplate error_index) {
   if (IsUndefined(*input, isolate)) return handle(Smi::zero(), isolate);
-  ASSIGN_RETURN_ON_EXCEPTION(isolate, input, ToNumber(isolate, input), Object);
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, input, ToNumber(isolate, input));
   if (IsSmi(*input) && Smi::ToInt(*input) >= 0) return input;
-  double len = DoubleToInteger(Object::Number(*input));
+  double len = DoubleToInteger(Object::NumberValue(*input));
   Handle<Object> js_len = isolate->factory()->NewNumber(len);
   if (len < 0.0 || len > kMaxSafeInteger) {
-    THROW_NEW_ERROR(isolate, NewRangeError(error_index, js_len), Object);
+    THROW_NEW_ERROR(isolate, NewRangeError(error_index, js_len));
   }
   return js_len;
 }
@@ -730,7 +729,7 @@ bool StrictNumberEquals(double x, double y) {
 }
 
 bool StrictNumberEquals(const Tagged<Object> x, const Tagged<Object> y) {
-  return StrictNumberEquals(Object::Number(x), Object::Number(y));
+  return StrictNumberEquals(Object::NumberValue(x), Object::NumberValue(y));
 }
 
 bool StrictNumberEquals(Handle<Object> x, Handle<Object> y) {
@@ -785,7 +784,8 @@ Maybe<ComparisonResult> Object::Compare(Isolate* isolate, Handle<Object> x,
   bool x_is_number = IsNumber(*x);
   bool y_is_number = IsNumber(*y);
   if (x_is_number && y_is_number) {
-    return Just(StrictNumberCompare(Object::Number(*x), Object::Number(*y)));
+    return Just(
+        StrictNumberCompare(Object::NumberValue(*x), Object::NumberValue(*y)));
   } else if (!x_is_number && !y_is_number) {
     return Just(BigInt::CompareToBigInt(Handle<BigInt>::cast(x),
                                         Handle<BigInt>::cast(y)));
@@ -932,30 +932,24 @@ Handle<String> Object::TypeOf(Isolate* isolate, Handle<Object> object) {
 MaybeHandle<Object> Object::Add(Isolate* isolate, Handle<Object> lhs,
                                 Handle<Object> rhs) {
   if (IsNumber(*lhs) && IsNumber(*rhs)) {
-    return isolate->factory()->NewNumber(Object::Number(*lhs) +
-                                         Object::Number(*rhs));
+    return isolate->factory()->NewNumber(Object::NumberValue(*lhs) +
+                                         Object::NumberValue(*rhs));
   } else if (IsString(*lhs) && IsString(*rhs)) {
     return isolate->factory()->NewConsString(Handle<String>::cast(lhs),
                                              Handle<String>::cast(rhs));
   }
-  ASSIGN_RETURN_ON_EXCEPTION(isolate, lhs, Object::ToPrimitive(isolate, lhs),
-                             Object);
-  ASSIGN_RETURN_ON_EXCEPTION(isolate, rhs, Object::ToPrimitive(isolate, rhs),
-                             Object);
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, lhs, Object::ToPrimitive(isolate, lhs));
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, rhs, Object::ToPrimitive(isolate, rhs));
   if (IsString(*lhs) || IsString(*rhs)) {
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, rhs, Object::ToString(isolate, rhs),
-                               Object);
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, lhs, Object::ToString(isolate, lhs),
-                               Object);
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, rhs, Object::ToString(isolate, rhs));
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, lhs, Object::ToString(isolate, lhs));
     return isolate->factory()->NewConsString(Handle<String>::cast(lhs),
                                              Handle<String>::cast(rhs));
   }
-  ASSIGN_RETURN_ON_EXCEPTION(isolate, rhs, Object::ToNumber(isolate, rhs),
-                             Object);
-  ASSIGN_RETURN_ON_EXCEPTION(isolate, lhs, Object::ToNumber(isolate, lhs),
-                             Object);
-  return isolate->factory()->NewNumber(Object::Number(*lhs) +
-                                       Object::Number(*rhs));
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, rhs, Object::ToNumber(isolate, rhs));
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, lhs, Object::ToNumber(isolate, lhs));
+  return isolate->factory()->NewNumber(Object::NumberValue(*lhs) +
+                                       Object::NumberValue(*rhs));
 }
 
 // static
@@ -985,13 +979,11 @@ MaybeHandle<Object> Object::OrdinaryHasInstance(Isolate* isolate,
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, prototype,
       Object::GetProperty(isolate, callable,
-                          isolate->factory()->prototype_string()),
-      Object);
+                          isolate->factory()->prototype_string()));
   if (!IsJSReceiver(*prototype)) {
     THROW_NEW_ERROR(
         isolate,
-        NewTypeError(MessageTemplate::kInstanceofNonobjectProto, prototype),
-        Object);
+        NewTypeError(MessageTemplate::kInstanceofNonobjectProto, prototype));
   }
 
   // Return whether or not {prototype} is in the prototype chain of {object}.
@@ -1007,8 +999,7 @@ MaybeHandle<Object> Object::InstanceOf(Isolate* isolate, Handle<Object> object,
   // The {callable} must be a receiver.
   if (!IsJSReceiver(*callable)) {
     THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kNonObjectInInstanceOfCheck),
-                    Object);
+                    NewTypeError(MessageTemplate::kNonObjectInInstanceOfCheck));
   }
 
   // Lookup the @@hasInstance method on {callable}.
@@ -1016,15 +1007,13 @@ MaybeHandle<Object> Object::InstanceOf(Isolate* isolate, Handle<Object> object,
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, inst_of_handler,
       Object::GetMethod(isolate, Handle<JSReceiver>::cast(callable),
-                        isolate->factory()->has_instance_symbol()),
-      Object);
+                        isolate->factory()->has_instance_symbol()));
   if (!IsUndefined(*inst_of_handler, isolate)) {
     // Call the {inst_of_handler} on the {callable}.
     Handle<Object> result;
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, result,
-        Execution::Call(isolate, inst_of_handler, callable, 1, &object),
-        Object);
+        Execution::Call(isolate, inst_of_handler, callable, 1, &object));
     return isolate->factory()->ToBoolean(
         Object::BooleanValue(*result, isolate));
   }
@@ -1032,15 +1021,13 @@ MaybeHandle<Object> Object::InstanceOf(Isolate* isolate, Handle<Object> object,
   // The {callable} must have a [[Call]] internal method.
   if (!IsCallable(*callable)) {
     THROW_NEW_ERROR(
-        isolate, NewTypeError(MessageTemplate::kNonCallableInInstanceOfCheck),
-        Object);
+        isolate, NewTypeError(MessageTemplate::kNonCallableInInstanceOfCheck));
   }
 
   // Fall back to OrdinaryHasInstance with {callable} and {object}.
   Handle<Object> result;
   ASSIGN_RETURN_ON_EXCEPTION(
-      isolate, result, Object::OrdinaryHasInstance(isolate, callable, object),
-      Object);
+      isolate, result, Object::OrdinaryHasInstance(isolate, callable, object));
   return result;
 }
 
@@ -1049,16 +1036,14 @@ MaybeHandle<Object> Object::GetMethod(Isolate* isolate,
                                       Handle<JSReceiver> receiver,
                                       Handle<Name> name) {
   Handle<Object> func;
-  ASSIGN_RETURN_ON_EXCEPTION(
-      isolate, func, JSReceiver::GetProperty(isolate, receiver, name), Object);
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, func,
+                             JSReceiver::GetProperty(isolate, receiver, name));
   if (IsNullOrUndefined(*func, isolate)) {
     return isolate->factory()->undefined_value();
   }
   if (!IsCallable(*func)) {
-    THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kPropertyNotFunction, func,
-                                 name, receiver),
-                    Object);
+    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kPropertyNotFunction,
+                                          func, name, receiver));
   }
   return func;
 }
@@ -1111,22 +1096,19 @@ MaybeHandle<FixedArray> Object::CreateListFromArrayLike(
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kCalledOnNonObject,
                                  isolate->factory()->NewStringFromAsciiChecked(
-                                     "CreateListFromArrayLike")),
-                    FixedArray);
+                                     "CreateListFromArrayLike")));
   }
 
   // 4. Let len be ? ToLength(? Get(obj, "length")).
   Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(object);
   Handle<Object> raw_length_number;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, raw_length_number,
-                             Object::GetLengthFromArrayLike(isolate, receiver),
-                             FixedArray);
+                             Object::GetLengthFromArrayLike(isolate, receiver));
   uint32_t len;
   if (!Object::ToUint32(*raw_length_number, &len) ||
       len > static_cast<uint32_t>(FixedArray::kMaxLength)) {
     THROW_NEW_ERROR(isolate,
-                    NewRangeError(MessageTemplate::kInvalidArrayLength),
-                    FixedArray);
+                    NewRangeError(MessageTemplate::kInvalidArrayLength));
   }
   // 5. Let list be an empty List.
   Handle<FixedArray> list = isolate->factory()->NewFixedArray(len);
@@ -1136,9 +1118,8 @@ MaybeHandle<FixedArray> Object::CreateListFromArrayLike(
     // 7a. Let indexName be ToString(index).
     // 7b. Let next be ? Get(obj, indexName).
     Handle<Object> next;
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, next,
-                               JSReceiver::GetElement(isolate, receiver, index),
-                               FixedArray);
+    ASSIGN_RETURN_ON_EXCEPTION(
+        isolate, next, JSReceiver::GetElement(isolate, receiver, index));
     switch (element_types) {
       case ElementTypes::kAll:
         // Nothing to do.
@@ -1147,9 +1128,8 @@ MaybeHandle<FixedArray> Object::CreateListFromArrayLike(
         // 7c. If Type(next) is not an element of elementTypes, throw a
         //     TypeError exception.
         if (!IsName(*next)) {
-          THROW_NEW_ERROR(isolate,
-                          NewTypeError(MessageTemplate::kNotPropertyName, next),
-                          FixedArray);
+          THROW_NEW_ERROR(
+              isolate, NewTypeError(MessageTemplate::kNotPropertyName, next));
         }
         // 7d. Append next as the last element of list.
         // Internalize on the fly so we can use pointer identity later.
@@ -1169,8 +1149,8 @@ MaybeHandle<Object> Object::GetLengthFromArrayLike(Isolate* isolate,
                                                    Handle<JSReceiver> object) {
   Handle<Object> val;
   Handle<Name> key = isolate->factory()->length_string();
-  ASSIGN_RETURN_ON_EXCEPTION(
-      isolate, val, JSReceiver::GetProperty(isolate, object, key), Object);
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, val,
+                             JSReceiver::GetProperty(isolate, object, key));
   return Object::ToLength(isolate, val);
 }
 
@@ -1212,7 +1192,7 @@ MaybeHandle<Object> Object::GetProperty(LookupIterator* it,
         Handle<Object> result;
         ASSIGN_RETURN_ON_EXCEPTION(
             it->isolate(), result,
-            JSObject::GetPropertyWithInterceptor(it, &done), Object);
+            JSObject::GetPropertyWithInterceptor(it, &done));
         if (done) return result;
         continue;
       }
@@ -1238,14 +1218,12 @@ MaybeHandle<Object> Object::GetProperty(LookupIterator* it,
             THROW_NEW_ERROR(
                 it->isolate(),
                 NewTypeError(MessageTemplate::kInvalidPrivateBrandInstance,
-                             class_name),
-                Object);
+                             class_name));
           }
           THROW_NEW_ERROR(
               it->isolate(),
               NewTypeError(MessageTemplate::kInvalidPrivateMemberRead,
-                           name_string),
-              Object);
+                           name_string));
         }
 
         return it->isolate()->factory()->undefined_value();
@@ -1272,8 +1250,7 @@ MaybeHandle<Object> JSProxy::GetProperty(Isolate* isolate,
   // 4. Assert: Type(handler) is Object.
   if (proxy->IsRevoked()) {
     THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kProxyRevoked, trap_name),
-                    Object);
+                    NewTypeError(MessageTemplate::kProxyRevoked, trap_name));
   }
   // 5. Let target be the value of the [[ProxyTarget]] internal slot of O.
   Handle<JSReceiver> target(JSReceiver::cast(proxy->target()), isolate);
@@ -1281,8 +1258,7 @@ MaybeHandle<Object> JSProxy::GetProperty(Isolate* isolate,
   Handle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, trap,
-      Object::GetMethod(isolate, Handle<JSReceiver>::cast(handler), trap_name),
-      Object);
+      Object::GetMethod(isolate, Handle<JSReceiver>::cast(handler), trap_name));
   // 7. If trap is undefined, then
   if (IsUndefined(*trap, isolate)) {
     // 7.a Return target.[[Get]](P, Receiver).
@@ -1297,7 +1273,7 @@ MaybeHandle<Object> JSProxy::GetProperty(Isolate* isolate,
   Handle<Object> args[] = {target, name, receiver};
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, trap_result,
-      Execution::Call(isolate, trap, handler, arraysize(args), args), Object);
+      Execution::Call(isolate, trap, handler, arraysize(args), args));
 
   MaybeHandle<Object> result =
       JSProxy::CheckGetSetTrapResult(isolate, name, target, trap_result, kGet);
@@ -1333,10 +1309,8 @@ MaybeHandle<Object> JSProxy::CheckGetSetTrapResult(Isolate* isolate,
     if (inconsistent) {
       if (access_kind == kGet) {
         THROW_NEW_ERROR(
-            isolate,
-            NewTypeError(MessageTemplate::kProxyGetNonConfigurableData, name,
-                         target_desc.value(), trap_result),
-            Object);
+            isolate, NewTypeError(MessageTemplate::kProxyGetNonConfigurableData,
+                                  name, target_desc.value(), trap_result));
       } else {
         isolate->Throw(*isolate->factory()->NewTypeError(
             MessageTemplate::kProxySetFrozenData, name));
@@ -1361,8 +1335,7 @@ MaybeHandle<Object> JSProxy::CheckGetSetTrapResult(Isolate* isolate,
         THROW_NEW_ERROR(
             isolate,
             NewTypeError(MessageTemplate::kProxyGetNonConfigurableAccessor,
-                         name, trap_result),
-            Object);
+                         name, trap_result));
       } else {
         isolate->Throw(*isolate->factory()->NewTypeError(
             MessageTemplate::kProxySetFrozenAccessor, name));
@@ -1404,8 +1377,7 @@ MaybeHandle<HeapObject> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
   // 4. Let target be the value of the [[ProxyTarget]] internal slot.
   if (proxy->IsRevoked()) {
     THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kProxyRevoked, trap_name),
-                    HeapObject);
+                    NewTypeError(MessageTemplate::kProxyRevoked, trap_name));
   }
   Handle<JSReceiver> target(JSReceiver::cast(proxy->target()), isolate);
   Handle<JSReceiver> handler(JSReceiver::cast(proxy->handler()), isolate);
@@ -1413,8 +1385,7 @@ MaybeHandle<HeapObject> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
   // 5. Let trap be ? GetMethod(handler, "getPrototypeOf").
   Handle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, trap,
-                             Object::GetMethod(isolate, handler, trap_name),
-                             HeapObject);
+                             Object::GetMethod(isolate, handler, trap_name));
   // 6. If trap is undefined, then return target.[[GetPrototypeOf]]().
   if (IsUndefined(*trap, isolate)) {
     return JSReceiver::GetPrototype(isolate, target);
@@ -1424,13 +1395,11 @@ MaybeHandle<HeapObject> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
   Handle<Object> handler_proto;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, handler_proto,
-      Execution::Call(isolate, trap, handler, arraysize(argv), argv),
-      HeapObject);
+      Execution::Call(isolate, trap, handler, arraysize(argv), argv));
   // 8. If Type(handlerProto) is neither Object nor Null, throw a TypeError.
   if (!(IsJSReceiver(*handler_proto) || IsNull(*handler_proto, isolate))) {
     THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kProxyGetPrototypeOfInvalid),
-                    HeapObject);
+                    NewTypeError(MessageTemplate::kProxyGetPrototypeOfInvalid));
   }
   // 9. Let extensibleTarget be ? IsExtensible(target).
   Maybe<bool> is_extensible = JSReceiver::IsExtensible(isolate, target);
@@ -1440,14 +1409,12 @@ MaybeHandle<HeapObject> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
   // 11. Let targetProto be ? target.[[GetPrototypeOf]]().
   Handle<HeapObject> target_proto;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, target_proto,
-                             JSReceiver::GetPrototype(isolate, target),
-                             HeapObject);
+                             JSReceiver::GetPrototype(isolate, target));
   // 12. If SameValue(handlerProto, targetProto) is false, throw a TypeError.
   if (!Object::SameValue(*handler_proto, *target_proto)) {
     THROW_NEW_ERROR(
         isolate,
-        NewTypeError(MessageTemplate::kProxyGetPrototypeOfNonExtensible),
-        HeapObject);
+        NewTypeError(MessageTemplate::kProxyGetPrototypeOfNonExtensible));
   }
   // 13. Return handlerProto.
   return Handle<HeapObject>::cast(handler_proto);
@@ -1479,21 +1446,19 @@ MaybeHandle<Object> Object::GetPropertyWithAccessor(LookupIterator* it) {
 
     if (info->is_sloppy() && !IsJSReceiver(*receiver)) {
       ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
-                                 Object::ConvertReceiver(isolate, receiver),
-                                 Object);
+                                 Object::ConvertReceiver(isolate, receiver));
     }
 
     PropertyCallbackArguments args(isolate, info->data(), *receiver, *holder,
                                    Just(kDontThrow));
     Handle<Object> result = args.CallAccessorGetter(info, name);
-    RETURN_EXCEPTION_IF_EXCEPTION(isolate, Object);
+    RETURN_EXCEPTION_IF_EXCEPTION(isolate);
     if (result.is_null()) return isolate->factory()->undefined_value();
     Handle<Object> reboxed_result = handle(*result, isolate);
     if (info->replace_on_access() && IsJSReceiver(*receiver)) {
       RETURN_ON_EXCEPTION(isolate,
                           Accessors::ReplaceAccessorWithDataProperty(
-                              isolate, receiver, holder, name, result),
-                          Object);
+                              isolate, receiver, holder, name, result));
     }
     return reboxed_result;
   }
@@ -1661,7 +1626,8 @@ bool Object::SameValue(Tagged<Object> obj, Tagged<Object> other) {
   if (other == obj) return true;
 
   if (IsNumber(obj) && IsNumber(other)) {
-    return SameNumberValue(Object::Number(obj), Object::Number(other));
+    return SameNumberValue(Object::NumberValue(obj),
+                           Object::NumberValue(other));
   }
   if (IsString(obj) && IsString(other)) {
     return String::cast(obj)->Equals(String::cast(other));
@@ -1677,8 +1643,8 @@ bool Object::SameValueZero(Tagged<Object> obj, Tagged<Object> other) {
   if (other == obj) return true;
 
   if (IsNumber(obj) && IsNumber(other)) {
-    double this_value = Object::Number(obj);
-    double other_value = Object::Number(other);
+    double this_value = Object::NumberValue(obj);
+    double other_value = Object::NumberValue(other);
     // +0 == -0 is true
     return this_value == other_value ||
            (std::isnan(this_value) && std::isnan(other_value));
@@ -1708,14 +1674,12 @@ MaybeHandle<Object> Object::ArraySpeciesConstructor(
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, constructor,
         Object::GetProperty(isolate, original_array,
-                            isolate->factory()->constructor_string()),
-        Object);
+                            isolate->factory()->constructor_string()));
     if (IsConstructor(*constructor)) {
       Handle<NativeContext> constructor_context;
       ASSIGN_RETURN_ON_EXCEPTION(
           isolate, constructor_context,
-          JSReceiver::GetFunctionRealm(Handle<JSReceiver>::cast(constructor)),
-          Object);
+          JSReceiver::GetFunctionRealm(Handle<JSReceiver>::cast(constructor)));
       if (*constructor_context != *isolate->native_context() &&
           *constructor == constructor_context->array_function()) {
         constructor = isolate->factory()->undefined_value();
@@ -1726,8 +1690,7 @@ MaybeHandle<Object> Object::ArraySpeciesConstructor(
           isolate, constructor,
           JSReceiver::GetProperty(isolate,
                                   Handle<JSReceiver>::cast(constructor),
-                                  isolate->factory()->species_symbol()),
-          Object);
+                                  isolate->factory()->species_symbol()));
       if (IsNull(*constructor, isolate)) {
         constructor = isolate->factory()->undefined_value();
       }
@@ -1738,8 +1701,7 @@ MaybeHandle<Object> Object::ArraySpeciesConstructor(
   } else {
     if (!IsConstructor(*constructor)) {
       THROW_NEW_ERROR(isolate,
-                      NewTypeError(MessageTemplate::kSpeciesNotConstructor),
-                      Object);
+                      NewTypeError(MessageTemplate::kSpeciesNotConstructor));
     }
     return constructor;
   }
@@ -1753,15 +1715,13 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Object::SpeciesConstructor(
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, ctor_obj,
       JSObject::GetProperty(isolate, recv,
-                            isolate->factory()->constructor_string()),
-      Object);
+                            isolate->factory()->constructor_string()));
 
   if (IsUndefined(*ctor_obj, isolate)) return default_ctor;
 
   if (!IsJSReceiver(*ctor_obj)) {
     THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kConstructorNotReceiver),
-                    Object);
+                    NewTypeError(MessageTemplate::kConstructorNotReceiver));
   }
 
   Handle<JSReceiver> ctor = Handle<JSReceiver>::cast(ctor_obj);
@@ -1770,8 +1730,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Object::SpeciesConstructor(
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, species,
       JSObject::GetProperty(isolate, ctor,
-                            isolate->factory()->species_symbol()),
-      Object);
+                            isolate->factory()->species_symbol()));
 
   if (IsNullOrUndefined(*species, isolate)) {
     return default_ctor;
@@ -1779,8 +1738,8 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Object::SpeciesConstructor(
 
   if (IsConstructor(*species)) return species;
 
-  THROW_NEW_ERROR(
-      isolate, NewTypeError(MessageTemplate::kSpeciesNotConstructor), Object);
+  THROW_NEW_ERROR(isolate,
+                  NewTypeError(MessageTemplate::kSpeciesNotConstructor));
 }
 
 // static
@@ -1795,7 +1754,7 @@ bool Object::IterationHasObservableEffects(Tagged<Object> obj) {
   if (!IsJSObject(array_proto)) return true;
   Tagged<NativeContext> native_context = array->GetCreationContext().value();
   auto initial_array_prototype = native_context->initial_array_prototype();
-  if (initial_array_prototype != JSObject::cast(array_proto)) return true;
+  if (initial_array_prototype != array_proto) return true;
 
   Isolate* isolate = array->GetIsolate();
   // Check that the ArrayPrototype hasn't been modified in a way that would
@@ -2207,7 +2166,7 @@ void HeapObject::RehashBasedOnMap(IsolateT* isolate) {
 template void HeapObject::RehashBasedOnMap(Isolate* isolate);
 template void HeapObject::RehashBasedOnMap(LocalIsolate* isolate);
 
-void DescriptorArray::GeneralizeAllFields(TransitionKindFlag transition_kind) {
+void DescriptorArray::GeneralizeAllFields(bool clear_constness) {
   int length = number_of_descriptors();
   for (InternalIndex i : InternalIndex::Range(length)) {
     PropertyDetails details = GetDetails(i);
@@ -2215,9 +2174,7 @@ void DescriptorArray::GeneralizeAllFields(TransitionKindFlag transition_kind) {
     if (details.location() == PropertyLocation::kField) {
       // Since constness is not propagated across proto transitions we must
       // clear the flag here.
-      // TODO(olivf): Evaluate if we should apply field updates over proto
-      // transitions (either forward only, or forward and backwards).
-      if (transition_kind == PROTOTYPE_TRANSITION) {
+      if (clear_constness) {
         details = details.CopyWithConstness(PropertyConstness::kMutable);
       }
       DCHECK_EQ(PropertyKind::kData, details.kind());
@@ -2723,8 +2680,8 @@ MaybeHandle<Object> Object::ShareSlow(Isolate* isolate,
   }
 
   if (throw_if_cannot_be_shared == kThrowOnError) {
-    THROW_NEW_ERROR(
-        isolate, NewTypeError(MessageTemplate::kCannotBeShared, value), Object);
+    THROW_NEW_ERROR(isolate,
+                    NewTypeError(MessageTemplate::kCannotBeShared, value));
   }
   return MaybeHandle<Object>();
 }
@@ -3013,12 +2970,10 @@ Maybe<bool> JSProxy::CheckDeleteTrap(Isolate* isolate, Handle<Name> name,
 MaybeHandle<JSProxy> JSProxy::New(Isolate* isolate, Handle<Object> target,
                                   Handle<Object> handler) {
   if (!IsJSReceiver(*target)) {
-    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kProxyNonObject),
-                    JSProxy);
+    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kProxyNonObject));
   }
   if (!IsJSReceiver(*handler)) {
-    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kProxyNonObject),
-                    JSProxy);
+    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kProxyNonObject));
   }
   return isolate->factory()->NewJSProxy(Handle<JSReceiver>::cast(target),
                                         Handle<JSReceiver>::cast(handler));
@@ -3139,7 +3094,7 @@ bool JSArray::AnythingToArrayLength(Isolate* isolate,
     return false;
   }
   // 7. If newLen != numberLen, throw a RangeError exception.
-  if (Object::Number(*uint32_v) != Object::Number(*number_v)) {
+  if (Object::NumberValue(*uint32_v) != Object::NumberValue(*number_v)) {
     Handle<Object> exception =
         isolate->factory()->NewRangeError(MessageTemplate::kInvalidArrayLength);
     isolate->Throw(*exception);
@@ -3990,7 +3945,7 @@ MaybeHandle<String> Name::ToFunctionName(Isolate* isolate, Handle<Name> name) {
   builder.AppendCharacter('[');
   builder.AppendString(Handle<String>::cast(description));
   builder.AppendCharacter(']');
-  return builder.Finish();
+  return indirect_handle(builder.Finish(), isolate);
 }
 
 // static
@@ -3998,12 +3953,12 @@ MaybeHandle<String> Name::ToFunctionName(Isolate* isolate, Handle<Name> name,
                                          Handle<String> prefix) {
   Handle<String> name_string;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, name_string,
-                             ToFunctionName(isolate, name), String);
+                             ToFunctionName(isolate, name));
   IncrementalStringBuilder builder(isolate);
   builder.AppendString(prefix);
   builder.AppendCharacter(' ');
   builder.AppendString(name_string);
-  return builder.Finish();
+  return indirect_handle(builder.Finish(), isolate);
 }
 
 void Relocatable::PostGarbageCollectionProcessing(Isolate* isolate) {
@@ -4230,7 +4185,7 @@ void Oddball::Initialize(Isolate* isolate, Handle<Oddball> oddball,
     oddball->set_to_number_raw_as_bits(
         Handle<HeapNumber>::cast(to_number)->value_as_bits());
   } else {
-    oddball->set_to_number_raw(Object::Number(*to_number));
+    oddball->set_to_number_raw(Object::NumberValue(*to_number));
   }
   oddball->set_to_number(*to_number);
   oddball->set_to_string(*internalized_to_string);
@@ -6219,7 +6174,6 @@ void JSDisposableStack::Initialize(Isolate* isolate,
                                    Handle<JSDisposableStack> disposable_stack) {
   Handle<FixedArray> array = isolate->factory()->NewFixedArray(0);
   disposable_stack->set_stack(*array);
-  disposable_stack->set_status(0);
   disposable_stack->set_length(0);
   disposable_stack->set_state(DisposableStackState::kPending);
 }

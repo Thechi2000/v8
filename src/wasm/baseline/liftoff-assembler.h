@@ -866,6 +866,8 @@ class LiftoffAssembler : public MacroAssembler {
   inline bool emit_i64_popcnt(LiftoffRegister dst, LiftoffRegister src);
 
   inline void emit_u32_to_uintptr(Register dst, Register src);
+  // For security hardening: unconditionally clear {dst}'s high word.
+  inline void clear_i32_upper_half(Register dst);
 
   inline void emit_ptrsize_add(Register dst, Register lhs, Register rhs);
   inline void emit_ptrsize_sub(Register dst, Register lhs, Register rhs);
@@ -1424,8 +1426,8 @@ class LiftoffAssembler : public MacroAssembler {
   inline void emit_f64x2_qfms(LiftoffRegister dst, LiftoffRegister src1,
                               LiftoffRegister src2, LiftoffRegister src3);
 
-  inline void set_trap_on_oob_mem64(Register index, int oob_shift,
-                                    MemOperand oob_offset);
+  inline void set_trap_on_oob_mem64(Register index, uint64_t oob_size,
+                                    uint64_t oob_index);
 
   inline void StackCheck(Label* ool_code);
 
@@ -1488,6 +1490,7 @@ class LiftoffAssembler : public MacroAssembler {
   void set_num_locals(uint32_t num_locals);
 
   int GetTotalFrameSlotCountForGC() const;
+  int OolSpillCount() const;
 
   int GetTotalFrameSize() const { return max_used_spill_offset_; }
 
@@ -1538,8 +1541,6 @@ class LiftoffAssembler : public MacroAssembler {
   LiftoffBailoutReason bailout_reason_ = kSuccess;
   const char* bailout_detail_ = nullptr;
 };
-
-std::ostream& operator<<(std::ostream& os, LiftoffAssembler::VarState);
 
 #if DEBUG
 inline FreezeCacheState::FreezeCacheState(LiftoffAssembler& assm)

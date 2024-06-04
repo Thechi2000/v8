@@ -940,7 +940,7 @@ bool Heap::CreateImportantReadOnlyObjects() {
   // The -0 value must be set before NewNumber works.
   set_minus_zero_value(
       *factory->NewHeapNumber<AllocationType::kReadOnly>(-0.0));
-  DCHECK(std::signbit(Object::Number(roots.minus_zero_value())));
+  DCHECK(std::signbit(Object::NumberValue(roots.minus_zero_value())));
 
   set_nan_value(*factory->NewHeapNumber<AllocationType::kReadOnly>(
       std::numeric_limits<double>::quiet_NaN()));
@@ -1323,7 +1323,6 @@ void Heap::CreateInitialMutableObjects() {
   set_many_closures_cell(*many_closures_cell);
 
   set_detached_contexts(roots.empty_weak_array_list());
-  set_retaining_path_targets(roots.empty_weak_array_list());
 
   set_feedback_vectors_for_profiling_tools(roots.undefined_value());
   set_functions_marked_for_manual_optimization(roots.undefined_value());
@@ -1564,6 +1563,23 @@ void Heap::CreateInitialMutableObjects() {
     info = CreateSharedFunctionInfo(
         isolate_, Builtin::kArrayFromAsyncArrayLikeOnRejected, 0);
     set_array_from_async_array_like_on_rejected_shared_fun(*info);
+  }
+
+  // Atomics.Mutex
+  {
+    Handle<SharedFunctionInfo> info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kAtomicsMutexAsyncUnlockResolveHandler, 1);
+    set_atomics_mutex_async_unlock_resolve_handler_sfi(*info);
+    info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kAtomicsMutexAsyncUnlockRejectHandler, 1);
+    set_atomics_mutex_async_unlock_reject_handler_sfi(*info);
+  }
+
+  // Atomics.Condition
+  {
+    Handle<SharedFunctionInfo> info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kAtomicsConditionAcquireLock, 0);
+    set_atomics_condition_acquire_lock_sfi(*info);
   }
 
   // Trusted roots:

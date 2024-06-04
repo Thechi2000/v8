@@ -178,8 +178,7 @@ MaybeHandle<Object> DebugEvaluate::Evaluate(
       Compiler::GetFunctionFromEval(
           source, outer_info, context, LanguageMode::kSloppy,
           NO_PARSE_RESTRICTION, kNoSourcePosition, kNoSourcePosition,
-          kNoSourcePosition, ParsingWhileDebugging::kYes),
-      Object);
+          kNoSourcePosition, ParsingWhileDebugging::kYes));
 
   Handle<Object> result;
   bool success = false;
@@ -314,7 +313,6 @@ bool DebugEvaluate::IsSideEffectFreeIntrinsic(Runtime::FunctionId id) {
   V(IsArray)                             \
   V(IsJSProxy)                           \
   V(IsJSReceiver)                        \
-  V(IsRegExp)                            \
   V(IsSmi)                               \
   /* Loads */                            \
   V(LoadLookupSlotForCall)               \
@@ -342,7 +340,6 @@ bool DebugEvaluate::IsSideEffectFreeIntrinsic(Runtime::FunctionId id) {
   V(StringToNumber)                      \
   /* BigInts */                          \
   V(BigIntEqualToBigInt)                 \
-  V(BigIntToBoolean)                     \
   V(BigIntToNumber)                      \
   /* Literals */                         \
   V(CreateArrayLiteral)                  \
@@ -352,13 +349,10 @@ bool DebugEvaluate::IsSideEffectFreeIntrinsic(Runtime::FunctionId id) {
   /* Called from builtins */             \
   V(AllocateInYoungGeneration)           \
   V(AllocateInOldGeneration)             \
-  V(AllocateSeqOneByteString)            \
-  V(AllocateSeqTwoByteString)            \
   V(ArrayIncludes_Slow)                  \
   V(ArrayIndexOf)                        \
   V(ArrayIsArray)                        \
   V(GetFunctionName)                     \
-  V(GetOwnPropertyDescriptor)            \
   V(GlobalPrint)                         \
   V(HasProperty)                         \
   V(ObjectCreate)                        \
@@ -692,6 +686,9 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kDatePrototypeToJson:
     case Builtin::kDatePrototypeToPrimitive:
     case Builtin::kDatePrototypeValueOf:
+    // DisposableStack builtins.
+    case Builtin::kDisposableStackConstructor:
+    case Builtin::kDisposableStackPrototypeGetDisposed:
     // Map builtins.
     case Builtin::kMapConstructor:
     case Builtin::kMapGroupBy:
@@ -984,6 +981,12 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kDatePrototypeSetUTCMonth:
     case Builtin::kDatePrototypeSetUTCSeconds:
     case Builtin::kDatePrototypeSetYear:
+    // DisposableStack builtins.
+    case Builtin::kDisposableStackPrototypeUse:
+    case Builtin::kDisposableStackPrototypeDispose:
+    case Builtin::kDisposableStackPrototypeAdopt:
+    case Builtin::kDisposableStackPrototypeDefer:
+    case Builtin::kDisposableStackPrototypeMove:
     // RegExp builtins.
     case Builtin::kRegExpPrototypeTest:
     case Builtin::kRegExpPrototypeExec:

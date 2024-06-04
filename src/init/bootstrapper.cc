@@ -2367,6 +2367,9 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
     SimpleInstallFunction(isolate_, object_function, "values",
                           Builtin::kObjectValues, 1, true);
 
+    SimpleInstallFunction(isolate_, object_function, "groupBy",
+                          Builtin::kObjectGroupBy, 2, true);
+
     SimpleInstallFunction(isolate_, isolate_->initial_object_prototype(),
                           "__defineGetter__", Builtin::kObjectDefineGetter, 2,
                           true);
@@ -3032,6 +3035,8 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
     InstallConstant(isolate_, symbol_fun, "unscopables",
                     factory->unscopables_symbol());
     InstallConstant(isolate_, symbol_fun, "dispose", factory->dispose_symbol());
+    InstallConstant(isolate_, symbol_fun, "asyncDispose",
+                    factory->async_dispose_symbol());
 
     // Setup %SymbolPrototype%.
     Handle<JSObject> prototype(JSObject::cast(symbol_fun->instance_prototype()),
@@ -4144,6 +4149,25 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
             "arrayBufferConstructor_DoNotInitialize"),
         Builtin::kArrayBufferConstructor_DoNotInitialize, 1, false);
     native_context()->set_array_buffer_noinit_fun(*array_buffer_noinit_fun);
+
+    Handle<JSObject> array_buffer_prototype(
+        JSObject::cast(array_buffer_fun->instance_prototype()), isolate_);
+    SimpleInstallGetter(isolate_, array_buffer_prototype,
+                        factory->max_byte_length_string(),
+                        Builtin::kArrayBufferPrototypeGetMaxByteLength, false);
+    SimpleInstallGetter(isolate_, array_buffer_prototype,
+                        factory->resizable_string(),
+                        Builtin::kArrayBufferPrototypeGetResizable, false);
+    SimpleInstallFunction(isolate_, array_buffer_prototype, "resize",
+                          Builtin::kArrayBufferPrototypeResize, 1, true);
+    SimpleInstallFunction(isolate_, array_buffer_prototype, "transfer",
+                          Builtin::kArrayBufferPrototypeTransfer, 0, false);
+    SimpleInstallFunction(
+        isolate_, array_buffer_prototype, "transferToFixedLength",
+        Builtin::kArrayBufferPrototypeTransferToFixedLength, 0, false);
+    SimpleInstallGetter(isolate_, array_buffer_prototype,
+                        factory->detached_string(),
+                        Builtin::kArrayBufferPrototypeGetDetached, false);
   }
 
   {  // -- S h a r e d A r r a y B u f f e r
@@ -4153,6 +4177,19 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
     InstallWithIntrinsicDefaultProto(isolate_, shared_array_buffer_fun,
                                      Context::SHARED_ARRAY_BUFFER_FUN_INDEX);
     InstallSpeciesGetter(isolate_, shared_array_buffer_fun);
+
+    Handle<JSObject> shared_array_buffer_prototype(
+        JSObject::cast(shared_array_buffer_fun->instance_prototype()),
+        isolate_);
+    SimpleInstallGetter(isolate_, shared_array_buffer_prototype,
+                        factory->max_byte_length_string(),
+                        Builtin::kSharedArrayBufferPrototypeGetMaxByteLength,
+                        false);
+    SimpleInstallGetter(isolate_, shared_array_buffer_prototype,
+                        factory->growable_string(),
+                        Builtin::kSharedArrayBufferPrototypeGetGrowable, false);
+    SimpleInstallFunction(isolate_, shared_array_buffer_prototype, "grow",
+                          Builtin::kSharedArrayBufferPrototypeGrow, 1, true);
   }
 
   {  // -- A t o m i c s
@@ -4395,6 +4432,9 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
     Handle<SharedFunctionInfo> shared(js_map_fun->shared(), isolate_);
     shared->DontAdaptArguments();
     shared->set_length(0);
+
+    SimpleInstallFunction(isolate_, js_map_fun, "groupBy", Builtin::kMapGroupBy,
+                          2, true);
 
     // Setup %MapPrototype%.
     Handle<JSObject> prototype(JSObject::cast(js_map_fun->instance_prototype()),
@@ -5393,9 +5433,9 @@ void Genesis::InitializeConsole(Handle<JSObject> extras_binding) {
 
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_import_assertions)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_import_attributes)
-EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_rab_gsab_transfer)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_regexp_modifiers)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_regexp_duplicate_named_groups)
+EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_decorators)
 
 #ifdef V8_INTL_SUPPORT
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_intl_best_fit_matcher)
@@ -5695,6 +5735,8 @@ void Genesis::InitializeGlobal_harmony_struct() {
                           Builtin::kAtomicsMutexTryLock, 2, true);
     SimpleInstallFunction(isolate(), mutex_fun, "isMutex",
                           Builtin::kAtomicsMutexIsMutex, 1, true);
+    SimpleInstallFunction(isolate(), mutex_fun, "lockAsync",
+                          Builtin::kAtomicsMutexLockAsync, 2, true);
   }
 
   {  // Atomics.Condition
@@ -5715,20 +5757,9 @@ void Genesis::InitializeGlobal_harmony_struct() {
                           Builtin::kAtomicsConditionNotify, 2, false);
     SimpleInstallFunction(isolate(), condition_fun, "isCondition",
                           Builtin::kAtomicsConditionIsCondition, 1, true);
+    SimpleInstallFunction(isolate(), condition_fun, "waitAsync",
+                          Builtin::kAtomicsConditionWaitAsync, 2, false);
   }
-}
-
-void Genesis::InitializeGlobal_harmony_array_grouping() {
-  if (!v8_flags.harmony_array_grouping) return;
-
-  Handle<JSFunction> object_function(native_context()->object_function(),
-                                     isolate());
-  Handle<JSFunction> map_function(native_context()->js_map_fun(), isolate());
-
-  SimpleInstallFunction(isolate_, object_function, "groupBy",
-                        Builtin::kObjectGroupBy, 2, true);
-  SimpleInstallFunction(isolate_, map_function, "groupBy", Builtin::kMapGroupBy,
-                        2, true);
 }
 
 void Genesis::InitializeGlobal_sharedarraybuffer() {
@@ -5793,6 +5824,28 @@ void Genesis::InitializeGlobal_js_explicit_resource_management() {
   js_disposable_stack_map->SetConstructor(native_context()->object_function());
   native_context()->set_js_disposable_stack_map(*js_disposable_stack_map);
   LOG(isolate(), MapDetails(*js_disposable_stack_map));
+
+  Handle<JSFunction> disposable_stack_function =
+      InstallFunction(isolate(), global, "DisposableStack", JS_OBJECT_TYPE,
+                      JSObject::kHeaderSize, 0, disposable_stack_prototype,
+                      Builtin::kDisposableStackConstructor);
+  disposable_stack_function->shared()->DontAdaptArguments();
+  disposable_stack_function->shared()->set_length(0);
+  SimpleInstallFunction(isolate(), disposable_stack_prototype, "use",
+                        Builtin::kDisposableStackPrototypeUse, 1, true);
+  SimpleInstallFunction(isolate(), disposable_stack_prototype, "dispose",
+                        Builtin::kDisposableStackPrototypeDispose, 0, true);
+  SimpleInstallFunction(isolate(), disposable_stack_prototype, "adopt",
+                        Builtin::kDisposableStackPrototypeAdopt, 2, true);
+  SimpleInstallFunction(isolate(), disposable_stack_prototype, "defer",
+                        Builtin::kDisposableStackPrototypeDefer, 1, true);
+  SimpleInstallFunction(isolate(), disposable_stack_prototype, "move",
+                        Builtin::kDisposableStackPrototypeMove, 0, true);
+
+  InstallToStringTag(isolate(), disposable_stack_prototype, "DisposableStack");
+  SimpleInstallGetter(isolate(), disposable_stack_prototype,
+                      factory->InternalizeUtf8String("disposed"),
+                      Builtin::kDisposableStackPrototypeGetDisposed, true);
 }
 
 void Genesis::InitializeGlobal_js_float16array() {
@@ -5834,46 +5887,6 @@ void Genesis::InitializeGlobal_regexp_linear_flag() {
 
   // Store regexp prototype map again after change.
   native_context()->set_regexp_prototype_map(regexp_prototype->map());
-}
-
-void Genesis::InitializeGlobal_harmony_rab_gsab() {
-  if (!v8_flags.harmony_rab_gsab) return;
-  Handle<JSObject> array_buffer_prototype(
-      JSObject::cast(
-          native_context()->array_buffer_fun()->instance_prototype()),
-      isolate());
-  SimpleInstallGetter(isolate(), array_buffer_prototype,
-                      factory()->max_byte_length_string(),
-                      Builtin::kArrayBufferPrototypeGetMaxByteLength, false);
-  SimpleInstallGetter(isolate(), array_buffer_prototype,
-                      factory()->resizable_string(),
-                      Builtin::kArrayBufferPrototypeGetResizable, false);
-  SimpleInstallFunction(isolate(), array_buffer_prototype, "resize",
-                        Builtin::kArrayBufferPrototypeResize, 1, true);
-  if (v8_flags.harmony_rab_gsab_transfer) {
-    SimpleInstallFunction(isolate(), array_buffer_prototype, "transfer",
-                          Builtin::kArrayBufferPrototypeTransfer, 0, false);
-    SimpleInstallFunction(
-        isolate(), array_buffer_prototype, "transferToFixedLength",
-        Builtin::kArrayBufferPrototypeTransferToFixedLength, 0, false);
-    SimpleInstallGetter(isolate(), array_buffer_prototype,
-                        factory()->detached_string(),
-                        Builtin::kArrayBufferPrototypeGetDetached, false);
-  }
-
-  Handle<JSObject> shared_array_buffer_prototype(
-      JSObject::cast(
-          native_context()->shared_array_buffer_fun()->instance_prototype()),
-      isolate());
-  SimpleInstallGetter(isolate(), shared_array_buffer_prototype,
-                      factory()->max_byte_length_string(),
-                      Builtin::kSharedArrayBufferPrototypeGetMaxByteLength,
-                      false);
-  SimpleInstallGetter(isolate(), shared_array_buffer_prototype,
-                      factory()->growable_string(),
-                      Builtin::kSharedArrayBufferPrototypeGetGrowable, false);
-  SimpleInstallFunction(isolate(), shared_array_buffer_prototype, "grow",
-                        Builtin::kSharedArrayBufferPrototypeGrow, 1, true);
 }
 
 void Genesis::InitializeGlobal_harmony_temporal() {

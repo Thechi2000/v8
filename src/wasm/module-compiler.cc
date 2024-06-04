@@ -24,6 +24,7 @@
 #include "src/tracing/trace-event.h"
 #include "src/wasm/code-space-access.h"
 #include "src/wasm/compilation-environment-inl.h"
+#include "src/wasm/jump-table-assembler.h"
 #include "src/wasm/module-decoder.h"
 #include "src/wasm/pgo.h"
 #include "src/wasm/std-object-sizes.h"
@@ -697,10 +698,6 @@ class CompilationStateImpl {
     compilation_id_ = compilation_id;
   }
 
-  std::weak_ptr<NativeModule> const native_module_weak() const {
-    return native_module_weak_;
-  }
-
   size_t EstimateCurrentMemoryConsumption() const;
 
   // Called from the delayed task to trigger caching if the timeout
@@ -708,6 +705,9 @@ class CompilationStateImpl {
   // This either triggers caching or re-schedules the task if more code has
   // been compiled to the top tier in the meantime.
   void TriggerCachingAfterTimeout();
+
+  std::vector<WasmCode*> PublishCode(
+      base::Vector<std::unique_ptr<WasmCode>> codes);
 
  private:
   void AddCompilationUnitInternal(CompilationUnitBuilder* builder,
@@ -724,7 +724,6 @@ class CompilationStateImpl {
 
   void PublishCompilationResults(
       std::vector<std::unique_ptr<WasmCode>> unpublished_code);
-  void PublishCode(base::Vector<std::unique_ptr<WasmCode>> codes);
 
   NativeModule* const native_module_;
   std::weak_ptr<NativeModule> const native_module_weak_;
@@ -945,6 +944,11 @@ DynamicTiering CompilationState::dynamic_tiering() const {
 
 size_t CompilationState::EstimateCurrentMemoryConsumption() const {
   return Impl(this)->EstimateCurrentMemoryConsumption();
+}
+
+std::vector<WasmCode*> CompilationState::PublishCode(
+    base::Vector<std::unique_ptr<WasmCode>> unpublished_code) {
+  return Impl(this)->PublishCode(unpublished_code);
 }
 
 // static
@@ -1186,9 +1190,7 @@ bool CompileLazy(Isolate* isolate,
                  Tagged<WasmTrustedInstanceData> trusted_instance_data,
                  int func_index) {
   DisallowGarbageCollection no_gc;
-  Tagged<WasmModuleObject> module_object =
-      trusted_instance_data->module_object();
-  NativeModule* native_module = module_object->native_module();
+  NativeModule* native_module = trusted_instance_data->native_module();
   Counters* counters = isolate->counters();
 
   // Put the timer scope around everything, including the {CodeSpaceWriteScope}
@@ -1370,6 +1372,37 @@ class FeedbackMaker {
     AddCall(internal_function->function_index(), count);
   }
 
+  void AddCallIndirectCandidate(Tagged<Smi> target_truncated_smi, int count) {
+    // We need to map a truncated call target back to a function index.
+    // Generally there may be multiple jump tables if code spaces are far apart
+    // (to ensure that direct calls can always use a near call to the closest
+    // jump table).
+    // However, here we are always handling call targets that are originally
+    // from the `WasmDispatchTable`, whose entries are always targets pointing
+    // into the main jump table, so we only need to check against that.
+
+    Address jt_start = instance_data_->native_module()->jump_table_start();
+    uint32_t jt_size = JumpTableAssembler::SizeForNumberOfSlots(
+        instance_data_->module()->num_declared_functions);
+    Address jt_end = jt_start + jt_size;
+
+    uint32_t jt_start_truncated = jt_start & kSmiMaxValue;
+    uint32_t jt_end_truncated = jt_end & kSmiMaxValue;
+    uint32_t target_truncated = target_truncated_smi.value();
+
+    if (target_truncated < jt_start_truncated ||
+        target_truncated >= jt_end_truncated) {
+      // Was not in the main table (e.g., because it's an imported function).
+      return;
+    }
+
+    uint32_t jt_offset = target_truncated - jt_start_truncated;
+    uint32_t jt_slot_idx = JumpTableAssembler::SlotOffsetToIndex(jt_offset);
+    uint32_t func_idx =
+        instance_data_->module()->num_imported_functions + jt_slot_idx;
+    AddCall(func_idx, count);
+  }
+
   void AddCall(int target, int count) {
     // Keep the cache sorted (using insertion-sort), highest count first.
     int insertion_index = 0;
@@ -1392,13 +1425,13 @@ class FeedbackMaker {
       result_.emplace_back();
     } else if (cache_usage_ == 1) {
       if (v8_flags.trace_wasm_inlining) {
-        PrintF("[function %d: call_ref #%zu inlineable (monomorphic)]\n",
+        PrintF("[function %d: call #%zu inlineable (monomorphic)]\n",
                func_index_, result_.size());
       }
       result_.emplace_back(targets_cache_[0], counts_cache_[0]);
     } else {
       if (v8_flags.trace_wasm_inlining) {
-        PrintF("[function %d: call_ref #%zu inlineable (polymorphic %d)]\n",
+        PrintF("[function %d: call #%zu inlineable (polymorphic %d)]\n",
                func_index_, result_.size(), cache_usage_);
       }
       CallSiteFeedback::PolymorphicCase* polymorphic =
@@ -1437,36 +1470,86 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
       module_->type_feedback.feedback_for_function[func_index]
           .call_targets.as_vector();
 
-  DCHECK_EQ(feedback->length(), call_targets.size() * 2);
+  // For each entry in {call_targets}, there are two {Object} slots in the
+  // {feedback} vector:
+  // +-------------------------+-----------------------+-------------------+
+  // |        Call Type        |   Feedback: Entry 1   |      Entry 2      |
+  // +-------------------------+-----------------------+-------------------+
+  // | direct                  | Smi(count)            | Smi(0), unused    |
+  // +-------------------------+-----------------------+-------------------+
+  // | ref, uninitialized      | Smi(0)                | Smi(0)            |
+  // | ref, monomorphic        | WasmFuncRef(target)   | Smi(count>0)      |
+  // | ref, polymorphic        | FixedArray            | Undefined         |
+  // | ref, megamorphic        | MegamorphicSymbol     | Undefined         |
+  // +-------------------------+-----------------------+-------------------+
+  // | indirect, uninitialized | Smi(0)                | Smi(0)            |
+  // | indirect, monomorphic   | Smi(truncated_target) | Smi(count>0)      |
+  // | indirect, polymorphic   | FixedArray            | Undefined         |
+  // | indirect, megamorphic   | MegamorphicSymbol     | Undefined         |
+  // +-------------------------+-----------------------+-------------------+
+  // The FixedArray entries for the polymorphic cases look like the monomorphic
+  // entries in the feedback vector itself.
+  // See {UpdateCallRefOrIndirectIC} in {wasm.tq} for how this is written.
+  // Since this is combining untrusted data ({feedback} vector on the JS heap)
+  // with trusted data ({call_targets}), make sure to avoid an OOB access.
+  SBXCHECK_EQ(feedback->length(), call_targets.size() * 2);
   FeedbackMaker fm(isolate_, instance_data_, func_index,
                    feedback->length() / 2);
   for (int i = 0; i < feedback->length(); i += 2) {
-    Tagged<Object> value = feedback->get(i);
-    if (IsWasmFuncRef(value)) {
-      // Monomorphic.
-      int count = Smi::cast(feedback->get(i + 1)).value();
-      fm.AddCallRefCandidate(WasmFuncRef::cast(value), count);
-    } else if (IsFixedArray(value)) {
-      // Polymorphic.
-      Tagged<FixedArray> polymorphic = FixedArray::cast(value);
-      for (int j = 0; j < polymorphic->length(); j += 2) {
-        Tagged<Object> func_ref = polymorphic->get(j);
-        int count = Smi::cast(polymorphic->get(j + 1)).value();
-        fm.AddCallRefCandidate(WasmFuncRef::cast(func_ref), count);
-      }
-    } else if (IsSmi(value)) {
-      // Uninitialized, or a direct call collecting call count.
-      uint32_t target = call_targets[i / 2];
-      if (target != FunctionTypeFeedback::kNonDirectCall) {
-        int count = Smi::cast(value).value();
-        fm.AddCall(static_cast<int>(target), count);
-      } else if (v8_flags.trace_wasm_inlining) {
+    uint32_t sentinel_or_target = call_targets[i / 2];
+    Tagged<Object> first_slot = feedback->get(i);
+    Tagged<Object> second_slot = feedback->get(i + 1);
+
+    if (sentinel_or_target != FunctionTypeFeedback::kCallRef &&
+        sentinel_or_target != FunctionTypeFeedback::kCallIndirect) {
+      // Direct call counts.
+      int count = Smi::ToInt(first_slot);
+      DCHECK_EQ(Smi::ToInt(second_slot), 0);
+      // TODO(dlehmann): Currently, TurboFan assumes that we add feedback even
+      // if the call count is zero. Once TurboFan is gone, revisit if we can
+      // avoid this (similar to how we do for call_ref/call_indirect today).
+      fm.AddCall(static_cast<int>(sentinel_or_target), count);
+    } else if (IsSmi(first_slot) && Smi::ToInt(second_slot) == 0) {
+      // Uninitialized call_ref or call_indirect.
+      DCHECK_EQ(Smi::ToInt(first_slot), 0);
+      if (v8_flags.trace_wasm_inlining) {
         PrintF("[function %d: call #%d: uninitialized]\n", func_index, i / 2);
       }
-    } else if (v8_flags.trace_wasm_inlining) {
-      if (value == ReadOnlyRoots{isolate_}.megamorphic_symbol()) {
+    } else if (IsWasmFuncRef(first_slot)) {
+      // Monomorphic call_ref.
+      DCHECK_EQ(sentinel_or_target, FunctionTypeFeedback::kCallRef);
+      int count = Smi::ToInt(second_slot);
+      fm.AddCallRefCandidate(WasmFuncRef::cast(first_slot), count);
+    } else if (IsSmi(first_slot)) {
+      // Monomorphic call_indirect.
+      DCHECK_EQ(sentinel_or_target, FunctionTypeFeedback::kCallIndirect);
+      int count = Smi::ToInt(second_slot);
+      fm.AddCallIndirectCandidate(Smi::cast(first_slot), count);
+    } else if (IsFixedArray(first_slot)) {
+      // Polymorphic call_ref or call_indirect.
+      Tagged<FixedArray> polymorphic = FixedArray::cast(first_slot);
+      DCHECK(IsUndefined(second_slot));
+      if (sentinel_or_target == FunctionTypeFeedback::kCallRef) {
+        for (int j = 0; j < polymorphic->length(); j += 2) {
+          Tagged<WasmFuncRef> target = WasmFuncRef::cast(polymorphic->get(j));
+          int count = Smi::ToInt(polymorphic->get(j + 1));
+          fm.AddCallRefCandidate(target, count);
+        }
+      } else {
+        DCHECK_EQ(sentinel_or_target, FunctionTypeFeedback::kCallIndirect);
+        for (int j = 0; j < polymorphic->length(); j += 2) {
+          Tagged<Smi> target = Smi::cast(polymorphic->get(j));
+          int count = Smi::ToInt(polymorphic->get(j + 1));
+          fm.AddCallIndirectCandidate(target, count);
+        }
+      }
+    } else if (first_slot == ReadOnlyRoots{isolate_}.megamorphic_symbol()) {
+      DCHECK(IsUndefined(second_slot));
+      if (v8_flags.trace_wasm_inlining) {
         PrintF("[function %d: call #%d: megamorphic]\n", func_index, i / 2);
       }
+    } else {
+      UNREACHABLE();
     }
     fm.FinalizeCall();
   }
@@ -1478,8 +1561,7 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
 void TriggerTierUp(Isolate* isolate,
                    Tagged<WasmTrustedInstanceData> trusted_instance_data,
                    int func_index) {
-  NativeModule* native_module =
-      trusted_instance_data->module_object()->native_module();
+  NativeModule* native_module = trusted_instance_data->native_module();
   CompilationStateImpl* compilation_state =
       Impl(native_module->compilation_state());
   WasmCompilationUnit tiering_unit{func_index, ExecutionTier::kTurbofan,
@@ -1490,8 +1572,7 @@ void TriggerTierUp(Isolate* isolate,
   {
     base::SharedMutexGuard<base::kExclusive> mutex_guard(
         &module->type_feedback.mutex);
-    int array_index = wasm::declared_function_index(
-        trusted_instance_data->module(), func_index);
+    int array_index = wasm::declared_function_index(module, func_index);
     trusted_instance_data->tiering_budget_array()[array_index] =
         v8_flags.wasm_tiering_budget;
     int& stored_priority =
@@ -1505,10 +1586,9 @@ void TriggerTierUp(Isolate* isolate,
   // increased at least to four, and is a power of two.
   if (priority == 2 || !base::bits::IsPowerOfTwo(priority)) return;
 
-  // Before adding the tier-up unit or increasing priority, do process type
+  // Before adding the tier-up unit or increasing priority, process type
   // feedback for best code generation.
-  if (native_module->enabled_features().has_inlining() ||
-      native_module->module()->is_wasm_gc) {
+  if (native_module->enabled_features().has_inlining() || module->is_wasm_gc) {
     // TODO(jkummerow): we could have collisions here if different instances
     // of the same module have collected different feedback. If that ever
     // becomes a problem, figure out a solution.
@@ -1522,8 +1602,7 @@ void TriggerTierUp(Isolate* isolate,
 void TierUpNowForTesting(Isolate* isolate,
                          Tagged<WasmTrustedInstanceData> trusted_instance_data,
                          int func_index) {
-  NativeModule* native_module =
-      trusted_instance_data->module_object()->native_module();
+  NativeModule* native_module = trusted_instance_data->native_module();
   if (native_module->enabled_features().has_inlining() ||
       native_module->module()->is_wasm_gc) {
     TransitiveTypeFeedbackProcessor::Process(isolate, trusted_instance_data,
@@ -1537,9 +1616,8 @@ void TierUpNowForTesting(Isolate* isolate,
 
 void TierUpAllForTesting(
     Isolate* isolate, Tagged<WasmTrustedInstanceData> trusted_instance_data) {
-  const WasmModule* mod = trusted_instance_data->module();
-  NativeModule* native_module =
-      trusted_instance_data->module_object()->native_module();
+  NativeModule* native_module = trusted_instance_data->native_module();
+  const WasmModule* mod = native_module->module();
   WasmCodeRefScope code_ref_scope;
 
   uint32_t start = mod->num_imported_functions;
@@ -3717,7 +3795,9 @@ void CompilationStateImpl::InitializeCompilationProgress(
   // compilation hint.
   if (V8_UNLIKELY(v8_flags.wasm_eager_tier_up_function >= 0 &&
                   static_cast<uint32_t>(v8_flags.wasm_eager_tier_up_function) >=
-                      module->num_imported_functions)) {
+                      module->num_imported_functions &&
+                  static_cast<uint32_t>(v8_flags.wasm_eager_tier_up_function) <
+                      module->functions.size())) {
     uint32_t func_idx =
         v8_flags.wasm_eager_tier_up_function - module->num_imported_functions;
     WasmCompilationHint hint{WasmCompilationHintStrategy::kEager,
@@ -4028,6 +4108,12 @@ void CompilationStateImpl::OnFinishedUnits(
       if (code->tier() > reached_tier) {
         compilation_progress_[slot_index] = ReachedTierField::update(
             compilation_progress_[slot_index], code->tier());
+      } else if (v8_flags.wasm_deopt && code->tier() != reached_tier) {
+        DCHECK_EQ(reached_tier, ExecutionTier::kTurbofan);
+        DCHECK_EQ(code->tier(), ExecutionTier::kLiftoff);
+        compilation_progress_[slot_index] = ReachedTierField::update(
+            compilation_progress_[slot_index], code->tier());
+        compilation_unit_queues_.AllowAnotherTopTierJob(code->index());
       }
       DCHECK_LE(0, outstanding_baseline_units_);
     }
@@ -4285,7 +4371,7 @@ void CompilationStateImpl::PublishCompilationResults(
   PublishCode(base::VectorOf(unpublished_code));
 }
 
-void CompilationStateImpl::PublishCode(
+std::vector<WasmCode*> CompilationStateImpl::PublishCode(
     base::Vector<std::unique_ptr<WasmCode>> code) {
   WasmCodeRefScope code_ref_scope;
   std::vector<WasmCode*> published_code =
@@ -4295,7 +4381,8 @@ void CompilationStateImpl::PublishCode(
     GetWasmEngine()->LogCode(base::VectorOf(published_code));
   }
 
-  OnFinishedUnits(base::VectorOf(std::move(published_code)));
+  OnFinishedUnits(base::VectorOf(published_code));
+  return published_code;
 }
 
 void CompilationStateImpl::SchedulePublishCompilationResults(
@@ -4534,7 +4621,7 @@ WasmCode* CompileImportWrapper(
 
   std::unique_ptr<WasmCode> wasm_code = native_module->AddCode(
       result.func_index, result.code_desc, result.frame_slot_count,
-      result.tagged_parameter_slots,
+      result.ool_spill_count, result.tagged_parameter_slots,
       result.protected_instructions_data.as_vector(),
       result.source_positions.as_vector(),
       result.inlining_positions.as_vector(), result.deopt_data.as_vector(),

@@ -2748,7 +2748,7 @@ TEST(CodeSerializerExternalString) {
                             isolate->factory()->empty_fixed_array())
           .ToHandleChecked();
 
-  CHECK_EQ(15.0, Object::Number(*copy_result));
+  CHECK_EQ(15.0, Object::NumberValue(*copy_result));
 
   // This avoids the GC from trying to free stack allocated resources.
   i::Handle<i::ExternalOneByteString>::cast(one_byte_string)
@@ -2814,7 +2814,7 @@ TEST(CodeSerializerLargeExternalString) {
                             isolate->factory()->empty_fixed_array())
           .ToHandleChecked();
 
-  CHECK_EQ(42.0, Object::Number(*copy_result));
+  CHECK_EQ(42.0, Object::NumberValue(*copy_result));
 
   // This avoids the GC from trying to free stack allocated resources.
   i::Handle<i::ExternalOneByteString>::cast(name)->SetResource(isolate,
@@ -2870,7 +2870,7 @@ TEST(CodeSerializerExternalScriptName) {
                             isolate->factory()->empty_fixed_array())
           .ToHandleChecked();
 
-  CHECK_EQ(10.0, Object::Number(*copy_result));
+  CHECK_EQ(10.0, Object::NumberValue(*copy_result));
 
   // This avoids the GC from trying to free stack allocated resources.
   i::Handle<i::ExternalOneByteString>::cast(name)->SetResource(isolate,
@@ -3689,7 +3689,8 @@ v8::StartupData CreateSnapshotWithDefaultAndCustom() {
       CHECK(context->Global()->Set(context, v8_str("f"), function).FromJust());
       v8::Local<v8::ObjectTemplate> object_template =
           v8::ObjectTemplate::New(isolate);
-      object_template->SetAccessor(v8_str("x"), AccessorForSerialization);
+      object_template->SetNativeDataProperty(v8_str("x"),
+                                             AccessorForSerialization);
       v8::Local<v8::Object> object =
           object_template->NewInstance(context).ToLocalChecked();
       CHECK(context->Global()->Set(context, v8_str("o"), object).FromJust());
@@ -4382,6 +4383,8 @@ static void DeserializeAPIWrapperCallback(Local<v8::Object> holder,
   }
 }
 
+START_ALLOW_USE_DEPRECATED()
+
 UNINITIALIZED_TEST(SerializeApiWrapperData) {
   DisableAlwaysOpt();
   DisableEmbeddedBlobRefcounting();
@@ -4401,9 +4404,7 @@ UNINITIALIZED_TEST(SerializeApiWrapperData) {
 
     SnapshotCreatorParams params;
     params.create_params.cpp_heap =
-        v8::CppHeap::Create(platform, v8::CppHeapCreateParams(
-                                          {}, v8::WrapperDescriptor(0, 1, 0)))
-            .release();
+        v8::CppHeap::Create(platform, v8::CppHeapCreateParams({})).release();
     v8::SnapshotCreator creator(params.create_params);
     v8::Isolate* isolate = creator.GetIsolate();
     v8::CppHeap* cpp_heap = isolate->GetCppHeap();
@@ -4477,6 +4478,8 @@ UNINITIALIZED_TEST(SerializeApiWrapperData) {
   delete[] blob.data;
   FreeCurrentEmbeddedBlob();
 }
+
+END_ALLOW_USE_DEPRECATED()
 
 MaybeLocal<v8::Module> ResolveCallback(Local<v8::Context> context,
                                        Local<v8::String> specifier,
@@ -4840,7 +4843,8 @@ UNINITIALIZED_TEST(SnapshotCreatorIncludeGlobalProxy) {
       global_template->Set(isolate, "f", callback);
       global_template->SetHandler(v8::NamedPropertyHandlerConfiguration(
           NamedPropertyGetterForSerialization));
-      global_template->SetAccessor(v8_str("y"), AccessorForSerialization);
+      global_template->SetNativeDataProperty(v8_str("y"),
+                                             AccessorForSerialization);
       v8::Local<v8::Private> priv =
           v8::Private::ForApi(isolate, v8_str("cached"));
       global_template->SetAccessorProperty(
@@ -6241,16 +6245,16 @@ UNINITIALIZED_TEST(SharedStrings) {
   Isolate* i_isolate2 = reinterpret_cast<Isolate*>(isolate2);
 
   CHECK_EQ(i_isolate1->string_table(), i_isolate2->string_table());
-  i_isolate2->main_thread_local_heap()->BlockMainThreadWhileParked(
+  i_isolate2->main_thread_local_heap()->ExecuteMainThreadWhileParked(
       [i_isolate1]() { CheckObjectsAreInSharedHeap(i_isolate1); });
 
-  i_isolate1->main_thread_local_heap()->BlockMainThreadWhileParked(
+  i_isolate1->main_thread_local_heap()->ExecuteMainThreadWhileParked(
       [i_isolate2]() { CheckObjectsAreInSharedHeap(i_isolate2); });
 
   // Because both isolate1 and isolate2 are considered running on the main
   // thread, one must be parked to avoid deadlock in the shared heap
   // verification that may happen on client heap disposal.
-  i_isolate1->main_thread_local_heap()->BlockMainThreadWhileParked(
+  i_isolate1->main_thread_local_heap()->ExecuteMainThreadWhileParked(
       [isolate2]() { isolate2->Dispose(); });
   isolate1->Dispose();
 

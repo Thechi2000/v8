@@ -339,7 +339,11 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
             HeapType::from_code(code, false).name().c_str());
         return {kWasmBottom, 0};
       }
-      return {ValueType::RefNull(HeapType::from_code(code, false)), 1};
+      // String views are not nullable, so interpret the shorthand accordingly.
+      ValueType type = code == kStringRefCode
+                           ? kWasmStringRef
+                           : ValueType::Ref(HeapType::from_code(code, false));
+      return {type, 1};
     }
     case kI32Code:
       return {kWasmI32, 1};
@@ -354,6 +358,12 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
       Nullability nullability = code == kRefNullCode ? kNullable : kNonNullable;
       auto [heap_type, length] =
           read_heap_type<ValidationTag>(decoder, pc + 1, enabled);
+      if (!VALIDATE(!heap_type.is_string_view() ||
+                    nullability == kNonNullable)) {
+        DecodeError<ValidationTag>(decoder, pc,
+                                   "nullable string views don't exist");
+        return {kWasmBottom, 0};
+      }
       ValueType type = heap_type.is_bottom()
                            ? kWasmBottom
                            : ValueType::RefMaybeNull(heap_type, nullability);
@@ -818,7 +828,7 @@ struct MemoryAccessImmediate {
 
   template <typename ValidationTag>
   V8_INLINE MemoryAccessImmediate(Decoder* decoder, const uint8_t* pc,
-                                  uint32_t max_alignment, bool is_memory64,
+                                  uint32_t max_alignment, bool memory64_enabled,
                                   bool multi_memory_enabled,
                                   ValidationTag = {}) {
     // Check for the fast path (two single-byte LEBs, mem index 0).
@@ -830,7 +840,7 @@ struct MemoryAccessImmediate {
       offset = pc[1];
       length = 2;
     } else {
-      ConstructSlow<ValidationTag>(decoder, pc, max_alignment, is_memory64,
+      ConstructSlow<ValidationTag>(decoder, pc, max_alignment, memory64_enabled,
                                    multi_memory_enabled);
     }
     if (!VALIDATE(alignment <= max_alignment)) {
@@ -847,7 +857,7 @@ struct MemoryAccessImmediate {
   V8_NOINLINE V8_PRESERVE_MOST void ConstructSlow(Decoder* decoder,
                                                   const uint8_t* pc,
                                                   uint32_t max_alignment,
-                                                  bool is_memory64,
+                                                  bool memory64_enabled,
                                                   bool multi_memory_enabled) {
     uint32_t alignment_length;
     std::tie(alignment, alignment_length) =
@@ -863,7 +873,7 @@ struct MemoryAccessImmediate {
       mem_index = 0;
     }
     uint32_t offset_length;
-    if (is_memory64) {
+    if (memory64_enabled) {
       std::tie(offset, offset_length) =
           decoder->read_u64v<ValidationTag>(pc + length, "offset");
     } else {
@@ -1898,7 +1908,7 @@ class WasmDecoder : public Decoder {
                   imm.mem_index, num_memories);
       return false;
     }
-    if (!VALIDATE(this->module_->memories[0].is_memory64 ||
+    if (!VALIDATE(this->module_->memories[imm.mem_index].is_memory64 ||
                   imm.offset <= kMaxUInt32)) {
       this->DecodeError(pc, "memory offset outside 32-bit range: %" PRIu64,
                         imm.offset);
@@ -3729,6 +3739,11 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     this->detected_->Add(kFeature_reftypes);
     HeapTypeImmediate imm(this->enabled_, this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
+    if (!VALIDATE(!this->enabled_.has_stringref() ||
+                  !imm.type.is_string_view())) {
+      this->DecodeError(this->pc_ + 1, "cannot create null string view");
+      return 0;
+    }
     ValueType type = ValueType::RefNull(imm.type);
     Value* value = Push(type);
     CALL_INTERFACE_IF_OK_AND_REACHABLE(RefNull, type, value);
@@ -4669,19 +4684,11 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
              expected_type.representation() == HeapType::kNoExtern ||
              expected_type.representation() == HeapType::kNoExn));
   }
-  bool TypeCheckAlwaysFails(Value obj, uint32_t ref_index) {
-    // All old casts / checks treat null as failure.
-    const bool kNullSucceeds = false;
-    return TypeCheckAlwaysFails(obj, HeapType(ref_index), kNullSucceeds);
-  }
 
   // Checks if {obj} is a subtype of type, thus checking will always
   // succeed.
   bool TypeCheckAlwaysSucceeds(Value obj, HeapType type) {
     return IsSubtypeOf(obj.type, ValueType::RefNull(type), this->module_);
-  }
-  bool TypeCheckAlwaysSucceeds(Value obj, uint32_t ref_index) {
-    return TypeCheckAlwaysSucceeds(obj, HeapType(ref_index));
   }
 
 #define NON_CONST_ONLY                                                    \
@@ -4808,6 +4815,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         return opcode_length + imm.length;
       }
       case kExprArrayNewData: {
+        // TODO(14616): Add check that array sharedness == segment sharedness?
         NON_CONST_ONLY
         ArrayIndexImmediate array_imm(this, this->pc_ + opcode_length,
                                       validate);
@@ -4834,6 +4842,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         return opcode_length + array_imm.length + data_segment.length;
       }
       case kExprArrayNewElem: {
+        // TODO(14616): Add check that array sharedness == segment sharedness?
         NON_CONST_ONLY
         ArrayIndexImmediate array_imm(this, this->pc_ + opcode_length,
                                       validate);
@@ -4873,6 +4882,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       }
       case kExprArrayInitData: {
         NON_CONST_ONLY
+        // TODO(14616): Add check that array sharedness == segment sharedness?
         ArrayIndexImmediate array_imm(this, this->pc_ + opcode_length,
                                       validate);
         if (!this->Validate(this->pc_ + opcode_length, array_imm)) return 0;
@@ -4906,6 +4916,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       }
       case kExprArrayInitElem: {
         NON_CONST_ONLY
+        // TODO(14616): Add check that array sharedness == segment sharedness?
         ArrayIndexImmediate array_imm(this, this->pc_ + opcode_length,
                                       validate);
         if (!this->Validate(this->pc_ + opcode_length, array_imm)) return 0;
@@ -5841,7 +5852,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     break; /* to generic mem access code below */ \
   }
       ATOMIC_STORE_OP_LIST(CASE_ATOMIC_STORE_OP)
-#undef CASE_ATOMIC_OP
+#undef CASE_ATOMIC_STORE_OP
 #define CASE_ATOMIC_OP(Name, Type)                \
   case kExpr##Name: {                             \
     memtype = MachineType::Type();                \

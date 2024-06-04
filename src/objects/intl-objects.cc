@@ -9,12 +9,15 @@
 #include "src/objects/intl-objects.h"
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "src/api/api-inl.h"
+#include "src/base/logging.h"
 #include "src/base/strings.h"
+#include "src/common/globals.h"
 #include "src/date/date.h"
 #include "src/execution/isolate.h"
 #include "src/execution/local-isolate.h"
@@ -65,6 +68,11 @@ namespace internal {
 
 namespace {
 
+inline constexpr uint8_t AsOneByte(uint16_t ch) {
+  DCHECK_LE(ch, kMaxUInt8);
+  return static_cast<uint8_t>(ch);
+}
+
 constexpr uint8_t kToLower[256] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
     0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
@@ -90,25 +98,30 @@ constexpr uint8_t kToLower[256] = {
     0xFC, 0xFD, 0xFE, 0xFF,
 };
 
-inline constexpr uint16_t ToLatin1Lower(uint16_t ch) {
-  return static_cast<uint16_t>(kToLower[ch]);
+inline constexpr uint8_t ToLatin1Lower(uint8_t ch) {
+  static_assert(std::numeric_limits<decltype(ch)>::max() < arraysize(kToLower));
+  return kToLower[ch];
 }
+// Ensure callers explicitly truncate uint16_t.
+inline constexpr uint8_t ToLatin1Lower(uint16_t ch) = delete;
 
-// Does not work for U+00DF (sharp-s), U+00B5 (micron), U+00FF.
-inline constexpr uint16_t ToLatin1Upper(uint16_t ch) {
+// Does not work for U+00DF (sharp-s), U+00B5 (micron), U+00FF, or two-byte
+// values.
+inline constexpr uint8_t ToLatin1Upper(uint8_t ch) {
   DCHECK(ch != 0xDF && ch != 0xB5 && ch != 0xFF);
   return ch &
          ~((IsAsciiLower(ch) || (((ch & 0xE0) == 0xE0) && ch != 0xF7)) << 5);
 }
+// Ensure callers explicitly truncate uint16_t.
+inline constexpr uint8_t ToLatin1Upper(uint16_t ch) = delete;
 
-template <typename Char>
-bool ToUpperFastASCII(base::Vector<const Char> src,
+bool ToUpperFastASCII(base::Vector<const uint16_t> src,
                       Handle<SeqOneByteString> result) {
   // Do a faster loop for the case where all the characters are ASCII.
   uint16_t ored = 0;
   int32_t index = 0;
-  for (auto it = src.begin(); it != src.end(); ++it) {
-    uint16_t ch = static_cast<uint16_t>(*it);
+  for (const uint16_t* it = src.begin(); it != src.end(); ++it) {
+    uint16_t ch = *it;
     ored |= ch;
     result->SeqOneByteStringSet(index++, ToAsciiUpper(ch));
   }
@@ -127,7 +140,7 @@ bool ToUpperOneByte(base::Vector<const Char> src, uint8_t* dest,
   //  2. Lower case sharp-S converts to "SS" (two characters)
   *sharp_s_count = 0;
   for (auto it = src.begin(); it != src.end(); ++it) {
-    uint16_t ch = static_cast<uint16_t>(*it);
+    uint8_t ch = AsOneByte(*it);
     if (V8_UNLIKELY(ch == sharp_s)) {
       ++(*sharp_s_count);
       continue;
@@ -148,7 +161,7 @@ void ToUpperWithSharpS(base::Vector<const Char> src,
                        Handle<SeqOneByteString> result) {
   int32_t dest_index = 0;
   for (auto it = src.begin(); it != src.end(); ++it) {
-    uint16_t ch = static_cast<uint16_t>(*it);
+    uint8_t ch = AsOneByte(*it);
     if (ch == sharp_s) {
       result->SeqOneByteStringSet(dest_index++, 'S');
       result->SeqOneByteStringSet(dest_index++, 'S');
@@ -190,7 +203,7 @@ MaybeHandle<T> New(Isolate* isolate, Handle<JSFunction> constructor,
   Handle<Map> map;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, map,
-      JSFunction::GetDerivedMap(isolate, constructor, constructor), T);
+      JSFunction::GetDerivedMap(isolate, constructor, constructor));
   return T::New(isolate, map, locales, options, method_name);
 }
 }  // namespace
@@ -260,8 +273,7 @@ MaybeHandle<String> LocaleConvertCase(Isolate* isolate, Handle<String> s,
     // Case conversion can increase the string length (e.g. sharp-S => SS) so
     // that we have to handle RangeError exceptions here.
     ASSIGN_RETURN_ON_EXCEPTION(
-        isolate, result, isolate->factory()->NewRawTwoByteString(dest_length),
-        String);
+        isolate, result, isolate->factory()->NewRawTwoByteString(dest_length));
     DisallowGarbageCollection no_gc;
     DCHECK(s->IsFlat());
     String::FlatContent flat = s->GetFlatContent(no_gc);
@@ -321,7 +333,7 @@ Tagged<String> Intl::ConvertOneByteToLower(Tagged<String> src,
     // If not ASCII, we keep the result up to index_to_first_unprocessed and
     // process the rest.
     for (int index = index_to_first_unprocessed; index < length; ++index) {
-      dst_data[index] = ToLatin1Lower(static_cast<uint16_t>(src_data[index]));
+      dst_data[index] = ToLatin1Lower(src_data[index]);
     }
   } else {
     DCHECK(src_flat.IsTwoByte());
@@ -331,7 +343,11 @@ Tagged<String> Intl::ConvertOneByteToLower(Tagged<String> src,
     const uint16_t* src_data = src_flat.ToUC16Vector().begin();
     CopyChars(dst_data, src_data, index_to_first_unprocessed);
     for (int index = index_to_first_unprocessed; index < length; ++index) {
-      dst_data[index] = ToLatin1Lower(static_cast<uint16_t>(src_data[index]));
+      // Truncating cast of two-byte src character to one-byte value. For valid
+      // cases (where a one-byte sliced string points to a two-byte parent) this
+      // will not lose any information, but we need to truncate anyway to
+      // avoid undefined behavior if the parent string is corrupted.
+      dst_data[index] = ToLatin1Lower(AsOneByte(src_data[index]));
     }
   }
 
@@ -417,8 +433,7 @@ MaybeHandle<String> Intl::ConvertToUpper(Isolate* isolate, Handle<String> s) {
     // in the Latin-1 range.
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, result,
-        isolate->factory()->NewRawOneByteString(length + sharp_s_count),
-        String);
+        isolate->factory()->NewRawOneByteString(length + sharp_s_count));
     DisallowGarbageCollection no_gc;
     String::FlatContent flat = s->GetFlatContent(no_gc);
     if (flat.IsOneByte()) {
@@ -626,7 +641,7 @@ MaybeHandle<Object> Intl::LegacyUnwrapReceiver(Isolate* isolate,
   Handle<Object> obj_ordinary_has_instance;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, obj_ordinary_has_instance,
-      Object::OrdinaryHasInstance(isolate, constructor, receiver), Object);
+      Object::OrdinaryHasInstance(isolate, constructor, receiver));
   bool ordinary_has_instance =
       Object::BooleanValue(*obj_ordinary_has_instance, isolate);
 
@@ -638,8 +653,7 @@ MaybeHandle<Object> Intl::LegacyUnwrapReceiver(Isolate* isolate,
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, new_receiver,
         JSReceiver::GetProperty(isolate, receiver,
-                                isolate->factory()->intl_fallback_symbol()),
-        Object);
+                                isolate->factory()->intl_fallback_symbol()));
     return new_receiver;
   }
 
@@ -821,7 +835,7 @@ Maybe<std::vector<std::string>> Intl::CanonicalizeLocaleList(
   // up to 2^53-1 if {length_obj} says so. Since cases above 2^32 probably
   // don't happen in practice (and would be very slow if they do), we'll keep
   // the code simple for now by using a saturating to-uint32 conversion.
-  double raw_length = Object::Number(*length_obj);
+  double raw_length = Object::NumberValue(*length_obj);
   uint32_t len =
       raw_length >= kMaxUInt32 ? kMaxUInt32 : static_cast<uint32_t>(raw_length);
   // 6. Let k be 0.
@@ -1467,7 +1481,7 @@ MaybeHandle<String> Intl::NumberToLocaleString(Isolate* isolate,
                                                const char* method_name) {
   Handle<Object> numeric_obj;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, numeric_obj,
-                             Object::ToNumeric(isolate, num), String);
+                             Object::ToNumeric(isolate, num));
 
   // We only cache the instance when locales is a string/undefined and
   // options is undefined, as that is the only case when the specified
@@ -1501,8 +1515,7 @@ MaybeHandle<String> Intl::NumberToLocaleString(Isolate* isolate,
   }
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, number_format,
-      New<JSNumberFormat>(isolate, constructor, locales, options, method_name),
-      String);
+      New<JSNumberFormat>(isolate, constructor, locales, options, method_name));
 
   if (can_cache) {
     isolate->set_icu_object_in_cache(
@@ -2093,7 +2106,7 @@ MaybeHandle<JSObject> SupportedLocales(
   Handle<JSReceiver> options_obj;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, options_obj,
-      CoerceOptionsToObject(isolate, options, method_name), JSObject);
+      CoerceOptionsToObject(isolate, options, method_name));
 
   // 2. Let matcher be ? GetOption(options, "localeMatcher", "string",
   //       « "lookup", "best fit" », "best fit").
@@ -2144,8 +2157,7 @@ MaybeHandle<JSArray> AvailableCollations(Isolate* isolate) {
   std::unique_ptr<icu::StringEnumeration> enumeration(
       icu::Collator::getKeywordValues("collation", status));
   if (U_FAILURE(status)) {
-    THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kIcuError),
-                    JSArray);
+    THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kIcuError));
   }
   return Intl::ToJSArray(isolate, "co", enumeration.get(),
                          Intl::RemoveCollation, true);
@@ -2226,8 +2238,7 @@ MaybeHandle<JSArray> AvailableNumberingSystems(Isolate* isolate) {
   std::unique_ptr<icu::StringEnumeration> enumeration(
       icu::NumberingSystem::getAvailableNames(status));
   if (U_FAILURE(status)) {
-    THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kIcuError),
-                    JSArray);
+    THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kIcuError));
   }
   // Need to filter out isAlgorithmic
   return Intl::ToJSArray(
@@ -2248,8 +2259,7 @@ MaybeHandle<JSArray> AvailableTimeZones(Isolate* isolate) {
       icu::TimeZone::createTimeZoneIDEnumeration(
           UCAL_ZONE_TYPE_CANONICAL_LOCATION, nullptr, nullptr, status));
   if (U_FAILURE(status)) {
-    THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kIcuError),
-                    JSArray);
+    THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kIcuError));
   }
   return Intl::ToJSArray(isolate, nullptr, enumeration.get(), nullptr, true);
 }
@@ -2276,7 +2286,7 @@ MaybeHandle<JSArray> Intl::SupportedValuesOf(Isolate* isolate,
   // 1. 1. Let key be ? ToString(key).
   Handle<String> key_str;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, key_str,
-                             Object::ToString(isolate, key_obj), JSArray);
+                             Object::ToString(isolate, key_obj));
   // 2. If key is "calendar", then
   if (factory->calendar_string()->Equals(*key_str)) {
     // a. Let list be ! AvailableCalendars( ).
@@ -2314,8 +2324,7 @@ MaybeHandle<JSArray> Intl::SupportedValuesOf(Isolate* isolate,
   THROW_NEW_ERROR(
       isolate,
       NewRangeError(MessageTemplate::kInvalid,
-                    factory->NewStringFromStaticChars("key"), key_str),
-      JSArray);
+                    factory->NewStringFromStaticChars("key"), key_str));
 }
 
 // ECMA 402 Intl.*.supportedLocalesOf
@@ -2591,7 +2600,7 @@ MaybeHandle<String> Intl::Normalize(Isolate* isolate, Handle<String> string,
   } else {
     Handle<String> form;
     ASSIGN_RETURN_ON_EXCEPTION(isolate, form,
-                               Object::ToString(isolate, form_input), String);
+                               Object::ToString(isolate, form_input));
 
     if (String::Equals(isolate, form, isolate->factory()->NFC_string())) {
       form_name = "nfc";
@@ -2613,8 +2622,7 @@ MaybeHandle<String> Intl::Normalize(Isolate* isolate, Handle<String> string,
           isolate->factory()->NewStringFromStaticChars("NFC, NFD, NFKC, NFKD");
       THROW_NEW_ERROR(
           isolate,
-          NewRangeError(MessageTemplate::kNormalizationForm, valid_forms),
-          String);
+          NewRangeError(MessageTemplate::kNormalizationForm, valid_forms));
     }
   }
 
@@ -2641,7 +2649,7 @@ MaybeHandle<String> Intl::Normalize(Isolate* isolate, Handle<String> string,
   normalizer->normalizeSecondAndAppend(result, unnormalized, status);
 
   if (U_FAILURE(status)) {
-    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kIcuError), String);
+    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kIcuError));
   }
 
   return Intl::ToString(isolate, result);
@@ -2857,7 +2865,7 @@ MaybeHandle<String> Intl::FormattedToString(
   UErrorCode status = U_ZERO_ERROR;
   icu::UnicodeString result = formatted.toString(status);
   if (U_FAILURE(status)) {
-    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kIcuError), String);
+    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kIcuError));
   }
   return Intl::ToString(isolate, result);
 }

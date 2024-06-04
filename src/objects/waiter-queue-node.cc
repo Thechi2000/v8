@@ -10,6 +10,19 @@
 
 namespace v8 {
 namespace internal {
+
+namespace {
+
+bool WasInterruptedWithoutException(Isolate* requester, bool interrupted) {
+  if (interrupted) {
+    return !IsException(requester->stack_guard()->HandleInterrupts(),
+                        requester);
+  }
+  return false;
+}
+
+}  // namespace
+
 namespace detail {
 
 WaiterQueueNode::WaiterQueueNode(Isolate* requester) : requester_(requester) {}
@@ -40,6 +53,28 @@ void WaiterQueueNode::Enqueue(WaiterQueueNode** head,
   }
 }
 
+void WaiterQueueNode::DequeueUnchecked(WaiterQueueNode** head) {
+  if (next_ == this) {
+    // The queue contains exactly 1 node.
+    *head = nullptr;
+  } else {
+    // The queue contains >1 nodes.
+    if (this == *head) {
+      WaiterQueueNode* tail = (*head)->prev_;
+      // The matched node is the head, so next is the new head.
+      next_->prev_ = tail;
+      tail->next_ = next_;
+      *head = next_;
+    } else {
+      // The matched node is in the middle of the queue, so the head does
+      // not need to be updated.
+      prev_->next_ = next_;
+      next_->prev_ = prev_;
+    }
+  }
+  SetNotInListForVerification();
+}
+
 WaiterQueueNode* WaiterQueueNode::DequeueMatching(
     WaiterQueueNode** head, const DequeueMatcher& matcher) {
   DCHECK_NOT_NULL(head);
@@ -48,31 +83,30 @@ WaiterQueueNode* WaiterQueueNode::DequeueMatching(
   WaiterQueueNode* cur = *head;
   do {
     if (matcher(cur)) {
-      WaiterQueueNode* next = cur->next_;
-      if (next == cur) {
-        // The queue contains exactly 1 node.
-        *head = nullptr;
-      } else {
-        // The queue contains >1 nodes.
-        if (cur == original_head) {
-          // The matched node is the original head, so next is the new head.
-          WaiterQueueNode* tail = original_head->prev_;
-          next->prev_ = tail;
-          tail->next_ = next;
-          *head = next;
-        } else {
-          // The matched node is in the middle of the queue, so the head does
-          // not need to be updated.
-          cur->prev_->next_ = next;
-          next->prev_ = cur->prev_;
-        }
-      }
-      cur->SetNotInListForVerification();
+      cur->DequeueUnchecked(head);
       return cur;
     }
     cur = cur->next_;
   } while (cur != original_head);
   return nullptr;
+}
+
+void WaiterQueueNode::DequeueAllMatchingForAsyncCleanup(
+    WaiterQueueNode** head, const DequeueMatcher& matcher) {
+  DCHECK_NOT_NULL(head);
+  DCHECK_NOT_NULL(*head);
+  WaiterQueueNode* original_tail = (*head)->prev_;
+  WaiterQueueNode* cur = *head;
+  for (;;) {
+    DCHECK_NOT_NULL(cur);
+    WaiterQueueNode* next = cur->next_;
+    if (matcher(cur)) {
+      cur->DequeueUnchecked(head);
+      cur->SetReadyForAsyncCleanup();
+    }
+    if (cur == original_tail) break;
+    cur = next;
+  }
 }
 
 // static
@@ -81,8 +115,6 @@ WaiterQueueNode* WaiterQueueNode::Dequeue(WaiterQueueNode** head) {
 }
 
 // static
-// Splits at most {count} nodes of the waiter list of into its own list and
-// returns it, mutating {head} to be the head of the back list.
 WaiterQueueNode* WaiterQueueNode::Split(WaiterQueueNode** head,
                                         uint32_t count) {
   DCHECK_GT(count, 0);
@@ -115,8 +147,6 @@ WaiterQueueNode* WaiterQueueNode::Split(WaiterQueueNode** head,
 }
 
 // static
-// This method must be called from a known waiter queue head. Incorrectly
-// encoded lists can cause this method to infinitely loop.
 int WaiterQueueNode::LengthFromHead(WaiterQueueNode* head) {
   WaiterQueueNode* cur = head;
   int len = 0;
@@ -125,51 +155,6 @@ int WaiterQueueNode::LengthFromHead(WaiterQueueNode* head) {
     cur = cur->next_;
   } while (cur != head);
   return len;
-}
-
-void WaiterQueueNode::Wait() {
-  AllowGarbageCollection allow_before_parking;
-  requester_->main_thread_local_heap()->BlockWhileParked([this]() {
-    base::MutexGuard guard(&wait_lock_);
-    while (should_wait) {
-      wait_cond_var_.Wait(&wait_lock_);
-    }
-  });
-}
-
-// Returns false if timed out, true otherwise.
-bool WaiterQueueNode::WaitFor(const base::TimeDelta& rel_time) {
-  bool result;
-  AllowGarbageCollection allow_before_parking;
-  requester_->main_thread_local_heap()->BlockWhileParked([this, rel_time,
-                                                          &result]() {
-    base::MutexGuard guard(&wait_lock_);
-    base::TimeTicks current_time = base::TimeTicks::Now();
-    base::TimeTicks timeout_time = current_time + rel_time;
-    for (;;) {
-      if (!should_wait) {
-        result = true;
-        return;
-      }
-      current_time = base::TimeTicks::Now();
-      if (current_time >= timeout_time) {
-        result = false;
-        return;
-      }
-      base::TimeDelta time_until_timeout = timeout_time - current_time;
-      bool wait_res = wait_cond_var_.WaitFor(&wait_lock_, time_until_timeout);
-      USE(wait_res);
-      // The wake up may have been spurious, so loop again.
-    }
-  });
-  return result;
-}
-
-void WaiterQueueNode::Notify() {
-  base::MutexGuard guard(&wait_lock_);
-  should_wait = false;
-  wait_cond_var_.NotifyOne();
-  SetNotInListForVerification();
 }
 
 uint32_t WaiterQueueNode::NotifyAllInList() {
@@ -193,6 +178,105 @@ void WaiterQueueNode::SetNotInListForVerification() {
 #ifdef DEBUG
   next_ = prev_ = nullptr;
 #endif
+}
+
+SyncWaiterQueueNode::WaitResult SyncWaiterQueueNode::Wait() {
+  AllowGarbageCollection allow_before_parking;
+  should_wait_ = true;
+  // Outer loop checks for interruptions.
+  for (;;) {
+    WaitResult result;
+    requester_->main_thread_local_heap()->ExecuteWhileParked([this, &result]() {
+      base::MutexGuard guard(&wait_lock_);
+      // Check for interruptions first so that we don't drop any
+      // interrupts that came while the lock wasn't held.
+      while (should_wait_ && !thread_interrupted_) {
+        wait_cond_var_.Wait(&wait_lock_);
+      }
+      if (thread_interrupted_) {
+        result = WaitResult::kThreadTerminated;
+        thread_interrupted_ = false;
+        return;
+      }
+      result = WaitResult::kNotified;
+    });
+    // This must be outside of the critical section to prevent deadlock from
+    // lock ordering between `wait_lock` and mutexes locked by HandleInterrupts.
+    if (WasInterruptedWithoutException(
+            requester_, result == WaitResult::kThreadTerminated)) {
+      // An interrupt signal was received but no exception was thrown. Likely
+      // due to GC.
+      continue;
+    }
+    return result;
+  }
+}
+
+SyncWaiterQueueNode::WaitResult SyncWaiterQueueNode::WaitFor(
+    const base::TimeDelta& rel_time) {
+  AllowGarbageCollection allow_before_parking;
+  should_wait_ = true;
+  // Outer loop checks for interruptions.
+  for (;;) {
+    WaitResult result;
+    requester_->main_thread_local_heap()->ExecuteWhileParked([this, rel_time,
+                                                              &result]() {
+      base::MutexGuard guard(&wait_lock_);
+      base::TimeTicks current_time = base::TimeTicks::Now();
+      base::TimeTicks timeout_time = current_time + rel_time;
+      for (;;) {
+        // Check for interruptions first so that we don't drop any
+        // interrupts that came while the lock wasn't held.
+        if (thread_interrupted_) {
+          result = WaitResult::kThreadTerminated;
+          thread_interrupted_ = false;
+          return;
+        }
+        if (!should_wait_) {
+          result = WaitResult::kNotified;
+          return;
+        }
+        current_time = base::TimeTicks::Now();
+        if (current_time >= timeout_time) {
+          result = WaitResult::kTimedOut;
+          return;
+        }
+        base::TimeDelta time_until_timeout = timeout_time - current_time;
+        bool wait_res = wait_cond_var_.WaitFor(&wait_lock_, time_until_timeout);
+        USE(wait_res);
+        // The wake up may have been spurious, so loop again.
+      }
+    });
+    // This must be outside of the critical section to prevent deadlock from
+    // lock ordering between `wait_lock` and mutexes locked by HandleInterrupts.
+    if (WasInterruptedWithoutException(
+            requester_, result == WaitResult::kThreadTerminated)) {
+      // An interrupt signal was received but no exception was thrown. Likely
+      // due to GC.
+      continue;
+    }
+    return result;
+  }
+}
+
+void SyncWaiterQueueNode::Notify() {
+  base::MutexGuard guard(&wait_lock_);
+  should_wait_ = false;
+  wait_cond_var_.NotifyOne();
+  SetNotInListForVerification();
+}
+
+void SyncWaiterQueueNode::NotifyInterrupted() {
+  base::MutexGuard guard(&wait_lock_);
+  thread_interrupted_ = true;
+  wait_cond_var_.NotifyOne();
+}
+
+bool SyncWaiterQueueNode::IsSameIsolateForAsyncCleanup(Isolate* isolate) {
+  // Sync waiters are only queued while the thread is sleeping, so there
+  // should not be sync nodes while cleaning up the isolate.
+  DCHECK_NE(requester_, isolate);
+  return false;
 }
 
 }  // namespace detail

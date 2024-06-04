@@ -1363,18 +1363,24 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
         object, WasmTypeInfo::kNativeTypeOffset, kWasmTypeInfoNativeTypeTag);
   }
 
-  TNode<RawPtrT> LoadWasmExportedFunctionDataSigPtr(
-      TNode<WasmExportedFunctionData> object) {
-    return LoadExternalPointerFromObject(object,
-                                         WasmExportedFunctionData::kSigOffset,
-                                         kWasmExportedFunctionDataSignatureTag);
-  }
-
   TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFuncRef(
       TNode<WasmFuncRef> func_ref) {
     return CAST(LoadTrustedPointerFromObject(
         func_ref, WasmFuncRef::kTrustedInternalOffset,
         kWasmInternalFunctionIndirectPointerTag));
+  }
+
+  TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFunctionData(
+      TNode<WasmFunctionData> data) {
+    return CAST(LoadProtectedPointerField(
+        data, WasmFunctionData::kProtectedInternalOffset));
+  }
+
+  TNode<WasmTrustedInstanceData>
+  LoadWasmTrustedInstanceDataFromWasmExportedFunctionData(
+      TNode<WasmExportedFunctionData> data) {
+    return CAST(LoadProtectedPointerField(
+        data, WasmExportedFunctionData::kProtectedInstanceDataOffset));
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -1951,6 +1957,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<BytecodeArray> LoadSharedFunctionInfoBytecodeArray(
       TNode<SharedFunctionInfo> sfi);
+
+  TNode<Int32T> LoadBytecodeArrayParameterCount(
+      TNode<BytecodeArray> bytecode_array);
+  TNode<Int32T> LoadBytecodeArrayParameterCountWithoutReceiver(
+      TNode<BytecodeArray> bytecode_array);
 
   void StoreObjectByteNoWriteBarrier(TNode<HeapObject> object, int offset,
                                      TNode<Word32T> value);
@@ -4023,6 +4034,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Smi> LoadTransitionInfo(TNode<AllocationSite> allocation_site);
   TNode<JSObject> LoadBoilerplate(TNode<AllocationSite> allocation_site);
   TNode<Int32T> LoadElementsKind(TNode<AllocationSite> allocation_site);
+  TNode<Object> LoadNestedAllocationSite(TNode<AllocationSite> allocation_site);
 
   enum class IndexAdvanceMode { kPre, kPost };
   enum class LoopUnrollingMode { kNo, kYes };
@@ -4249,7 +4261,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                     TNode<Smi>* cache_length_out,
                     UpdateFeedbackMode update_feedback_mode);
 
-  TNode<String> Typeof(TNode<Object> value);
+  TNode<String> Typeof(
+      TNode<Object> value, std::optional<TNode<UintPtrT>> slot_id = {},
+      std::optional<TNode<HeapObject>> maybe_feedback_vector = {});
 
   TNode<HeapObject> GetSuperConstructor(TNode<JSFunction> active_function);
 
@@ -4748,9 +4762,19 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                               TNode<Uint8T> property_details,
                               Label* needs_resize);
 
-  TNode<Object> CallOnCentralStack(TNode<Context> context, TNode<Object> target,
-                                   TNode<Int32T> num_args,
-                                   TNode<FixedArray> args);
+  // If the current code is running on a secondary stack, move the stack pointer
+  // to the central stack (but not the frame pointer) and adjust the stack
+  // limit. Returns the old stack pointer, or nullptr if no switch was
+  // performed.
+  TNode<RawPtrT> SwitchToTheCentralStackIfNeeded(TNode<Object> receiver);
+  // Switch the SP back to the secondary stack after switching to the central
+  // stack.
+  void SwitchFromTheCentralStack(TNode<RawPtrT> old_sp, TNode<Object> receiver);
+
+  TNode<BoolT> IsMarked(TNode<Object> object);
+
+  void GetMarkBit(TNode<IntPtrT> object, TNode<IntPtrT>* cell,
+                  TNode<IntPtrT>* mask);
 
  private:
   friend class CodeStubArguments;
@@ -4804,6 +4828,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Implements [Descriptor/Transition]Array::number_of_entries.
   template <typename Array>
   TNode<Uint32T> NumberOfEntries(TNode<Array> array);
+
+  template <typename Array>
+  constexpr int MaxNumberOfEntries();
 
   // Implements [Descriptor/Transition]Array::GetSortedKeyIndex.
   template <typename Array>
@@ -4904,9 +4931,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<Object> value, ElementsKind elements_kind,
       TNode<TValue> converted_value, TVariable<Object>* maybe_converted_value);
 
-  TNode<RawPtrT> SwitchToTheCentralStackForJS(TNode<Object> callable_node);
-  void SwitchFromTheCentralStackForJS(TNode<RawPtrT> old_sp,
-                                      TNode<Object> callable);
+  TNode<RawPtrT> SwitchToTheCentralStack(TNode<Object> receiver);
 };
 
 class V8_EXPORT_PRIVATE CodeStubArguments {

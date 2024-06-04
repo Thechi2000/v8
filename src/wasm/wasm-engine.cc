@@ -961,11 +961,6 @@ void WasmEngine::LeaveDebuggingForIsolate(Isolate* isolate) {
   }
 }
 
-std::shared_ptr<NativeModule> WasmEngine::ExportNativeModule(
-    Handle<WasmModuleObject> module_object) {
-  return module_object->shared_native_module();
-}
-
 namespace {
 Handle<Script> CreateWasmScript(Isolate* isolate,
                                 std::shared_ptr<NativeModule> native_module,
@@ -1105,6 +1100,15 @@ void WasmEngine::FlushCode() {
     native_module->RemoveCompiledCode(
         NativeModule::RemoveFilter::kRemoveLiftoffCode);
   }
+}
+
+size_t WasmEngine::GetLiftoffCodeSize() {
+  size_t codesize_liftoff = 0;
+  for (auto& entry : native_modules_) {
+    NativeModule* native_module = entry.first;
+    codesize_liftoff += native_module->SumLiftoffCodeSize();
+  }
+  return codesize_liftoff;
 }
 
 std::shared_ptr<CompilationStatistics>

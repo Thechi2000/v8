@@ -691,8 +691,7 @@ Maybe<bool> ValueSerializer::WriteJSObject(Handle<JSObject> object) {
                   details.location() == PropertyLocation::kField)) {
       DCHECK_EQ(PropertyKind::kData, details.kind());
       FieldIndex field_index = FieldIndex::ForDetails(*map, details);
-      value = JSObject::FastPropertyAt(isolate_, object,
-                                       details.representation(), field_index);
+      value = handle(object->RawFastPropertyAt(field_index), isolate_);
     } else {
       // This logic should essentially match WriteJSObjectPropertiesSlow.
       // If the property is no longer found, do not serialize it.
@@ -847,7 +846,7 @@ Maybe<bool> ValueSerializer::WriteJSArray(Handle<JSArray> array) {
 
 void ValueSerializer::WriteJSDate(Tagged<JSDate> date) {
   WriteTag(SerializationTag::kDate);
-  WriteDouble(Object::Number(date->value()));
+  WriteDouble(Object::NumberValue(date->value()));
 }
 
 Maybe<bool> ValueSerializer::WriteJSPrimitiveWrapper(
@@ -862,7 +861,7 @@ Maybe<bool> ValueSerializer::WriteJSPrimitiveWrapper(
       WriteTag(SerializationTag::kFalseObject);
     } else if (IsNumber(inner_value, cage_base)) {
       WriteTag(SerializationTag::kNumberObject);
-      WriteDouble(Object::Number(inner_value));
+      WriteDouble(Object::NumberValue(inner_value));
     } else if (IsBigInt(inner_value, cage_base)) {
       WriteTag(SerializationTag::kBigIntObject);
       WriteBigIntContents(BigInt::cast(inner_value));
@@ -1009,7 +1008,6 @@ Maybe<bool> ValueSerializer::WriteJSArrayBufferView(
   ArrayBufferViewTag tag = ArrayBufferViewTag::kInt8Array;
   if (IsJSTypedArray(view)) {
     if (JSTypedArray::cast(view)->IsOutOfBounds()) {
-      DCHECK(v8_flags.harmony_rab_gsab);
       return ThrowDataCloneError(MessageTemplate::kDataCloneError,
                                  handle(view, isolate_));
     }
@@ -1025,7 +1023,6 @@ Maybe<bool> ValueSerializer::WriteJSArrayBufferView(
     DCHECK(IsJSDataViewOrRabGsabDataView(view));
     if (IsJSRabGsabDataView(view) &&
         JSRabGsabDataView::cast(view)->IsOutOfBounds()) {
-      DCHECK(v8_flags.harmony_rab_gsab);
       return ThrowDataCloneError(MessageTemplate::kDataCloneError,
                                  handle(view, isolate_));
     }
@@ -1131,11 +1128,8 @@ Maybe<bool> ValueSerializer::WriteWasmModule(Handle<WasmModuleObject> object) {
     return ThrowDataCloneError(MessageTemplate::kDataCloneError, object);
   }
 
-  // TODO(titzer): introduce a Utils::ToLocal for WasmModuleObject.
   Maybe<uint32_t> transfer_id = delegate_->GetWasmModuleTransferId(
-      reinterpret_cast<v8::Isolate*>(isolate_),
-      v8::Local<v8::WasmModuleObject>::Cast(
-          Utils::ToLocal(Handle<JSObject>::cast(object))));
+      reinterpret_cast<v8::Isolate*>(isolate_), Utils::ToLocal(object));
   RETURN_VALUE_IF_EXCEPTION(isolate_, Nothing<bool>());
   uint32_t id = 0;
   if (transfer_id.To(&id)) {
@@ -1264,7 +1258,7 @@ Maybe<bool> ValueSerializer::ThrowDataCloneError(
 }
 
 Maybe<bool> ValueSerializer::ThrowDataCloneError(MessageTemplate index,
-                                                 Handle<Object> arg0) {
+                                                 DirectHandle<Object> arg0) {
   Handle<String> message =
       MessageFormatter::Format(isolate_, index, base::VectorOf({arg0}));
   if (delegate_) {
@@ -2085,7 +2079,7 @@ MaybeHandle<JSArrayBuffer> ValueDeserializer::ReadJSArrayBuffer(
              ->GetSharedArrayBufferFromId(
                  reinterpret_cast<v8::Isolate*>(isolate_), clone_id)
              .ToLocal(&sab_value)) {
-      RETURN_EXCEPTION_IF_EXCEPTION(isolate_, JSArrayBuffer);
+      RETURN_EXCEPTION_IF_EXCEPTION(isolate_);
       return MaybeHandle<JSArrayBuffer>();
     }
     Handle<JSArrayBuffer> array_buffer = Utils::OpenHandle(*sab_value);
@@ -2104,13 +2098,6 @@ MaybeHandle<JSArrayBuffer> ValueDeserializer::ReadJSArrayBuffer(
     }
     if (byte_length > max_byte_length) {
       return MaybeHandle<JSArrayBuffer>();
-    }
-    if (!v8_flags.harmony_rab_gsab) {
-      // Disable resizability. This ensures that no resizable buffers are
-      // created in a version which has the harmony_rab_gsab turned off, even if
-      // such a version is reading data containing resizable buffers from disk.
-      is_resizable = false;
-      max_byte_length = byte_length;
     }
   }
   if (byte_length > static_cast<size_t>(end_ - position_)) {
@@ -2232,16 +2219,6 @@ bool ValueDeserializer::ValidateJSArrayBufferViewFlags(
 
   // TODO(marja): When the version number is bumped the next time, check that
   // serialized_flags doesn't contain spurious 1-bits.
-
-  if (!v8_flags.harmony_rab_gsab) {
-    // Disable resizability. This ensures that no resizable buffers are
-    // created in a version which has the harmony_rab_gsab turned off, even if
-    // such a version is reading data containing resizable buffers from disk.
-    is_length_tracking = false;
-    is_backed_by_rab = false;
-    // The resizability of the buffer was already disabled.
-    CHECK(!buffer->is_resizable_by_js());
-  }
 
   if (is_backed_by_rab || is_length_tracking) {
     if (!buffer->is_resizable_by_js()) {
@@ -2374,7 +2351,7 @@ MaybeHandle<JSObject> ValueDeserializer::ReadWasmModuleTransfer() {
            ->GetWasmModuleFromId(reinterpret_cast<v8::Isolate*>(isolate_),
                                  transfer_id)
            .ToLocal(&module_value)) {
-    RETURN_EXCEPTION_IF_EXCEPTION(isolate_, JSObject);
+    RETURN_EXCEPTION_IF_EXCEPTION(isolate_);
     return MaybeHandle<JSObject>();
   }
   uint32_t id = next_id_++;
@@ -2431,7 +2408,7 @@ MaybeHandle<HeapObject> ValueDeserializer::ReadSharedObject() {
 
   uint32_t shared_object_id;
   if (!ReadVarint<uint32_t>().To(&shared_object_id)) {
-    RETURN_EXCEPTION_IF_EXCEPTION(isolate_, HeapObject);
+    RETURN_EXCEPTION_IF_EXCEPTION(isolate_);
     return MaybeHandle<HeapObject>();
   }
 
@@ -2444,7 +2421,7 @@ MaybeHandle<HeapObject> ValueDeserializer::ReadSharedObject() {
     const v8::SharedValueConveyor* conveyor = delegate_->GetSharedValueConveyor(
         reinterpret_cast<v8::Isolate*>(isolate_));
     if (!conveyor) {
-      RETURN_EXCEPTION_IF_EXCEPTION(isolate_, HeapObject);
+      RETURN_EXCEPTION_IF_EXCEPTION(isolate_);
       return MaybeHandle<HeapObject>();
     }
     shared_object_conveyor_ = conveyor->private_.get();
@@ -2463,7 +2440,7 @@ MaybeHandle<JSObject> ValueDeserializer::ReadHostObject() {
   v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate_);
   v8::Local<v8::Object> object;
   if (!delegate_->ReadHostObject(v8_isolate).ToLocal(&object)) {
-    RETURN_EXCEPTION_IF_EXCEPTION(isolate_, JSObject);
+    RETURN_EXCEPTION_IF_EXCEPTION(isolate_);
     return MaybeHandle<JSObject>();
   }
   Handle<JSObject> js_object =

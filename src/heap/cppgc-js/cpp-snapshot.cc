@@ -40,13 +40,13 @@ class EmbedderNode : public v8::EmbedderGraph::Node {
  public:
   EmbedderNode(const HeapObjectHeader* header_address,
                cppgc::internal::HeapObjectName name, size_t size)
-      : header_address_(header_address), name_(name), size_(size) {
-    USE(size_);
-  }
+      : header_address_(header_address),
+        name_(name.value),
+        size_(name.name_was_hidden ? 0 : size) {}
   ~EmbedderNode() override = default;
 
-  const char* Name() final { return name_.value; }
-  size_t SizeInBytes() final { return name_.name_was_hidden ? 0 : size_; }
+  const char* Name() final { return name_; }
+  size_t SizeInBytes() final { return size_; }
 
   void SetWrapperNode(v8::EmbedderGraph::Node* wrapper_node) {
     // An embedder node may only be merged with a single wrapper node, as
@@ -81,7 +81,7 @@ class EmbedderNode : public v8::EmbedderGraph::Node {
 
  private:
   const void* header_address_;
-  cppgc::internal::HeapObjectName name_;
+  const char* name_;
   size_t size_;
   Node* wrapper_node_ = nullptr;
   Detachedness detachedness_ = Detachedness::kUnknown;
@@ -381,10 +381,9 @@ class StateStorage final {
 };
 
 void* ExtractEmbedderDataBackref(Isolate* isolate, CppHeap& cpp_heap,
-                                 v8::Local<v8::Value> v8_value) {
-  if (!v8_value->IsObject()) {
+                                 v8::Local<v8::Data> v8_value) {
+  if (!(v8_value->IsValue() && v8_value.As<v8::Value>()->IsObject()))
     return nullptr;
-  }
 
   Handle<Object> v8_object = Utils::OpenHandle(*v8_value);
   if (!IsJSObject(*v8_object) ||
@@ -406,7 +405,7 @@ void* ExtractEmbedderDataBackref(Isolate* isolate, CppHeap& cpp_heap,
   }
   // Wrapper using cpp_heap_wrappable field.
   return JSApiWrapper(*js_object)
-      .GetCppHeapWrappable<kAnyExternalPointerTag>(isolate);
+      .GetCppHeapWrappable(isolate, kAnyCppHeapPointer);
 }
 
 // The following implements a snapshotting algorithm for C++ objects that also
@@ -507,14 +506,14 @@ class CppGraphBuilderImpl final {
   void AddEdge(State& parent, const TracedReferenceBase& ref,
                const std::string& edge_name) {
     DCHECK(parent.IsVisibleNotDependent());
-    v8::Local<v8::Value> v8_value =
+    v8::Local<v8::Data> v8_data =
         ref.Get(reinterpret_cast<v8::Isolate*>(cpp_heap_.isolate()));
-    if (v8_value.IsEmpty()) return;
+    if (v8_data.IsEmpty()) return;
 
     if (!parent.get_node()) {
       parent.set_node(AddNode(*parent.header()));
     }
-    auto* v8_node = graph_.V8Node(v8_value);
+    auto* v8_node = graph_.V8Node(v8_data);
     if (!edge_name.empty()) {
       graph_.AddEdge(parent.get_node(), v8_node,
                      parent.get_node()->InternalizeEdgeName(edge_name));
@@ -529,8 +528,10 @@ class CppGraphBuilderImpl final {
     // `parent`, then the nodes are merged.
     void* back_reference_object = ExtractEmbedderDataBackref(
         reinterpret_cast<v8::internal::Isolate*>(cpp_heap_.isolate()),
-        cpp_heap_, v8_value);
+        cpp_heap_, v8_data);
     if (!back_reference_object) return;
+    // Only JS objects have back references.
+    DCHECK(v8_data->IsValue() && v8_data.As<v8::Value>()->IsObject());
 
     auto& back_header = HeapObjectHeader::FromObject(back_reference_object);
     auto& back_state = states_.GetExistingState(back_header);
@@ -550,7 +551,7 @@ class CppGraphBuilderImpl final {
         reinterpret_cast<Isolate*>(cpp_heap_.isolate())->heap_profiler();
     if (profiler->HasGetDetachednessCallback()) {
       back_state.get_node()->SetDetachedness(
-          profiler->GetDetachedness(v8_value, 0));
+          profiler->GetDetachedness(v8_data.As<v8::Value>(), 0));
     }
   }
 
@@ -930,7 +931,7 @@ void CppGraphBuilderImpl::AddConservativeEphemeronKeyEdgesIfNeeded(
 
 void CppGraphBuilderImpl::VisitForVisibility(State& parent,
                                              const TracedReferenceBase& ref) {
-  v8::Local<v8::Value> v8_value =
+  v8::Local<v8::Data> v8_value =
       ref.Get(reinterpret_cast<v8::Isolate*>(cpp_heap_.isolate()));
   if (!v8_value.IsEmpty()) {
     parent.MarkVisible();

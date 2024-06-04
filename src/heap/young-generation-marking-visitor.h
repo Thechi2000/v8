@@ -79,6 +79,13 @@ class YoungGenerationMarkingVisitor final
   V8_INLINE int VisitEphemeronHashTable(Tagged<Map> map,
                                         Tagged<EphemeronHashTable> table);
 
+#ifdef V8_COMPRESS_POINTERS
+  V8_INLINE void VisitExternalPointer(Tagged<HeapObject> host,
+                                      ExternalPointerSlot slot) final;
+#endif  // V8_COMPRESS_POINTERS
+  V8_INLINE void VisitCppHeapPointer(Tagged<HeapObject> host,
+                                     CppHeapPointerSlot slot) override;
+
   template <ObjectVisitationMode visitation_mode,
             SlotTreatmentMode slot_treatment_mode, typename TSlot>
   V8_INLINE bool VisitObjectViaSlot(TSlot slot);

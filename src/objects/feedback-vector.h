@@ -71,6 +71,7 @@ enum class FeedbackSlotKind : uint8_t {
   kLiteral,
   kForIn,
   kInstanceOf,
+  kTypeOf,
   kCloneObject,
   kJumpLoop,
 
@@ -252,7 +253,7 @@ class FeedbackVector
   inline void clear_invocation_count(RelaxedStoreTag tag);
   using TorqueGeneratedFeedbackVector::invocation_count_before_stable;
   using TorqueGeneratedFeedbackVector::set_invocation_count_before_stable;
-  DECL_UINT8_ACCESSORS(invocation_count_before_stable)
+  DECL_RELAXED_UINT8_ACCESSORS(invocation_count_before_stable)
 
   // The [osr_urgency] controls when OSR is attempted, and is incremented as
   // the function becomes hotter. When the current loop depth is less than the
@@ -306,8 +307,8 @@ class FeedbackVector
   void set_tiering_state(TieringState state);
   void reset_tiering_state();
 
-  TieringState osr_tiering_state();
-  void set_osr_tiering_state(TieringState marker);
+  bool osr_tiering_in_progress();
+  void set_osr_tiering_in_progress(bool osr_in_progress);
 
   inline bool interrupt_budget_reset_by_ic_change() const;
   inline void set_interrupt_budget_reset_by_ic_change(bool value);
@@ -535,6 +536,8 @@ class V8_EXPORT_PRIVATE FeedbackVectorSpec {
   FeedbackSlot AddInstanceOfSlot() {
     return AddSlot(FeedbackSlotKind::kInstanceOf);
   }
+
+  FeedbackSlot AddTypeOfSlot() { return AddSlot(FeedbackSlotKind::kTypeOf); }
 
   FeedbackSlot AddLiteralSlot() { return AddSlot(FeedbackSlotKind::kLiteral); }
 
@@ -866,6 +869,7 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
 
   BinaryOperationHint GetBinaryOperationFeedback() const;
   CompareOperationHint GetCompareOperationFeedback() const;
+  TypeOfFeedback::Result GetTypeOfFeedback() const;
   ForInHint GetForInFeedback() const;
 
   // For KeyedLoad ICs.

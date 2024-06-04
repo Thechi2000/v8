@@ -133,12 +133,26 @@ JSAtomicsMutex::LockGuardBase::LockGuardBase(Isolate* isolate,
     : isolate_(isolate), mutex_(mutex), locked_(locked) {}
 
 JSAtomicsMutex::LockGuardBase::~LockGuardBase() {
-  if (locked_) mutex_->Unlock(isolate_);
+  if (locked_) {
+    // It is possible to reach this state with the mutex unlocked.
+    // Consider the following senario: If we execute the code
+    // Atomics.Mutex.lock(mutex, () => {Atomics.Condition.wait(cond, mutex);}).
+    // The locked_ value is set when entering the critical section, but can't be
+    // changed when we start waiting. If the thread termination signal is sent
+    // while waiting or after the notification is sent but before the lock is
+    // reacquired, then the execution may be terminated without the lock
+    // being reacquired by this thread. Unlock the mutex only if this thread
+    // owns it.
+    if (!isolate_->is_execution_terminating() ||
+        mutex_->IsCurrentThreadOwner()) {
+      mutex_->Unlock(isolate_);
+    }
+  }
 }
 
 JSAtomicsMutex::LockGuard::LockGuard(Isolate* isolate,
                                      Handle<JSAtomicsMutex> mutex,
-                                     base::Optional<base::TimeDelta> timeout)
+                                     std::optional<base::TimeDelta> timeout)
     : LockGuardBase(isolate, mutex,
                     JSAtomicsMutex::Lock(isolate, mutex, timeout)) {}
 
@@ -147,8 +161,9 @@ JSAtomicsMutex::TryLockGuard::TryLockGuard(Isolate* isolate,
     : LockGuardBase(isolate, mutex, mutex->TryLock()) {}
 
 // static
-bool JSAtomicsMutex::Lock(Isolate* requester, Handle<JSAtomicsMutex> mutex,
-                          base::Optional<base::TimeDelta> timeout) {
+bool JSAtomicsMutex::LockImpl(Isolate* requester, Handle<JSAtomicsMutex> mutex,
+                              std::optional<base::TimeDelta> timeout,
+                              LockSlowPathWrapper slow_path_wrapper) {
   DisallowGarbageCollection no_gc;
   // First try to lock an uncontended mutex, which should be the common case. If
   // this fails, then go to the slow path to possibly put the current thread to
@@ -164,12 +179,20 @@ bool JSAtomicsMutex::Lock(Isolate* requester, Handle<JSAtomicsMutex> mutex,
                                              std::memory_order_relaxed))) {
     locked = true;
   } else {
-    locked = LockSlowPath(requester, mutex, state, timeout);
+    locked = slow_path_wrapper(state);
   }
   if (V8_LIKELY(locked)) {
     mutex->SetCurrentThreadAsOwner();
   }
   return locked;
+}
+
+// static
+bool JSAtomicsMutex::Lock(Isolate* requester, Handle<JSAtomicsMutex> mutex,
+                          std::optional<base::TimeDelta> timeout) {
+  return LockImpl(requester, mutex, timeout, [=](std::atomic<StateT>* state) {
+    return LockSlowPath(requester, mutex, state, timeout);
+  });
 }
 
 bool JSAtomicsMutex::TryLock() {

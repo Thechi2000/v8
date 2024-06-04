@@ -10,6 +10,7 @@
 #include "src/base/platform/memory.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/macro-assembler-inl.h"
+#include "src/compiler/linkage.h"
 #include "src/compiler/wasm-compiler.h"
 #include "src/utils/ostreams.h"
 #include "src/wasm/baseline/liftoff-assembler-inl.h"
@@ -343,6 +344,10 @@ int LiftoffAssembler::GetTotalFrameSlotCountForGC() const {
           StandardFrameConstants::kFixedFrameSizeAboveFp +
           ool_spill_space_size_) /
          kSystemPointerSize;
+}
+
+int LiftoffAssembler::OolSpillCount() const {
+  return ool_spill_space_size_ / kSystemPointerSize;
 }
 
 namespace {
@@ -887,6 +892,15 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
   }
 }
 
+namespace {
+constexpr LiftoffRegList AllReturnRegs() {
+  LiftoffRegList result;
+  for (Register r : kGpReturnRegisters) result.set(r);
+  for (DoubleRegister r : kFpReturnRegisters) result.set(r);
+  return result;
+}
+}  // namespace
+
 void LiftoffAssembler::FinishCall(const ValueKindSig* sig,
                                   compiler::CallDescriptor* call_descriptor) {
   int call_desc_return_idx = 0;
@@ -899,7 +913,9 @@ void LiftoffAssembler::FinishCall(const ValueKindSig* sig,
     // Initialize to anything, will be set in the loop and used afterwards.
     LiftoffRegister reg_pair[2] = {kGpCacheRegList.GetFirstRegSet(),
                                    kGpCacheRegList.GetFirstRegSet()};
-    LiftoffRegList pinned;
+    // Make sure not to clobber results in registers (which might not be the
+    // first values to be processed) prematurely.
+    LiftoffRegList pinned = AllReturnRegs();
     for (int pair_idx = 0; pair_idx < num_lowered_params; ++pair_idx) {
       LinkageLocation loc =
           call_descriptor->GetReturnLocation(call_desc_return_idx++);
@@ -1210,14 +1226,14 @@ void LiftoffAssembler::set_num_locals(uint32_t num_locals) {
   }
 }
 
-std::ostream& operator<<(std::ostream& os, VarState slot) {
+std::ostream& operator<<(std::ostream& os, LiftoffVarState slot) {
   os << name(slot.kind()) << ":";
   switch (slot.loc()) {
-    case VarState::kStack:
+    case LiftoffVarState::kStack:
       return os << "s0x" << std::hex << slot.offset() << std::dec;
-    case VarState::kRegister:
+    case LiftoffVarState::kRegister:
       return os << slot.reg();
-    case VarState::kIntConst:
+    case LiftoffVarState::kIntConst:
       return os << "c" << slot.i32_const();
   }
   UNREACHABLE();

@@ -183,15 +183,13 @@ RUNTIME_FUNCTION(Runtime_HasUnoptimizedWasmToJSWrapper) {
   DCHECK_EQ(1, args.length());
   Tagged<JSFunction> function = JSFunction::cast(args[0]);
   Tagged<SharedFunctionInfo> sfi = function->shared();
-  Tagged<WasmFunctionData> func_data =
-      WasmExportedFunction::IsWasmExportedFunction(function)
-          ? Tagged<WasmFunctionData>{sfi->wasm_exported_function_data()}
-          : Tagged<WasmFunctionData>{sfi->wasm_js_function_data()};
-  Tagged<WasmInternalFunction> internal =
-      func_data->func_ref()->internal(isolate);
+  Tagged<Object> func_data = sfi->GetData(isolate);
+  if (!IsWasmFunctionData(func_data)) return isolate->heap()->ToBoolean(false);
+  Address call_target =
+      WasmFunctionData::cast(func_data)->internal()->call_target();
 
   Address wrapper = Builtins::EntryOf(Builtin::kWasmToJsWrapperAsm, isolate);
-  return isolate->heap()->ToBoolean(internal->call_target() == wrapper);
+  return isolate->heap()->ToBoolean(call_target == wrapper);
 }
 
 RUNTIME_FUNCTION(Runtime_HasUnoptimizedJSToJSWrapper) {
@@ -207,7 +205,7 @@ RUNTIME_FUNCTION(Runtime_HasUnoptimizedJSToJSWrapper) {
 
   Handle<JSFunction> external_function =
       WasmInternalFunction::GetOrCreateExternal(
-          handle(function_data->func_ref()->internal(isolate), isolate));
+          handle(function_data->internal(), isolate));
   Handle<Code> external_function_code =
       handle(external_function->code(isolate), isolate);
   Handle<Code> function_data_code =
@@ -241,7 +239,7 @@ RUNTIME_FUNCTION(Runtime_WasmTraceEnter) {
 
   // Find the function name.
   int func_index = frame->function_index();
-  const wasm::WasmModule* module = frame->wasm_instance()->module();
+  const wasm::WasmModule* module = frame->trusted_instance_data()->module();
   wasm::ModuleWireBytes wire_bytes =
       wasm::ModuleWireBytes(frame->native_module()->wire_bytes());
   wasm::WireBytesRef name_ref =
@@ -276,7 +274,7 @@ RUNTIME_FUNCTION(Runtime_WasmTraceExit) {
   DCHECK(it.is_wasm());
   WasmFrame* frame = WasmFrame::cast(it.frame());
   int func_index = frame->function_index();
-  const wasm::WasmModule* module = frame->wasm_instance()->module();
+  const wasm::WasmModule* module = frame->trusted_instance_data()->module();
   const wasm::FunctionSig* sig = module->functions[func_index].sig;
 
   size_t num_returns = sig->return_count();
@@ -497,17 +495,17 @@ RUNTIME_FUNCTION(Runtime_WasmNumCodeSpaces) {
   DCHECK_EQ(1, args.length());
   HandleScope scope(isolate);
   Handle<JSObject> argument = args.at<JSObject>(0);
-  Handle<WasmModuleObject> module;
+  wasm::NativeModule* native_module;
   if (IsWasmInstanceObject(*argument)) {
-    module = handle(Handle<WasmInstanceObject>::cast(argument)
+    native_module = WasmInstanceObject::cast(*argument)
                         ->trusted_data(isolate)
-                        ->module_object(),
-                    isolate);
+                        ->native_module();
   } else if (IsWasmModuleObject(*argument)) {
-    module = Handle<WasmModuleObject>::cast(argument);
+    native_module = WasmModuleObject::cast(*argument)->native_module();
+  } else {
+    UNREACHABLE();
   }
-  size_t num_spaces =
-      module->native_module()->GetNumberOfCodeSpacesForTesting();
+  size_t num_spaces = native_module->GetNumberOfCodeSpacesForTesting();
   return *isolate->factory()->NewNumberFromSize(num_spaces);
 }
 
@@ -547,9 +545,7 @@ RUNTIME_FUNCTION(Runtime_WasmTierUpFunction) {
   CHECK(WasmExportedFunction::IsWasmExportedFunction(*function));
   Handle<WasmExportedFunction> exp_fun =
       Handle<WasmExportedFunction>::cast(function);
-  Tagged<WasmInstanceObject> instance_object = exp_fun->instance();
-  Tagged<WasmTrustedInstanceData> trusted_data =
-      instance_object->trusted_data(isolate);
+  Tagged<WasmTrustedInstanceData> trusted_data = exp_fun->instance_data();
   int func_index = exp_fun->function_index();
   wasm::TierUpNowForTesting(isolate, trusted_data, func_index);
   return ReadOnlyRoots(isolate).undefined_value();
@@ -581,8 +577,7 @@ RUNTIME_FUNCTION(Runtime_IsWasmDebugFunction) {
   CHECK(WasmExportedFunction::IsWasmExportedFunction(*function));
   Handle<WasmExportedFunction> exp_fun =
       Handle<WasmExportedFunction>::cast(function);
-  wasm::NativeModule* native_module =
-      exp_fun->instance()->module_object()->native_module();
+  wasm::NativeModule* native_module = exp_fun->instance_data()->native_module();
   uint32_t func_index = exp_fun->function_index();
   wasm::WasmCodeRefScope code_ref_scope;
   wasm::WasmCode* code = native_module->GetCode(func_index);
@@ -597,8 +592,7 @@ RUNTIME_FUNCTION(Runtime_IsLiftoffFunction) {
   CHECK(WasmExportedFunction::IsWasmExportedFunction(*function));
   Handle<WasmExportedFunction> exp_fun =
       Handle<WasmExportedFunction>::cast(function);
-  wasm::NativeModule* native_module =
-      exp_fun->instance()->module_object()->native_module();
+  wasm::NativeModule* native_module = exp_fun->instance_data()->native_module();
   uint32_t func_index = exp_fun->function_index();
   wasm::WasmCodeRefScope code_ref_scope;
   wasm::WasmCode* code = native_module->GetCode(func_index);
@@ -612,8 +606,7 @@ RUNTIME_FUNCTION(Runtime_IsTurboFanFunction) {
   CHECK(WasmExportedFunction::IsWasmExportedFunction(*function));
   Handle<WasmExportedFunction> exp_fun =
       Handle<WasmExportedFunction>::cast(function);
-  wasm::NativeModule* native_module =
-      exp_fun->instance()->module_object()->native_module();
+  wasm::NativeModule* native_module = exp_fun->instance_data()->native_module();
   uint32_t func_index = exp_fun->function_index();
   wasm::WasmCodeRefScope code_ref_scope;
   wasm::WasmCode* code = native_module->GetCode(func_index);
@@ -627,8 +620,7 @@ RUNTIME_FUNCTION(Runtime_IsUncompiledWasmFunction) {
   CHECK(WasmExportedFunction::IsWasmExportedFunction(*function));
   Handle<WasmExportedFunction> exp_fun =
       Handle<WasmExportedFunction>::cast(function);
-  wasm::NativeModule* native_module =
-      exp_fun->instance()->module_object()->native_module();
+  wasm::NativeModule* native_module = exp_fun->instance_data()->native_module();
   uint32_t func_index = exp_fun->function_index();
   return isolate->heap()->ToBoolean(!native_module->HasCode(func_index));
 }

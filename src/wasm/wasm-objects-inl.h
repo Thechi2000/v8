@@ -105,7 +105,15 @@ ACCESSORS(WasmGlobalObject, tagged_buffer, Tagged<FixedArray>,
           kTaggedBufferOffset)
 
 wasm::ValueType WasmGlobalObject::type() const {
-  return wasm::ValueType::FromRawBitField(static_cast<uint32_t>(raw_type()));
+  // Various consumers of ValueKind (e.g. ValueKind::name()) use the raw enum
+  // value as index into a global array. As such, if the index is corrupted
+  // (which must be assumed, as it comes from within the sandbox), this can
+  // lead to out-of-bounds reads outside the sandbox. While these are not
+  // technically sandbox violations, we should still try to avoid them to keep
+  // fuzzers happy. This SBXCHECK accomplishes that.
+  wasm::ValueType type = wasm::ValueType::FromRawBitField(raw_type());
+  SBXCHECK(is_valid(type.kind()));
+  return type;
 }
 void WasmGlobalObject::set_type(wasm::ValueType value) {
   set_raw_type(static_cast<int>(value.raw_bit_field()));
@@ -175,6 +183,11 @@ PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, memory0_start, uint8_t*,
                     kMemory0StartOffset)
 PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, memory0_size, size_t,
                     kMemory0SizeOffset)
+// Sandbox-safe alternative to going through the chain
+// instance_object()->module_object()->native_module(), i.e. doesn't rely on
+// potentially-corrupted heap objects.
+PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, native_module, wasm::NativeModule*,
+                    kNativeModuleOffset)
 PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, new_allocation_limit_address,
                     Address*, kNewAllocationLimitAddressOffset)
 PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, new_allocation_top_address,
@@ -284,7 +297,7 @@ Tagged<WasmModuleObject> WasmTrustedInstanceData::module_object() const {
 }
 
 const wasm::WasmModule* WasmTrustedInstanceData::module() const {
-  return module_object()->module();
+  return native_module()->module();
 }
 
 // WasmInstanceObject
@@ -292,21 +305,24 @@ TRUSTED_POINTER_ACCESSORS(WasmInstanceObject, trusted_data,
                           WasmTrustedInstanceData, kTrustedDataOffset,
                           kWasmTrustedInstanceDataIndirectPointerTag)
 
+// Note: in case of existing in-sandbox corruption, this could return an
+// incorrect WasmModule! For security-relevant code, prefer reading
+// {native_module()} from a {WasmTrustedInstanceData}.
 const wasm::WasmModule* WasmInstanceObject::module() const {
   return module_object()->module();
 }
 
 ImportedFunctionEntry::ImportedFunctionEntry(
-    Handle<WasmInstanceObject> instance_object, int index)
-    : instance_object_(instance_object), index_(index) {
-  DCHECK_GE(index, 0);
-  DCHECK_LT(index, instance_object->module()->num_imported_functions);
-}
+    Isolate* isolate, Handle<WasmInstanceObject> instance_object, int index)
+    : ImportedFunctionEntry(
+          handle(instance_object->trusted_data(isolate), isolate), index) {}
 
 ImportedFunctionEntry::ImportedFunctionEntry(
-    Isolate* isolate, Handle<WasmTrustedInstanceData> instance_data, int index)
-    : ImportedFunctionEntry(handle(instance_data->instance_object(), isolate),
-                            index) {}
+    Handle<WasmTrustedInstanceData> instance_data, int index)
+    : instance_data_(instance_data), index_(index) {
+  DCHECK_GE(index, 0);
+  DCHECK_LT(index, instance_data->module()->num_imported_functions);
+}
 
 // WasmDispatchTable
 CAST_ACCESSOR(WasmDispatchTable)
@@ -375,12 +391,19 @@ TRUSTED_POINTER_ACCESSORS(WasmFuncRef, internal, WasmInternalFunction,
 // WasmFunctionData
 CODE_POINTER_ACCESSORS(WasmFunctionData, wrapper_code, kWrapperCodeOffset)
 
+PROTECTED_POINTER_ACCESSORS(WasmFunctionData, internal, WasmInternalFunction,
+                            kProtectedInternalOffset)
+
 // WasmExportedFunctionData
+PROTECTED_POINTER_ACCESSORS(WasmExportedFunctionData, instance_data,
+                            WasmTrustedInstanceData,
+                            kProtectedInstanceDataOffset)
+
 CODE_POINTER_ACCESSORS(WasmExportedFunctionData, c_wrapper_code,
                        kCWrapperCodeOffset)
 
-EXTERNAL_POINTER_ACCESSORS(WasmExportedFunctionData, sig, wasm::FunctionSig*,
-                           kSigOffset, kWasmExportedFunctionDataSignatureTag)
+PRIMITIVE_ACCESSORS(WasmExportedFunctionData, sig, const wasm::FunctionSig*,
+                    kSigOffset)
 
 // WasmJSFunction
 WasmJSFunction::WasmJSFunction(Address ptr) : JSFunction(ptr) {
@@ -414,7 +437,15 @@ EXTERNAL_POINTER_ACCESSORS(WasmTypeInfo, native_type, Address,
 #undef PRIMITIVE_ACCESSORS
 
 wasm::ValueType WasmTableObject::type() {
-  return wasm::ValueType::FromRawBitField(raw_type());
+  // Various consumers of ValueKind (e.g. ValueKind::name()) use the raw enum
+  // value as index into a global array. As such, if the index is corrupted
+  // (which must be assumed, as it comes from within the sandbox), this can
+  // lead to out-of-bounds reads outside the sandbox. While these are not
+  // technically sandbox violations, we should still try to avoid them to keep
+  // fuzzers happy. This SBXCHECK accomplishes that.
+  wasm::ValueType type = wasm::ValueType::FromRawBitField(raw_type());
+  SBXCHECK(is_valid(type.kind()));
+  return type;
 }
 
 bool WasmMemoryObject::has_maximum_pages() { return maximum_pages() >= 0; }

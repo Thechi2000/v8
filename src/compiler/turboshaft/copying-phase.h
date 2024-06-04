@@ -40,6 +40,8 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
 
 template <typename Next>
 class ReducerBaseForwarder;
+template <typename Next>
+class WasmRevecReducer;
 
 template <typename Derived, typename Base>
 class OutputGraphAssembler : public Base {
@@ -84,6 +86,8 @@ class GraphVisitor : public OutputGraphAssembler<GraphVisitor<AfterNext>,
                                                  VariableReducer<AfterNext>> {
   template <typename N>
   friend class ReducerBaseForwarder;
+  template <typename N>
+  friend class WasmRevecReducer;
 
  public:
   using Next = VariableReducer<AfterNext>;
@@ -138,7 +142,7 @@ class GraphVisitor : public OutputGraphAssembler<GraphVisitor<AfterNext>,
       }
     }
     // Updating the operation origins.
-    NodeOriginTable* origins = PipelineData::Get().node_origins();
+    NodeOriginTable* origins = Asm().data()->node_origins();
     if (origins) {
       for (OpIndex index : Asm().output_graph().AllOperationIndices()) {
         OpIndex origin = Asm().output_graph().operation_origins()[index];
@@ -249,6 +253,11 @@ class GraphVisitor : public OutputGraphAssembler<GraphVisitor<AfterNext>,
 
     DCHECK_IMPLIES(!can_be_invalid, result.valid());
     return result;
+  }
+
+  template <bool can_be_invalid = false, typename T>
+  V<T> MapToNewGraph(V<T> old_index, int predecessor_index = -1) {
+    return V<T>::Cast(MapToNewGraph(static_cast<OpIndex>(old_index), -1));
   }
 
   Block* MapToNewGraph(const Block* block) const {
@@ -1017,10 +1026,10 @@ class TSAssembler;
 template <template <class> class... Reducers>
 class CopyingPhaseImpl {
  public:
-  static void Run(Graph& input_graph, Zone* phase_zone,
+  static void Run(PipelineData* data, Graph& input_graph, Zone* phase_zone,
                   bool trace_reductions = false) {
     TSAssembler<GraphVisitor, Reducers...> phase(
-        input_graph, input_graph.GetOrCreateCompanion(), phase_zone);
+        data, input_graph, input_graph.GetOrCreateCompanion(), phase_zone);
 #ifdef DEBUG
     if (trace_reductions) {
       phase.template VisitGraph<true>();
@@ -1036,11 +1045,11 @@ class CopyingPhaseImpl {
 template <template <typename> typename... Reducers>
 class CopyingPhase {
  public:
-  static void Run(Zone* phase_zone) {
-    PipelineData& data = PipelineData::Get();
-    Graph& input_graph = data.graph();
+  static void Run(PipelineData* data, Zone* phase_zone) {
+    Graph& input_graph = data->graph();
     CopyingPhaseImpl<Reducers...>::Run(
-        input_graph, phase_zone, data.info()->turboshaft_trace_reduction());
+        data, input_graph, phase_zone,
+        data->info()->turboshaft_trace_reduction());
   }
 };
 

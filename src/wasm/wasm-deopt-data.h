@@ -10,9 +10,10 @@
 
 #include "src/base/memory.h"
 #include "src/utils/utils.h"
+#include "src/wasm/baseline/liftoff-varstate.h"
 #include "src/zone/zone-containers.h"
 
-namespace v8::internal::compiler {
+namespace v8::internal {
 class DeoptimizationLiteral;
 }
 
@@ -75,8 +76,7 @@ class WasmDeoptView {
         begin + sizeof(WasmDeoptEntry) * deopt_index));
   }
 
-  std::vector<compiler::DeoptimizationLiteral>
-  BuildDeoptimizationLiteralArray();
+  std::vector<DeoptimizationLiteral> BuildDeoptimizationLiteralArray();
 
  private:
   base::Vector<const uint8_t> deopt_data_;
@@ -89,7 +89,19 @@ class WasmDeoptDataProcessor {
       int deopt_exit_start_offset, int eager_deopt_count,
       base::Vector<const uint8_t> translation_array,
       base::Vector<wasm::WasmDeoptEntry> deopt_entries,
-      const ZoneDeque<compiler::DeoptimizationLiteral>& deopt_literals);
+      const ZoneDeque<DeoptimizationLiteral>& deopt_literals);
+};
+
+// All the information needed by the deoptimizer to know what the Liftoff frame
+// has to look like.
+struct LiftoffFrameDescriptionForDeopt {
+  uint32_t wire_bytes_offset = 0;
+  uint32_t pc_offset = 0;
+  std::vector<LiftoffVarState> var_state = {};
+  // If the trusted_instance is cached in a register additionally to the stack
+  // slot, this register needs to be updated as well.
+  Register trusted_instance = no_reg;
+  int total_frame_size = 0;
 };
 
 }  // namespace v8::internal::wasm

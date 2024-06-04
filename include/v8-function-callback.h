@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 
+#include "v8-internal.h"      // NOLINT(build/include_directory)
 #include "v8-local-handle.h"  // NOLINT(build/include_directory)
 #include "v8-primitive.h"     // NOLINT(build/include_directory)
 #include "v8config.h"         // NOLINT(build/include_directory)
@@ -31,6 +32,11 @@ namespace debug {
 class ConsoleCallArguments;
 }  // namespace debug
 
+namespace api_internal {
+V8_EXPORT v8::Local<v8::Value> GetFunctionTemplateData(
+    v8::Isolate* isolate, v8::Local<v8::Data> raw_target);
+}  // namespace api_internal
+
 template <typename T>
 class ReturnValue {
  public:
@@ -38,7 +44,7 @@ class ReturnValue {
   V8_INLINE ReturnValue(const ReturnValue<S>& that) : value_(that.value_) {
     static_assert(std::is_base_of<T, S>::value, "type check");
   }
-  // Local setters
+  // Handle-based setters.
   template <typename S>
   V8_INLINE void Set(const Global<S>& handle);
   template <typename S>
@@ -51,12 +57,15 @@ class ReturnValue {
   V8_INLINE void Set(const Local<S> handle);
   template <typename S>
   V8_INLINE void SetNonEmpty(const Local<S> handle);
-  // Fast primitive setters
+  // Fast primitive number setters.
   V8_INLINE void Set(bool value);
   V8_INLINE void Set(double i);
+  V8_INLINE void Set(int16_t i);
   V8_INLINE void Set(int32_t i);
+  V8_INLINE void Set(int64_t i);
+  V8_INLINE void Set(uint16_t i);
   V8_INLINE void Set(uint32_t i);
-  V8_INLINE void Set(uint16_t);
+  V8_INLINE void Set(uint64_t i);
   // Fast JS primitive setters
   V8_INLINE void SetNull();
   V8_INLINE void SetUndefined();
@@ -159,7 +168,7 @@ class FunctionCallbackInfo {
   static constexpr int kIsolateIndex = 1;
   static constexpr int kUnusedIndex = 2;
   static constexpr int kReturnValueIndex = 3;
-  static constexpr int kDataIndex = 4;
+  static constexpr int kTargetIndex = 4;
   static constexpr int kNewTargetIndex = 5;
   static constexpr int kArgsLength = 6;
 
@@ -276,9 +285,10 @@ class PropertyCallbackInfo {
    */
   V8_INLINE bool ShouldThrowOnError() const;
 
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "This is a temporary workaround to ease migration of Chromium bindings "
-      "code to the new interceptors Api")
+      "code to the new interceptors Api. This constructor will be removed in "
+      "V8 12.8.")
   explicit PropertyCallbackInfo(const PropertyCallbackInfo<void>& info)
       : PropertyCallbackInfo(info.args_) {}
 
@@ -398,26 +408,32 @@ void ReturnValue<T>::Set(double i) {
 }
 
 template <typename T>
-void ReturnValue<T>::Set(int32_t i) {
+void ReturnValue<T>::Set(int16_t i) {
   static_assert(std::is_base_of<T, Integer>::value, "type check");
   using I = internal::Internals;
-  if (V8_LIKELY(I::IsValidSmi(i))) {
-    SetInternal(I::IntToSmi(i));
+  static_assert(I::IsValidSmi(std::numeric_limits<int16_t>::min()));
+  static_assert(I::IsValidSmi(std::numeric_limits<int16_t>::max()));
+  SetInternal(I::IntegralToSmi(i));
+}
+
+template <typename T>
+void ReturnValue<T>::Set(int32_t i) {
+  static_assert(std::is_base_of<T, Integer>::value, "type check");
+  if (const auto result = internal::Internals::TryIntegralToSmi(i)) {
+    SetInternal(*result);
     return;
   }
   SetNonEmpty(Integer::New(GetIsolate(), i));
 }
 
 template <typename T>
-void ReturnValue<T>::Set(uint32_t i) {
+void ReturnValue<T>::Set(int64_t i) {
   static_assert(std::is_base_of<T, Integer>::value, "type check");
-  // Can't simply use INT32_MAX here for whatever reason.
-  bool fits_into_int32_t = (i & (1U << 31)) == 0;
-  if (V8_LIKELY(fits_into_int32_t)) {
-    Set(static_cast<int32_t>(i));
+  if (const auto result = internal::Internals::TryIntegralToSmi(i)) {
+    SetInternal(*result);
     return;
   }
-  SetNonEmpty(Integer::NewFromUnsigned(GetIsolate(), i));
+  SetNonEmpty(Number::New(GetIsolate(), static_cast<double>(i)));
 }
 
 template <typename T>
@@ -426,7 +442,27 @@ void ReturnValue<T>::Set(uint16_t i) {
   using I = internal::Internals;
   static_assert(I::IsValidSmi(std::numeric_limits<uint16_t>::min()));
   static_assert(I::IsValidSmi(std::numeric_limits<uint16_t>::max()));
-  SetInternal(I::IntToSmi(i));
+  SetInternal(I::IntegralToSmi(i));
+}
+
+template <typename T>
+void ReturnValue<T>::Set(uint32_t i) {
+  static_assert(std::is_base_of<T, Integer>::value, "type check");
+  if (const auto result = internal::Internals::TryIntegralToSmi(i)) {
+    SetInternal(*result);
+    return;
+  }
+  SetNonEmpty(Integer::NewFromUnsigned(GetIsolate(), i));
+}
+
+template <typename T>
+void ReturnValue<T>::Set(uint64_t i) {
+  static_assert(std::is_base_of<T, Integer>::value, "type check");
+  if (const auto result = internal::Internals::TryIntegralToSmi(i)) {
+    SetInternal(*result);
+    return;
+  }
+  SetNonEmpty(Number::New(GetIsolate(), static_cast<double>(i)));
 }
 
 template <typename T>
@@ -567,7 +603,8 @@ Local<Value> FunctionCallbackInfo<T>::NewTarget() const {
 
 template <typename T>
 Local<Value> FunctionCallbackInfo<T>::Data() const {
-  return Local<Value>::FromSlot(&implicit_args_[kDataIndex]);
+  auto target = Local<v8::Data>::FromSlot(&implicit_args_[kTargetIndex]);
+  return GetFunctionTemplateData(GetIsolate(), target);
 }
 
 template <typename T>
@@ -619,8 +656,8 @@ template <typename T>
 bool PropertyCallbackInfo<T>::ShouldThrowOnError() const {
   using I = internal::Internals;
   if (args_[kShouldThrowOnErrorIndex] !=
-      I::IntToSmi(I::kInferShouldThrowMode)) {
-    return args_[kShouldThrowOnErrorIndex] != I::IntToSmi(I::kDontThrow);
+      I::IntegralToSmi(I::kInferShouldThrowMode)) {
+    return args_[kShouldThrowOnErrorIndex] != I::IntegralToSmi(I::kDontThrow);
   }
   return v8::internal::ShouldThrowOnError(
       reinterpret_cast<v8::internal::Isolate*>(GetIsolate()));

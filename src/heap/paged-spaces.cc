@@ -23,8 +23,8 @@
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk-layout.h"
-#include "src/heap/mutable-page-inl.h"
-#include "src/heap/page-inl.h"
+#include "src/heap/mutable-page-metadata-inl.h"
+#include "src/heap/page-metadata-inl.h"
 #include "src/heap/paged-spaces-inl.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/safepoint.h"
@@ -194,6 +194,8 @@ void PagedSpaceBase::RefineAllocatedBytesAfterSweeping(PageMetadata* page) {
     size_t counter_diff = old_counter - new_counter;
     if (identity() == NEW_SPACE) size_at_last_gc_ -= counter_diff;
     DecreaseAllocatedBytes(counter_diff, page);
+    DCHECK_EQ(new_counter, accounting_stats_.AllocatedOnPage(page));
+    AdjustDifferenceInAllocatedBytes(counter_diff);
   }
   if (!v8_flags.sticky_mark_bits) {
     // With sticky mark-bits the counter is reset on unmarking.
@@ -326,6 +328,10 @@ int PagedSpaceBase::CountTotalPages() const {
 size_t PagedSpaceBase::Available() const {
   ConcurrentAllocationMutex guard(this);
   return free_list_->Available();
+}
+
+size_t PagedSpaceBase::Waste() const {
+  return free_list_->wasted_bytes();
 }
 
 void PagedSpaceBase::ReleasePage(PageMetadata* page) {
@@ -643,6 +649,14 @@ void OldSpace::AddPromotedPage(PageMetadata* page) {
 
 void OldSpace::ReleasePage(PageMetadata* page) {
   ReleasePageImpl(page, MemoryAllocator::FreeMode::kPool);
+}
+
+// -----------------------------------------------------------------------------
+// StickySpace implementation
+
+void StickySpace::AdjustDifferenceInAllocatedBytes(size_t diff) {
+  DCHECK_GE(allocated_old_size_, diff);
+  allocated_old_size_ -= diff;
 }
 
 // -----------------------------------------------------------------------------

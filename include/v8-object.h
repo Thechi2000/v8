@@ -152,16 +152,18 @@ enum PropertyAttribute {
  * a particular data property. See Object::SetNativeDataProperty and
  * ObjectTemplate::SetNativeDataProperty methods.
  */
-using AccessorGetterCallback V8_DEPRECATE_SOON(
-    "Use AccessorNameGetterCallback signature instead") =
-    void (*)(Local<String> property, const PropertyCallbackInfo<Value>& info);
+using AccessorGetterCallback V8_DEPRECATED(
+    "Use AccessorNameGetterCallback signature instead. This type will be "
+    "removed in V8 12.8.") = void (*)(Local<String> property,
+                                      const PropertyCallbackInfo<Value>& info);
 using AccessorNameGetterCallback =
     void (*)(Local<Name> property, const PropertyCallbackInfo<Value>& info);
 
-using AccessorSetterCallback V8_DEPRECATE_SOON(
-    "Use AccessorNameSetterCallback signature instead") =
-    void (*)(Local<String> property, Local<Value> value,
-             const PropertyCallbackInfo<void>& info);
+using AccessorSetterCallback V8_DEPRECATED(
+    "Use AccessorNameSetterCallback signature instead. This type will be "
+    "removed in V8 12.8.") = void (*)(Local<String> property,
+                                      Local<Value> value,
+                                      const PropertyCallbackInfo<void>& info);
 using AccessorNameSetterCallback =
     void (*)(Local<Name> property, Local<Value> value,
              const PropertyCallbackInfo<void>& info);
@@ -343,7 +345,10 @@ class V8_EXPORT Object : public Value {
   V8_WARN_UNUSED_RESULT Maybe<bool> Delete(Local<Context> context,
                                            uint32_t index);
 
-  V8_DEPRECATE_SOON("Use SetNativeDataProperty instead")
+  V8_DEPRECATED(
+      "Use SetNativeDataProperty or SetAccessorProperty instead depending on "
+      "the required semantics. See http://crbug.com/336325111. This method "
+      "will be removed in V8 12.8.")
   V8_WARN_UNUSED_RESULT Maybe<bool> SetAccessor(
       Local<Context> context, Local<Name> name,
       AccessorNameGetterCallback getter,
@@ -574,6 +579,19 @@ class V8_EXPORT Object : public Value {
   static V8_INLINE T* Unwrap(v8::Isolate* isolate,
                              const BasicTracedReference<Object>& wrapper);
 
+  template <typename T = void>
+  static V8_INLINE T* Unwrap(v8::Isolate* isolate,
+                             const v8::Local<v8::Object>& wrapper,
+                             CppHeapPointerTagRange tag_range);
+  template <typename T = void>
+  static V8_INLINE T* Unwrap(v8::Isolate* isolate,
+                             const PersistentBase<Object>& wrapper,
+                             CppHeapPointerTagRange tag_range);
+  template <typename T = void>
+  static V8_INLINE T* Unwrap(v8::Isolate* isolate,
+                             const BasicTracedReference<Object>& wrapper,
+                             CppHeapPointerTagRange tag_range);
+
   /**
    * Wraps a JS wrapper with a C++ instance.
    *
@@ -595,6 +613,15 @@ class V8_EXPORT Object : public Value {
   static V8_INLINE void Wrap(v8::Isolate* isolate,
                              const BasicTracedReference<Object>& wrapper,
                              void* wrappable);
+  static V8_INLINE void Wrap(v8::Isolate* isolate,
+                             const v8::Local<v8::Object>& wrapper,
+                             void* wrappable, CppHeapPointerTag tag);
+  static V8_INLINE void Wrap(v8::Isolate* isolate,
+                             const PersistentBase<Object>& wrapper,
+                             void* wrappable, CppHeapPointerTag tag);
+  static V8_INLINE void Wrap(v8::Isolate* isolate,
+                             const BasicTracedReference<Object>& wrapper,
+                             void* wrappable, CppHeapPointerTag tag);
 
   /**
    * HasOwnProperty() is like JavaScript's
@@ -682,12 +709,16 @@ class V8_EXPORT Object : public Value {
 
   /**
    * Returns the context in which the object was created.
+   * Prefer using version with Isolate parameter.
    */
+  MaybeLocal<Context> GetCreationContext(v8::Isolate* isolate);
   MaybeLocal<Context> GetCreationContext();
 
   /**
-   * Shortcut for GetCreationContext().ToLocalChecked().
+   * Shortcut for GetCreationContext(...).ToLocalChecked().
+   * Prefer using version with Isolate parameter.
    **/
+  Local<Context> GetCreationContextChecked(v8::Isolate* isolate);
   Local<Context> GetCreationContextChecked();
 
   /** Same as above, but works for Persistents */
@@ -706,7 +737,12 @@ class V8_EXPORT Object : public Value {
    * try to expand the embedder data attached to the context.
    * In case the Local<Context> is already available because of other reasons,
    * it's fine to keep using Context::GetAlignedPointerFromEmbedderData().
+   *
+   * Prefer using version with Isolate parameter if you have an Isolate,
+   * otherwise use the other one.
    */
+  void* GetAlignedPointerFromEmbedderDataInCreationContext(v8::Isolate* isolate,
+                                                           int index);
   void* GetAlignedPointerFromEmbedderDataInCreationContext(int index);
 
   /**
@@ -722,11 +758,15 @@ class V8_EXPORT Object : public Value {
   bool IsConstructor() const;
 
   /**
-   * True if this object can carry information relevant to the embedder in its
-   * embedder fields, false otherwise. This is generally true for objects
-   * constructed through function templates but also holds for other types where
-   * V8 automatically adds internal fields at compile time, such as e.g.
-   * v8::ArrayBuffer.
+   * Returns true if this object can be generally used to wrap object objects.
+   * This means that the object either follows the convention of using embedder
+   * fields to denote type/instance pointers or is using the Wrap()/Unwrap()
+   * APIs for the same purpose. Returns false otherwise.
+   *
+   * Note that there may be other objects that use embedder fields but are not
+   * used as API wrapper objects. E.g., v8::Promise may in certain configuration
+   * use embedder fields but promises are not generally supported as API
+   * wrappers. The method will return false in those cases.
    */
   bool IsApiWrapper() const;
 
@@ -802,7 +842,7 @@ class V8_EXPORT Object : public Value {
 
  private:
   static void* Unwrap(v8::Isolate* isolate, internal::Address wrapper_obj,
-                      CppHeapPointerTag tag);
+                      CppHeapPointerTagRange tag_range);
   static void Wrap(v8::Isolate* isolate, internal::Address wrapper_obj,
                    CppHeapPointerTag tag, void* wrappable);
 
@@ -888,26 +928,27 @@ void* Object::GetAlignedPointerFromInternalField(int index) {
 // static
 template <CppHeapPointerTag tag, typename T>
 T* Object::Unwrap(v8::Isolate* isolate, const v8::Local<v8::Object>& wrapper) {
+  CppHeapPointerTagRange tag_range(tag, tag);
   auto obj = internal::ValueHelper::ValueAsAddress(*wrapper);
 #if !defined(V8_ENABLE_CHECKS)
-  return internal::ReadCppHeapPointerField<tag, T>(
-      isolate, obj, internal::Internals::kJSObjectHeaderSize);
+  return internal::ReadCppHeapPointerField<T>(
+      isolate, obj, internal::Internals::kJSObjectHeaderSize, tag_range);
 #else   // defined(V8_ENABLE_CHECKS)
-  return reinterpret_cast<T*>(Unwrap(isolate, obj, tag));
+  return reinterpret_cast<T*>(Unwrap(isolate, obj, tag_range));
 #endif  // defined(V8_ENABLE_CHECKS)
 }
 
 // static
 template <CppHeapPointerTag tag, typename T>
 T* Object::Unwrap(v8::Isolate* isolate, const PersistentBase<Object>& wrapper) {
+  CppHeapPointerTagRange tag_range(tag, tag);
   auto obj =
       internal::ValueHelper::ValueAsAddress(wrapper.template value<Object>());
 #if !defined(V8_ENABLE_CHECKS)
-  return internal::ReadCppHeapPointerField<tag, T>(
-      isolate, obj, internal::Internals::kJSObjectHeaderSize);
+  return internal::ReadCppHeapPointerField<T>(
+      isolate, obj, internal::Internals::kJSObjectHeaderSize, tag_range);
 #else   // defined(V8_ENABLE_CHECKS)
-
-  return reinterpret_cast<T*>(Unwrap(isolate, obj, tag));
+  return reinterpret_cast<T*>(Unwrap(isolate, obj, tag_range));
 #endif  // defined(V8_ENABLE_CHECKS)
 }
 
@@ -915,13 +956,57 @@ T* Object::Unwrap(v8::Isolate* isolate, const PersistentBase<Object>& wrapper) {
 template <CppHeapPointerTag tag, typename T>
 T* Object::Unwrap(v8::Isolate* isolate,
                   const BasicTracedReference<Object>& wrapper) {
+  CppHeapPointerTagRange tag_range(tag, tag);
   auto obj =
       internal::ValueHelper::ValueAsAddress(wrapper.template value<Object>());
 #if !defined(V8_ENABLE_CHECKS)
-  return internal::ReadCppHeapPointerField<tag, T>(
-      isolate, obj, internal::Internals::kJSObjectHeaderSize);
+  return internal::ReadCppHeapPointerField<T>(
+      isolate, obj, internal::Internals::kJSObjectHeaderSize, tag_range);
 #else   // defined(V8_ENABLE_CHECKS)
-  return reinterpret_cast<T*>(Unwrap(isolate, obj, tag));
+  return reinterpret_cast<T*>(Unwrap(isolate, obj, tag_range));
+#endif  // defined(V8_ENABLE_CHECKS)
+}
+
+// static
+template <typename T>
+T* Object::Unwrap(v8::Isolate* isolate, const v8::Local<v8::Object>& wrapper,
+                  CppHeapPointerTagRange tag_range) {
+  auto obj = internal::ValueHelper::ValueAsAddress(*wrapper);
+#if !defined(V8_ENABLE_CHECKS)
+  return internal::ReadCppHeapPointerField<T>(
+      isolate, obj, internal::Internals::kJSObjectHeaderSize, tag_range);
+#else   // defined(V8_ENABLE_CHECKS)
+  return reinterpret_cast<T*>(Unwrap(isolate, obj, tag_range));
+#endif  // defined(V8_ENABLE_CHECKS)
+}
+
+// static
+template <typename T>
+T* Object::Unwrap(v8::Isolate* isolate, const PersistentBase<Object>& wrapper,
+                  CppHeapPointerTagRange tag_range) {
+  auto obj =
+      internal::ValueHelper::ValueAsAddress(wrapper.template value<Object>());
+#if !defined(V8_ENABLE_CHECKS)
+  return internal::ReadCppHeapPointerField<T>(
+      isolate, obj, internal::Internals::kJSObjectHeaderSize, tag_range);
+#else   // defined(V8_ENABLE_CHECKS)
+
+  return reinterpret_cast<T*>(Unwrap(isolate, obj, tag_range));
+#endif  // defined(V8_ENABLE_CHECKS)
+}
+
+// static
+template <typename T>
+T* Object::Unwrap(v8::Isolate* isolate,
+                  const BasicTracedReference<Object>& wrapper,
+                  CppHeapPointerTagRange tag_range) {
+  auto obj =
+      internal::ValueHelper::ValueAsAddress(wrapper.template value<Object>());
+#if !defined(V8_ENABLE_CHECKS)
+  return internal::ReadCppHeapPointerField<T>(
+      isolate, obj, internal::Internals::kJSObjectHeaderSize, tag_range);
+#else   // defined(V8_ENABLE_CHECKS)
+  return reinterpret_cast<T*>(Unwrap(isolate, obj, tag_range));
 #endif  // defined(V8_ENABLE_CHECKS)
 }
 
@@ -947,6 +1032,30 @@ template <CppHeapPointerTag tag>
 void Object::Wrap(v8::Isolate* isolate,
                   const BasicTracedReference<Object>& wrapper,
                   void* wrappable) {
+  auto obj =
+      internal::ValueHelper::ValueAsAddress(wrapper.template value<Object>());
+  Wrap(isolate, obj, tag, wrappable);
+}
+
+// static
+void Object::Wrap(v8::Isolate* isolate, const v8::Local<v8::Object>& wrapper,
+                  void* wrappable, CppHeapPointerTag tag) {
+  auto obj = internal::ValueHelper::ValueAsAddress(*wrapper);
+  Wrap(isolate, obj, tag, wrappable);
+}
+
+// static
+void Object::Wrap(v8::Isolate* isolate, const PersistentBase<Object>& wrapper,
+                  void* wrappable, CppHeapPointerTag tag) {
+  auto obj =
+      internal::ValueHelper::ValueAsAddress(wrapper.template value<Object>());
+  Wrap(isolate, obj, tag, wrappable);
+}
+
+// static
+void Object::Wrap(v8::Isolate* isolate,
+                  const BasicTracedReference<Object>& wrapper, void* wrappable,
+                  CppHeapPointerTag tag) {
   auto obj =
       internal::ValueHelper::ValueAsAddress(wrapper.template value<Object>());
   Wrap(isolate, obj, tag, wrappable);

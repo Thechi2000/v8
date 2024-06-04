@@ -1238,7 +1238,13 @@
   V(I64x4RelaxedLaneSelect)        \
   V(I32x8RelaxedLaneSelect)        \
   V(I16x16RelaxedLaneSelect)       \
-  V(I8x32RelaxedLaneSelect)
+  V(I8x32RelaxedLaneSelect)        \
+  V(I32x8DotI8x32I7x32AddS)        \
+  V(I16x16DotI8x32I7x32S)          \
+  V(F32x8RelaxedMin)               \
+  V(F32x8RelaxedMax)               \
+  V(F64x4RelaxedMin)               \
+  V(F64x4RelaxedMax)
 
 #define VALUE_OP_LIST(V)              \
   COMMON_OP_LIST(V)                   \
