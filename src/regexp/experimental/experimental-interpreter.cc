@@ -4,12 +4,16 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
+#include <cstdint>
+#include <cstdlib>
+
 #include "src/base/optional.h"
 #include "src/base/strings.h"
 #include "src/common/assert-scope.h"
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/string-inl.h"
 #include "src/regexp/experimental/experimental.h"
+#include "src/regexp/regexp.h"
 #include "src/strings/char-predicates-inl.h"
 #include "src/zone/zone-allocator.h"
 #include "src/zone/zone-list-inl.h"
@@ -20,6 +24,7 @@ namespace internal {
 namespace {
 
 constexpr int kUndefinedRegisterValue = -1;
+constexpr size_t maxMemoryUsage = 2 << 30;  // 1GiB
 
 template <class Character>
 bool SatisfiesAssertion(RegExpAssertion::Type type,
@@ -554,7 +559,8 @@ class NfaInterpreter {
     }
     // Run the initial thread, potentially forking new threads, until every
     // thread is blocked without further input.
-    RunActiveThreads();
+    int err_code = RunActiveThreads();
+    if (err_code != RegExp::kInternalRegExpSuccess) return err_code;
 
     // We stop if one of the following conditions hold:
     // - We have exhausted the entire input.
@@ -581,7 +587,8 @@ class NfaInterpreter {
       FlushBlockedThreads(input_char);
 
       // Run all threads until they block or accept.
-      RunActiveThreads();
+      err_code = RunActiveThreads();
+      if (err_code != RegExp::kInternalRegExpSuccess) return err_code;
     }
 
     return RegExp::kInternalRegExpSuccess;
@@ -593,7 +600,7 @@ class NfaInterpreter {
   //   pushed on `blocked_threads_`.
   // - If `t` executes ACCEPT, set `best_match` according to `t.match_begin` and
   //   the current input index. All remaining `active_threads_` are discarded.
-  void RunActiveThread(InterpreterThread t) {
+  int RunActiveThread(InterpreterThread t) {
     ++clock;
 
     // Since the clock is a `uint64_t`, it is almost guaranteed
@@ -603,11 +610,14 @@ class NfaInterpreter {
     DCHECK_GT(clock, 0);
 
     while (true) {
+      int err_code = CheckMemoryConsumption();
+      if (err_code != RegExp::kInternalRegExpSuccess) return err_code;
+
       SBXCHECK_GE(t.pc, 0);
       SBXCHECK_LT(t.pc, bytecode_.length());
       if (IsPcProcessed(t.pc, t.consumed_since_last_quantifier)) {
         DestroyThread(t);
-        return;
+        return RegExp::kInternalRegExpSuccess;
       }
       MarkPcProcessed(t.pc, t.consumed_since_last_quantifier);
 
@@ -615,13 +625,13 @@ class NfaInterpreter {
       switch (inst.opcode) {
         case RegExpInstruction::CONSUME_RANGE: {
           blocked_threads_.Add(t, zone_);
-          return;
+          return RegExp::kInternalRegExpSuccess;
         }
         case RegExpInstruction::ASSERTION:
           if (!SatisfiesAssertion(inst.payload.assertion_type, input_,
                                   input_index_)) {
             DestroyThread(t);
-            return;
+            return RegExp::kInternalRegExpSuccess;
           }
           ++t.pc;
           break;
@@ -675,7 +685,7 @@ class NfaInterpreter {
             DestroyThread(s);
           }
           active_threads_.Rewind(0);
-          return;
+          return RegExp::kInternalRegExpSuccess;
         case RegExpInstruction::SET_REGISTER_TO_CP:
           GetRegisterArray(t)[inst.payload.register_index] = input_index_;
           GetCaptureClockArray(t)[inst.payload.register_index] = clock;
@@ -701,7 +711,7 @@ class NfaInterpreter {
           if (t.consumed_since_last_quantifier ==
               InterpreterThread::ConsumedCharacter::DidNotConsume) {
             DestroyThread(t);
-            return;
+            return RegExp::kInternalRegExpSuccess;
           }
           ++t.pc;
           break;
@@ -713,7 +723,7 @@ class NfaInterpreter {
           SBXCHECK_LT(inst.payload.looktable_index, lookbehind_table_.length());
           lookbehind_table_[inst.payload.looktable_index] = true;
           DestroyThread(t);
-          return;
+          return RegExp::kInternalRegExpSuccess;
         case RegExpInstruction::READ_LOOKBEHIND_TABLE:
           // Destroy the thread if the corresponding lookbehind did or did not
           // complete a match at the current position (depending on whether or
@@ -727,7 +737,7 @@ class NfaInterpreter {
           if (lookbehind_table_[lookbehind_index] !=
               inst.payload.read_lookbehind.is_positive()) {
             DestroyThread(t);
-            return;
+            return RegExp::kInternalRegExpSuccess;
           }
 
           ++t.pc;
@@ -739,10 +749,13 @@ class NfaInterpreter {
   // Run each active thread until it can't continue without further input.
   // `active_threads_` is empty afterwards.  `blocked_threads_` are sorted from
   // low to high priority.
-  void RunActiveThreads() {
+  int RunActiveThreads() {
     while (!active_threads_.is_empty()) {
-      RunActiveThread(active_threads_.RemoveLast());
+      int err_code = RunActiveThread(active_threads_.RemoveLast());
+      if (err_code != RegExp::kInternalRegExpSuccess) return err_code;
     }
+
+    return RegExp::kInternalRegExpSuccess;
   }
 
   // Unblock all blocked_threads_ by feeding them an `input_char`.  Should only
@@ -770,6 +783,28 @@ class NfaInterpreter {
   }
 
   bool FoundMatch() const { return best_match_thread_.has_value(); }
+
+  // Return the total memory consumption of a single thread.
+  size_t MemoryUsagePerThread() {
+    return register_count_per_match_ * sizeof(int) +  // RegisterArray
+           quantifier_count_ * sizeof(uint64_t) +     // QuantifierClockArray
+           register_count_per_match_ * sizeof(uint64_t) +  // CaptureClockArray
+           sizeof(InterpreterThread);
+  }
+
+  // Return an approximation of the total current memory usage of the
+  // intepreter. It is based only on the threads' consumption, since the rest is
+  // negligible in comparison.
+  size_t AppromativeTotalMemoryUsage() {
+    return (blocked_threads_.length() + active_threads_.length()) *
+           MemoryUsagePerThread();
+  }
+
+  int CheckMemoryConsumption() {
+    return (AppromativeTotalMemoryUsage() < maxMemoryUsage)
+               ? RegExp::kInternalRegExpSuccess
+               : RegExp::kInternalRegExpException;
+  }
 
   base::Vector<int> GetRegisterArray(InterpreterThread t) {
     return base::Vector<int>(t.register_array_begin, register_count_per_match_);
