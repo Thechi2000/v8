@@ -4,8 +4,6 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
-#include <cstdint>
-
 #include "src/base/optional.h"
 #include "src/base/strings.h"
 #include "src/common/assert-scope.h"
