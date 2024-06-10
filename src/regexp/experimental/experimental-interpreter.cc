@@ -4,13 +4,14 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
+#include <cstdint>
+
 #include "src/base/optional.h"
 #include "src/base/strings.h"
 #include "src/common/assert-scope.h"
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/string-inl.h"
 #include "src/regexp/experimental/experimental.h"
-#include "src/regexp/regexp.h"
 #include "src/strings/char-predicates-inl.h"
 #include "src/zone/zone-allocator.h"
 #include "src/zone/zone-list-inl.h"
@@ -340,6 +341,14 @@ class NfaInterpreter {
       }
     }
 
+    // Precomputes the memory consumption of a single thread, to be used by
+    // `CheckMemoryConsumption()`.
+    memory_consumption_per_thread_ =
+        register_count_per_match_ * sizeof(int) +       // RegisterArray
+        quantifier_count_ * sizeof(uint64_t) +          // QuantifierClockArray
+        register_count_per_match_ * sizeof(uint64_t) +  // CaptureClockArray
+        sizeof(InterpreterThread);
+
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
   }
@@ -610,9 +619,6 @@ class NfaInterpreter {
     DCHECK_GT(clock, 0);
 
     while (true) {
-      int err_code = CheckMemoryConsumption();
-      if (err_code != RegExp::kInternalRegExpSuccess) return err_code;
-
       SBXCHECK_GE(t.pc, 0);
       SBXCHECK_LT(t.pc, bytecode_.length());
       if (IsPcProcessed(t.pc, t.consumed_since_last_quantifier)) {
@@ -668,6 +674,8 @@ class NfaInterpreter {
                     fork_capture_clocks.begin());
 
           active_threads_.Add(fork, zone_);
+          int err_code = CheckMemoryConsumption();
+          if (err_code != RegExp::kInternalRegExpSuccess) return err_code;
 
           ++t.pc;
           break;
@@ -786,28 +794,22 @@ class NfaInterpreter {
 
   bool FoundMatch() const { return best_match_thread_.has_value(); }
 
-  // Return the total memory consumption of a single thread.
-  size_t MemoryUsagePerThread() {
-    return register_count_per_match_ * sizeof(int) +  // RegisterArray
-           quantifier_count_ * sizeof(uint64_t) +     // QuantifierClockArray
-           register_count_per_match_ * sizeof(uint64_t) +  // CaptureClockArray
-           sizeof(InterpreterThread);
-  }
-
-  // Return an approximation of the total current memory usage of the
-  // intepreter. It is based only on the threads' consumption, since the rest is
-  // negligible in comparison.
   size_t AppromativeTotalMemoryUsage() {
     return (blocked_threads_.length() + active_threads_.length()) *
-           MemoryUsagePerThread();
+           memory_consumption_per_thread_;
   }
 
   // Checks that the approximative memory usage does not goes past a fixed
   // threshold. Returns the appropriate error code.
   int CheckMemoryConsumption() {
-    return (AppromativeTotalMemoryUsage() < maxMemoryUsage)
-               ? RegExp::kInternalRegExpSuccess
-               : RegExp::kInternalRegExpException;
+    // Copmputes an approximation of the total current memory usage of the
+    // intepreter. It is based only on the threads' consumption, since the rest
+    // is negligible in comparison.
+    uint64_t approx = (blocked_threads_.length() + active_threads_.length()) *
+                      memory_consumption_per_thread_;
+
+    return (approx < maxMemoryUsage) ? RegExp::kInternalRegExpSuccess
+                                     : RegExp::kInternalRegExpException;
   }
 
   base::Vector<int> GetRegisterArray(InterpreterThread t) {
@@ -1018,6 +1020,8 @@ class NfaInterpreter {
   // Truth table for the lookbehinds. lookbehind_table_[k] indicates whether the
   // lookbehind of index k did complete a match on the current position.
   ZoneList<bool> lookbehind_table_;
+
+  uint64_t memory_consumption_per_thread_;
 
   Zone* zone_;
 };
