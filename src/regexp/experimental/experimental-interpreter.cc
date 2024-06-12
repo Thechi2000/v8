@@ -300,6 +300,7 @@ class NfaInterpreter {
         lookbehind_pc_(0, zone),
         filter_groups_pc_(base::nullopt),
         lookbehind_table_(0, zone),
+        use_clocks_(false),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
@@ -316,6 +317,7 @@ class NfaInterpreter {
       if (!filter_groups_pc_.has_value() &&
           RegExpInstruction::IsFilter(bytecode_[i])) {
         filter_groups_pc_ = i;
+        use_clocks_ = true;
       }
 
       // The first instruction to follow the `FILTER_*` section or the `ACCEPT`
@@ -652,24 +654,26 @@ class NfaInterpreter {
           std::copy(t_registers.begin(), t_registers.end(),
                     fork_registers.begin());
 
-          base::Vector<uint64_t> fork_quantifier_clocks =
-              GetQuantifierClockArray(fork);
-          base::Vector<uint64_t> t_fork_quantifier_clocks =
-              GetQuantifierClockArray(t);
-          DCHECK_EQ(fork_quantifier_clocks.length(),
-                    t_fork_quantifier_clocks.length());
-          std::copy(t_fork_quantifier_clocks.begin(),
-                    t_fork_quantifier_clocks.end(),
-                    fork_quantifier_clocks.begin());
+          if (use_clocks_) {
+            base::Vector<uint64_t> fork_quantifier_clocks =
+                GetQuantifierClockArray(fork);
+            base::Vector<uint64_t> t_fork_quantifier_clocks =
+                GetQuantifierClockArray(t);
+            DCHECK_EQ(fork_quantifier_clocks.length(),
+                      t_fork_quantifier_clocks.length());
+            std::copy(t_fork_quantifier_clocks.begin(),
+                      t_fork_quantifier_clocks.end(),
+                      fork_quantifier_clocks.begin());
 
-          base::Vector<uint64_t> fork_capture_clocks =
-              GetCaptureClockArray(fork);
-          base::Vector<uint64_t> t_fork_capture_clocks =
-              GetCaptureClockArray(t);
-          DCHECK_EQ(fork_capture_clocks.length(),
-                    t_fork_capture_clocks.length());
-          std::copy(t_fork_capture_clocks.begin(), t_fork_capture_clocks.end(),
-                    fork_capture_clocks.begin());
+            base::Vector<uint64_t> fork_capture_clocks =
+                GetCaptureClockArray(fork);
+            base::Vector<uint64_t> t_fork_capture_clocks =
+                GetCaptureClockArray(t);
+            DCHECK_EQ(fork_capture_clocks.length(),
+                      t_fork_capture_clocks.length());
+            std::copy(t_fork_capture_clocks.begin(),
+                      t_fork_capture_clocks.end(), fork_capture_clocks.begin());
+          }
 
           active_threads_.Add(fork, zone_);
           int err_code = CheckMemoryConsumption();
@@ -696,10 +700,20 @@ class NfaInterpreter {
           SBXCHECK_GE(inst.payload.register_index, 0);
           SBXCHECK_LT(inst.payload.register_index, register_count_per_match_);
           GetRegisterArray(t)[inst.payload.register_index] = input_index_;
-          GetCaptureClockArray(t)[inst.payload.register_index] = clock;
+          if (use_clocks_) {
+            GetCaptureClockArray(t)[inst.payload.register_index] = clock;
+          }
+          ++t.pc;
+          break;
+        case RegExpInstruction::CLEAR_REGISTER:
+          SBXCHECK_GE(inst.payload.register_index, 0);
+          SBXCHECK_LT(inst.payload.register_index, register_count_per_match_);
+          GetRegisterArray(t)[inst.payload.register_index] =
+              kUndefinedRegisterValue;
           ++t.pc;
           break;
         case RegExpInstruction::SET_QUANTIFIER_TO_CLOCK:
+          DCHECK(use_clocks_);
           GetQuantifierClockArray(t)[inst.payload.quantifier_id] = clock;
           ++t.pc;
           break;
@@ -800,6 +814,10 @@ class NfaInterpreter {
   // Checks that the approximative memory usage does not goes past a fixed
   // threshold. Returns the appropriate error code.
   int CheckMemoryConsumption() {
+    if (!use_clocks_) {
+      return RegExp::kInternalRegExpSuccess;
+    }
+
     // Copmputes an approximation of the total current memory usage of the
     // intepreter. It is based only on the threads' consumption, since the rest
     // is negligible in comparison.
@@ -840,10 +858,13 @@ class NfaInterpreter {
   }
 
   uint64_t* NewQuantifierClockArrayUninitialized() {
+    if (!use_clocks_) return nullptr;
     return quantifier_array_allocator_.allocate(quantifier_count_);
   }
 
   uint64_t* NewQuantifierClockArray(uint64_t fill_value) {
+    if (!use_clocks_) return nullptr;
+
     uint64_t* array_begin = NewQuantifierClockArrayUninitialized();
     uint64_t* array_end = array_begin + quantifier_count_;
     std::fill(array_begin, array_end, fill_value);
@@ -851,15 +872,18 @@ class NfaInterpreter {
   }
 
   void FreeQuantifierClockArray(uint64_t* quantifier_clock_array_begin) {
+    if (!use_clocks_) return;
     quantifier_array_allocator_.deallocate(quantifier_clock_array_begin,
                                            quantifier_count_);
   }
 
   uint64_t* NewCaptureClockArrayUninitialized() {
+    if (!use_clocks_) return nullptr;
     return capture_clock_array_allocator_.allocate(register_count_per_match_);
   }
 
   uint64_t* NewCaptureClockArray(uint64_t fill_value) {
+    if (!use_clocks_) return nullptr;
     uint64_t* array_begin = NewCaptureClockArrayUninitialized();
     uint64_t* array_end = array_begin + register_count_per_match_;
     std::fill(array_begin, array_end, fill_value);
@@ -867,12 +891,16 @@ class NfaInterpreter {
   }
 
   void FreeCaptureClockArray(uint64_t* register_array_begin) {
+    if (!use_clocks_) return;
     capture_clock_array_allocator_.deallocate(register_array_begin,
                                               register_count_per_match_);
   }
 
   base::Vector<int> GetFilteredRegisters(InterpreterThread t) {
     base::Vector<int> registers = GetRegisterArray(t);
+    if (!use_clocks_) {
+      return registers;
+    }
 
     if (filter_groups_pc_.has_value()) {
       base::Vector<int> filtered_registers(
@@ -1020,6 +1048,8 @@ class NfaInterpreter {
   ZoneList<bool> lookbehind_table_;
 
   uint64_t memory_consumption_per_thread_;
+
+  bool use_clocks_;
 
   Zone* zone_;
 };

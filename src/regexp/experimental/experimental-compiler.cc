@@ -4,8 +4,10 @@
 
 #include "src/regexp/experimental/experimental-compiler.h"
 
+#include "src/base/logging.h"
 #include "src/base/strings.h"
 #include "src/regexp/experimental/experimental.h"
+#include "src/regexp/regexp-flags.h"
 #include "src/zone/zone-containers.h"
 #include "src/zone/zone-list-inl.h"
 
@@ -39,7 +41,7 @@ class CanBeHandledVisitor final : private RegExpVisitor {
     // future.
     static constexpr RegExpFlags kAllowedFlags =
         RegExpFlag::kGlobal | RegExpFlag::kSticky | RegExpFlag::kMultiline |
-        RegExpFlag::kDotAll | RegExpFlag::kLinear;
+        RegExpFlag::kDotAll | RegExpFlag::kLinear | RegExpFlag::kOptimizedLinear;
     // We support Unicode iff kUnicode is among the supported flags.
     static_assert(ExperimentalRegExp::kSupportsUnicode ==
                   IsUnicode(kAllowedFlags));
@@ -274,6 +276,10 @@ class BytecodeAssembler {
 
   void Assertion(RegExpAssertion::Type t) {
     code_.Add(RegExpInstruction::Assertion(t), zone_);
+  }
+
+  void ClearRegister(int32_t register_index) {
+    code_.Add(RegExpInstruction::ClearRegister(register_index), zone_);
   }
 
   void ConsumeRange(base::uc16 from, base::uc16 to) {
@@ -521,7 +527,7 @@ class CompileVisitor : private RegExpVisitor {
  public:
   static ZoneList<RegExpInstruction> Compile(RegExpTree* tree,
                                              RegExpFlags flags, Zone* zone) {
-    CompileVisitor compiler(zone);
+    CompileVisitor compiler(zone, flags);
 
     if (!IsSticky(flags) && !tree->IsAnchoredAtStart()) {
       // The match is not anchored, i.e. may start at any input position, so we
@@ -536,8 +542,10 @@ class CompileVisitor : private RegExpVisitor {
     compiler.assembler_.SetRegisterToCp(1);
     compiler.assembler_.Accept();
 
-    FilterGroupsCompileVisitor::CompileFilter(
-        zone, tree, compiler.assembler_, compiler.quantifier_id_remapping_);
+    if (compiler.use_clocks_) {
+      FilterGroupsCompileVisitor::CompileFilter(
+          zone, tree, compiler.assembler_, compiler.quantifier_id_remapping_);
+    }
 
     // To handle captureless lookbehinds, we run independent automata for each
     // lookbehind in lockstep with the main expression. To do so, we compile
@@ -571,12 +579,13 @@ class CompileVisitor : private RegExpVisitor {
   }
 
  private:
-  explicit CompileVisitor(Zone* zone)
+  explicit CompileVisitor(Zone* zone, RegExpFlags flags)
       : zone_(zone),
         lookbehinds_(zone),
         quantifier_id_remapping_(zone),
         assembler_(zone),
-        inside_lookaround_(false) {}
+        inside_lookaround_(false),
+        use_clocks_(IsOptimizedLinear(flags)) {}
 
   // Generate a disjunction of code fragments compiled by a function `alt_gen`.
   // `alt_gen` is called repeatedly with argument `int i = 0, 1, ..., alt_num -
@@ -700,6 +709,18 @@ class CompileVisitor : private RegExpVisitor {
       assembler_.ConsumeRange(c, c);
     }
     return nullptr;
+  }
+
+  void ClearRegisters(Interval indices) {
+    if (indices.is_empty()) return;
+    DCHECK_EQ(indices.from() % 2, 0);
+    DCHECK_EQ(indices.to() % 2, 1);
+    for (int i = indices.from(); i <= indices.to(); i += 2) {
+      // It suffices to clear the register containing the `begin` of a capture
+      // because this indicates that the capture is undefined, regardless of
+      // the value in the `end` register.
+      assembler_.ClearRegister(i);
+    }
   }
 
   // Emit bytecode corresponding to /<emit_body>*/.
@@ -898,7 +919,7 @@ class CompileVisitor : private RegExpVisitor {
     // If the quantifier must match nothing, we do not produce its body, but
     // still need the `SET_QUANTIFIER_TO_CLOCK` for the Nfa to be able to
     // correctly determine the number of quantifiers.
-    if (node->max() == 0) {
+    if (use_clocks_ && node->max() == 0) {
       if (!node->CaptureRegisters().is_empty()) {
         assembler_.SetQuantifierToClock(RemapQuantifier(node->index()));
       }
@@ -914,8 +935,11 @@ class CompileVisitor : private RegExpVisitor {
     // clear registers in the first node->min() repetitions.
     // Later, and if node->min() == 0, we don't have to clear registers before
     // the first optional repetition.
+    Interval body_registers = node->body()->CaptureRegisters();
     auto emit_body = [&]() {
-      if (!node->CaptureRegisters().is_empty()) {
+      if (!use_clocks_) {
+        ClearRegisters(body_registers);
+      } else if (!node->CaptureRegisters().is_empty()) {
         assembler_.SetQuantifierToClock(RemapQuantifier(node->index()));
       }
 
@@ -1037,6 +1061,8 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   int RemapQuantifier(int id) {
+    DCHECK(use_clocks_);
+
     if (!quantifier_id_remapping_.contains(id)) {
       quantifier_id_remapping_[id] =
           static_cast<int>(quantifier_id_remapping_.size());
@@ -1056,6 +1082,8 @@ class CompileVisitor : private RegExpVisitor {
 
   BytecodeAssembler assembler_;
   bool inside_lookaround_;
+
+  bool use_clocks_;
 };
 
 }  // namespace
