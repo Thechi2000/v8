@@ -38,9 +38,10 @@ class V8_EXPORT RegExp : public Object {
     kLinear = 1 << 6,
     kHasIndices = 1 << 7,
     kUnicodeSets = 1 << 8,
+    kOptimizedLinear = 1 << 9,
   };
 
-  static constexpr int kFlagCount = 9;
+  static constexpr int kFlagCount = 10;
 
   /**
    * Creates a regular expression from the given pattern string and
