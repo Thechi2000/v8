@@ -85,6 +85,21 @@ constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
 }
 
 // static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::EnumIndexRegister() {
+  return r6;
+}
+
+// static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::CacheTypeRegister() {
+  return r7;
+}
+
+// static
+constexpr Register EnumeratedKeyedLoadBaselineDescriptor::SlotRegister() {
+  return r4;
+}
+
+// static
 constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
   return kInterpreterAccumulatorRegister;
 }
@@ -299,7 +314,8 @@ CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister() {
   return r4;
 }
 // static
-constexpr Register CallApiCallbackOptimizedDescriptor::CallDataRegister() {
+constexpr Register
+CallApiCallbackOptimizedDescriptor::FunctionTemplateInfoRegister() {
   return r5;
 }
 // static
@@ -317,7 +333,8 @@ CallApiCallbackGenericDescriptor::TopmostScriptHavingContextRegister() {
   return r3;
 }
 // static
-constexpr Register CallApiCallbackGenericDescriptor::CallHandlerInfoRegister() {
+constexpr Register
+CallApiCallbackGenericDescriptor::FunctionTemplateInfoRegister() {
   return r5;
 }
 // static
@@ -368,7 +385,7 @@ constexpr auto RunMicrotasksEntryDescriptor::registers() {
 
 constexpr auto WasmJSToWasmWrapperDescriptor::registers() {
   // Arbitrarily picked register.
-  return RegisterArray(r2);
+  return RegisterArray(r8);
 }
 }  // namespace internal
 }  // namespace v8

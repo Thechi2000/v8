@@ -315,8 +315,8 @@ TEST_F(TestWithIsolate, Issue23768) {
   v8::Local<v8::Script> evil_script = CompileWithOrigin(source, origin, false);
   CHECK(!evil_script.IsEmpty());
   CHECK(!evil_script->Run(env).IsEmpty());
-  i::Handle<i::ExternalTwoByteString> i_source(
-      i::ExternalTwoByteString::cast(*v8::Utils::OpenDirectHandle(*source)),
+  i::DirectHandle<i::ExternalTwoByteString> i_source(
+      i::Cast<i::ExternalTwoByteString>(*v8::Utils::OpenDirectHandle(*source)),
       i_isolate());
   // This situation can happen if source was an external string disposed
   // by its owner.
@@ -366,14 +366,14 @@ TEST_F(LogTest, LogCallbacks) {
   }
 }
 
-static void Prop1Getter(v8::Local<v8::String> property,
+static void Prop1Getter(v8::Local<v8::Name> property,
                         const v8::PropertyCallbackInfo<v8::Value>& info) {}
 
-static void Prop1Setter(v8::Local<v8::String> property,
+static void Prop1Setter(v8::Local<v8::Name> property,
                         v8::Local<v8::Value> value,
                         const v8::PropertyCallbackInfo<void>& info) {}
 
-static void Prop2Getter(v8::Local<v8::String> property,
+static void Prop2Getter(v8::Local<v8::Name> property,
                         const v8::PropertyCallbackInfo<v8::Value>& info) {}
 
 TEST_F(LogTest, LogAccessorCallbacks) {
@@ -384,8 +384,8 @@ TEST_F(LogTest, LogAccessorCallbacks) {
         isolate(), v8::FunctionTemplate::New(isolate()));
     obj->SetClassName(NewString("Obj"));
     v8::Local<v8::ObjectTemplate> inst = obj->InstanceTemplate();
-    inst->SetAccessor(NewString("prop1"), Prop1Getter, Prop1Setter);
-    inst->SetAccessor(NewString("prop2"), Prop2Getter);
+    inst->SetNativeDataProperty(NewString("prop1"), Prop1Getter, Prop1Setter);
+    inst->SetNativeDataProperty(NewString("prop2"), Prop2Getter);
 
     logger.v8_file_logger()->LogAccessorCallbacks();
 
@@ -909,7 +909,7 @@ void ValidateMapDetailsLogging(v8::Isolate* isolate,
     uintptr_t address = obj.ptr();
     if (map_create_addresses.find(address) == map_create_addresses.end()) {
       // logger->PrintLog();
-      i::Print(i::Map::cast(obj));
+      i::Print(i::Cast<i::Map>(obj));
       FATAL(
           "Map (%p, #%zu) creation not logged during startup with "
           "--log-maps!"
@@ -919,7 +919,7 @@ void ValidateMapDetailsLogging(v8::Isolate* isolate,
     } else if (map_details_addresses.find(address) ==
                map_details_addresses.end()) {
       // logger->PrintLog();
-      i::Print(i::Map::cast(obj));
+      i::Print(i::Cast<i::Map>(obj));
       FATAL(
           "Map (%p, #%zu) details not logged during startup with "
           "--log-maps!"
@@ -1207,7 +1207,8 @@ TEST_F(LogTest, BuiltinsNotLoggedAsLazyCompile) {
     logger.StopLogging();
 
     i::Isolate* i_isolate = logger.i_isolate();
-    i::Handle<i::Code> builtin = BUILTIN_CODE(i_isolate, BooleanConstructor);
+    i::DirectHandle<i::Code> builtin =
+        BUILTIN_CODE(i_isolate, BooleanConstructor);
     v8::base::EmbeddedVector<char, 100> buffer;
 
     // Should only be logged as "Builtin" with a name, never as "Function".

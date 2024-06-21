@@ -35,10 +35,10 @@
 #include "src/flags/flags.h"
 #include "src/handles/handles-inl.h"
 #include "src/handles/handles.h"
-#include "src/heap/basic-memory-chunk.h"
 #include "src/heap/factory-inl.h"
 #include "src/heap/factory.h"
-#include "src/heap/memory-chunk.h"
+#include "src/heap/memory-chunk-metadata.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/logging/counters.h"
 #include "src/objects/code.h"
 #include "src/objects/contexts.h"
@@ -98,11 +98,11 @@ void MacroAssembler::LoadRoot(Register destination, RootIndex index) {
   if (RootsTable::IsImmortalImmovable(index)) {
     Handle<Object> object = isolate()->root_handle(index);
     if (IsSmi(*object)) {
-      mov(destination, Immediate(Smi::cast(*object)));
+      mov(destination, Immediate(Cast<Smi>(*object)));
       return;
     } else {
       DCHECK(IsHeapObject(*object));
-      mov(destination, Handle<HeapObject>::cast(object));
+      mov(destination, Cast<HeapObject>(object));
       return;
     }
   }
@@ -136,9 +136,9 @@ void MacroAssembler::CompareRoot(Register with, RootIndex index) {
   DCHECK(RootsTable::IsImmortalImmovable(index));
   Handle<Object> object = isolate()->root_handle(index);
   if (IsHeapObject(*object)) {
-    cmp(with, Handle<HeapObject>::cast(object));
+    cmp(with, Cast<HeapObject>(object));
   } else {
-    cmp(with, Immediate(Smi::cast(*object)));
+    cmp(with, Immediate(Cast<Smi>(*object)));
   }
 }
 
@@ -154,9 +154,9 @@ void MacroAssembler::PushRoot(RootIndex index) {
   DCHECK(RootsTable::IsImmortalImmovable(index));
   Handle<Object> object = isolate()->root_handle(index);
   if (IsHeapObject(*object)) {
-    Push(Handle<HeapObject>::cast(object));
+    Push(Cast<HeapObject>(object));
   } else {
-    Push(Smi::cast(*object));
+    Push(Cast<Smi>(*object));
   }
 }
 
@@ -1085,66 +1085,34 @@ void MacroAssembler::Prologue() {
   push(kJavaScriptCallArgCountRegister);  // Actual argument count.
 }
 
-void MacroAssembler::DropArguments(Register count, ArgumentsCountType type,
-                                   ArgumentsCountMode mode) {
-  int receiver_bytes =
-      (mode == kCountExcludesReceiver) ? kSystemPointerSize : 0;
-  switch (type) {
-    case kCountIsInteger: {
-      lea(esp, Operand(esp, count, times_system_pointer_size, receiver_bytes));
-      break;
-    }
-    case kCountIsSmi: {
-      static_assert(kSmiTagSize == 1 && kSmiTag == 0);
-      // SMIs are stored shifted left by 1 byte with the tag being 0.
-      // This is equivalent to multiplying by 2. To convert SMIs to bytes we
-      // can therefore just multiply the stored value by half the system pointer
-      // size.
-      lea(esp,
-          Operand(esp, count, times_half_system_pointer_size, receiver_bytes));
-      break;
-    }
-    case kCountIsBytes: {
-      if (receiver_bytes == 0) {
-        add(esp, count);
-      } else {
-        lea(esp, Operand(esp, count, times_1, receiver_bytes));
-      }
-      break;
-    }
-  }
+void MacroAssembler::DropArguments(Register count) {
+  lea(esp, Operand(esp, count, times_system_pointer_size, 0));
 }
 
-void MacroAssembler::DropArguments(Register count, Register scratch,
-                                   ArgumentsCountType type,
-                                   ArgumentsCountMode mode) {
+void MacroAssembler::DropArguments(Register count, Register scratch) {
   DCHECK(!AreAliased(count, scratch));
   PopReturnAddressTo(scratch);
-  DropArguments(count, type, mode);
+  DropArguments(count);
   PushReturnAddressFrom(scratch);
 }
 
 void MacroAssembler::DropArgumentsAndPushNewReceiver(Register argc,
                                                      Register receiver,
-                                                     Register scratch,
-                                                     ArgumentsCountType type,
-                                                     ArgumentsCountMode mode) {
+                                                     Register scratch) {
   DCHECK(!AreAliased(argc, receiver, scratch));
   PopReturnAddressTo(scratch);
-  DropArguments(argc, type, mode);
+  DropArguments(argc);
   Push(receiver);
   PushReturnAddressFrom(scratch);
 }
 
 void MacroAssembler::DropArgumentsAndPushNewReceiver(Register argc,
                                                      Operand receiver,
-                                                     Register scratch,
-                                                     ArgumentsCountType type,
-                                                     ArgumentsCountMode mode) {
+                                                     Register scratch) {
   DCHECK(!AreAliased(argc, scratch));
   DCHECK(!receiver.is_reg(scratch));
   PopReturnAddressTo(scratch);
-  DropArguments(argc, type, mode);
+  DropArguments(argc);
   Push(receiver);
   PushReturnAddressFrom(scratch);
 }
@@ -1213,6 +1181,7 @@ void MacroAssembler::EnterExitFrame(int extra_slots,
   ASM_CODE_COMMENT(this);
   DCHECK(frame_type == StackFrame::EXIT ||
          frame_type == StackFrame::BUILTIN_EXIT ||
+         frame_type == StackFrame::API_ACCESSOR_EXIT ||
          frame_type == StackFrame::API_CALLBACK_EXIT);
 
   // Set up the frame structure on the stack.
@@ -1997,17 +1966,6 @@ int MacroAssembler::CallCFunction(Register function, int num_arguments,
                   ExternalReference::fast_c_call_caller_fp_address(isolate()),
                   scratch),
         ebp);
-
-#if DEBUG
-    // Reset Isolate::context field right before the fast C call such that the
-    // GC can visit this field unconditionally. This is necessary because
-    // CEntry sets it to kInvalidContext in debug build only.
-    mov(root_array_available()
-            ? Operand(kRootRegister, IsolateData::context_offset())
-            : ExternalReferenceAsOperand(
-                  ExternalReference::context_address(isolate()), scratch),
-        Immediate(Context::kNoContext));
-#endif
   }
 
   call(function);
@@ -2207,7 +2165,7 @@ void MacroAssembler::LoadLabelAddress(Register dst, Label* lbl) {
 void MacroAssembler::MemoryChunkHeaderFromObject(Register object,
                                                  Register header) {
   constexpr intptr_t alignment_mask =
-      MemoryChunkHeader::GetAlignmentMaskForAssembler();
+      MemoryChunk::GetAlignmentMaskForAssembler();
   if (header == object) {
     and_(header, Immediate(~alignment_mask));
   } else {
@@ -2249,7 +2207,17 @@ void MacroAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
                                            DeoptimizeKind kind, Label* ret,
                                            Label*) {
   ASM_CODE_COMMENT(this);
-  CallBuiltin(target);
+#if V8_ENABLE_WEBASSEMBLY
+  if (options().is_wasm) {
+    CHECK(v8_flags.wasm_deopt);
+    wasm_call(static_cast<Address>(target), RelocInfo::WASM_STUB_CALL);
+#else
+  // For balance.
+  if (false) {
+#endif  // V8_ENABLE_WEBASSEMBLY
+  } else {
+    CallBuiltin(target);
+  }
   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
             (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
                                             : Deoptimizer::kEagerDeoptExitSize);
@@ -2258,16 +2226,18 @@ void MacroAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
 void MacroAssembler::Trap() { int3(); }
 void MacroAssembler::DebugBreak() { int3(); }
 
-// Calls an API function.  Allocates HandleScope, extracts returned value
-// from handle and propagates exceptions.  Clobbers esi, edi and caller-saved
-// registers.  Restores context.  On return removes
-// *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
-// (GCed).
+// Calls an API function. Allocates HandleScope, extracts returned value
+// from handle and propagates exceptions. Clobbers C argument registers
+// and C caller-saved registers. Restores context. On return removes
+//   (*argc_operand + slots_to_drop_on_return) * kSystemPointerSize
+// (GCed, includes the call JS arguments space and the additional space
+// allocated for the fast call).
 void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                               Register function_address,
                               ExternalReference thunk_ref, Register thunk_arg,
-                              int stack_space, Operand* stack_space_operand,
-                              Operand return_value_operand) {
+                              int slots_to_drop_on_return,
+                              MemOperand* argc_operand,
+                              MemOperand return_value_operand) {
   ASM_CODE_COMMENT(masm);
 
   using ER = ExternalReference;
@@ -2348,10 +2318,9 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
 
   __ RecordComment("Leave the API exit frame.");
   __ bind(&leave_exit_frame);
-  Register stack_space_reg = prev_limit_reg;
-  if (stack_space_operand != nullptr) {
-    DCHECK_EQ(stack_space, 0);
-    __ mov(stack_space_reg, *stack_space_operand);
+  Register argc_reg = prev_limit_reg;
+  if (argc_operand != nullptr) {
+    __ mov(argc_reg, *argc_operand);
   }
   __ LeaveExitFrame(scratch);
 
@@ -2376,14 +2345,14 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
   __ AssertJSAny(return_value, scratch,
                  AbortReason::kAPICallReturnedInvalidObject);
 
-  if (stack_space_operand == nullptr) {
-    DCHECK_NE(stack_space, 0);
-    __ ret(stack_space * kSystemPointerSize);
+  if (argc_operand == nullptr) {
+    DCHECK_NE(slots_to_drop_on_return, 0);
+    __ ret(slots_to_drop_on_return * kSystemPointerSize);
   } else {
-    DCHECK_EQ(0, stack_space);
     __ pop(scratch);
-    // {stack_space_operand} was loaded into {stack_space_reg} above.
-    __ add(esp, stack_space_reg);
+    // {argc_operand} was loaded into {argc_reg} above.
+    __ lea(esp, Operand(esp, argc_reg, times_system_pointer_size,
+                        slots_to_drop_on_return * kSystemPointerSize));
     __ jmp(scratch);
   }
 
@@ -2391,9 +2360,11 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
     __ bind(&profiler_or_side_effects_check_enabled);
     // Additional parameter is the address of the actual callback function.
-    MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
-        ER::api_callback_thunk_argument_address(isolate), no_reg);
-    __ mov(thunk_arg_mem_op, thunk_arg);
+    if (thunk_arg.is_valid()) {
+      MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
+          ER::api_callback_thunk_argument_address(isolate), no_reg);
+      __ mov(thunk_arg_mem_op, thunk_arg);
+    }
     __ Move(scratch, Immediate(thunk_ref));
     __ call(scratch);
     __ jmp(&done_api_call);

@@ -23,7 +23,6 @@ class CFunctionInfo;
 namespace internal {
 
 class BytecodeArray;
-class CallHandlerInfo;
 class FixedDoubleArray;
 class FunctionTemplateInfo;
 class HeapNumber;
@@ -68,6 +67,10 @@ inline bool IsAnyStore(AccessMode mode) {
          mode == AccessMode::kDefine;
 }
 
+inline bool IsDefiningStore(AccessMode mode) {
+  return mode == AccessMode::kStoreInLiteral || mode == AccessMode::kDefine;
+}
+
 enum class OddballType : uint8_t {
   kNone,     // Not an Oddball.
   kBoolean,  // True or False.
@@ -103,6 +106,7 @@ enum class RefSerializationKind {
   BACKGROUND_SERIALIZED(JSGlobalObject)                                       \
   BACKGROUND_SERIALIZED(JSGlobalProxy)                                        \
   BACKGROUND_SERIALIZED(JSTypedArray)                                         \
+  BACKGROUND_SERIALIZED(JSPrimitiveWrapper)                                   \
   /* Subtypes of Context */                                                   \
   NEVER_SERIALIZED(NativeContext)                                             \
   /* Subtypes of FixedArray */                                                \
@@ -124,7 +128,6 @@ enum class RefSerializationKind {
   NEVER_SERIALIZED(ArrayBoilerplateDescription)                               \
   BACKGROUND_SERIALIZED(BigInt)                                               \
   NEVER_SERIALIZED(BytecodeArray)                                             \
-  NEVER_SERIALIZED(CallHandlerInfo)                                           \
   NEVER_SERIALIZED(Cell)                                                      \
   NEVER_SERIALIZED(Code)                                                      \
   NEVER_SERIALIZED(Context)                                                   \
@@ -199,6 +202,7 @@ HEAP_BROKER_OBJECT_LIST_BASE(BACKGROUND_SERIALIZED_REF_TRAITS,
 template <>
 struct ref_traits<Object> {
   using ref_type = ObjectRef;
+  using data_type = ObjectData;
   // Note: While a bit awkward, this artificial ref serialization kind value is
   // okay: smis are never-serialized, and we never create raw non-smi
   // ObjectRefs (they would at least be HeapObjectRefs instead).
@@ -206,8 +210,8 @@ struct ref_traits<Object> {
       RefSerializationKind::kNeverSerialized;
 };
 
-// For types used in ReadOnlyRoots, but which don't have a corresponding Ref
-// type, use HeapObjectRef.
+// For types which don't have a corresponding Ref type, use the next best
+// existing Ref.
 template <>
 struct ref_traits<Oddball> : public ref_traits<HeapObject> {};
 template <>
@@ -260,6 +264,40 @@ struct ref_traits<RegisteredSymbolTable> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<WasmNull> : public ref_traits<HeapObject> {};
 #endif  // V8_ENABLE_WEBASSEMBLY
+template <>
+struct ref_traits<Smi> : public ref_traits<Object> {};
+template <>
+struct ref_traits<Boolean> : public ref_traits<HeapObject> {};
+template <>
+struct ref_traits<JSProxy> : public ref_traits<JSReceiver> {};
+template <>
+struct ref_traits<JSWrappedFunction> : public ref_traits<JSFunction> {};
+
+template <class... T>
+struct ref_traits<Union<T...>> {
+  // There's no good way in C++ to find a common base class, so just test a few
+  // common cases.
+  static constexpr bool kAllJSReceiverRef =
+      (std::is_base_of_v<JSReceiverRef, typename ref_traits<T>::ref_type> &&
+       ...);
+  static constexpr bool kAllHeapObjectRef =
+      (std::is_base_of_v<JSReceiverRef, typename ref_traits<T>::ref_type> &&
+       ...);
+
+  using ref_type = std::conditional_t<
+      kAllJSReceiverRef, JSReceiverRef,
+      std::conditional_t<kAllHeapObjectRef, HeapObjectRef, ObjectRef>>;
+  using data_type = std::conditional_t<
+      kAllJSReceiverRef, JSReceiverData,
+      std::conditional_t<kAllHeapObjectRef, HeapObjectData, ObjectData>>;
+
+  static constexpr RefSerializationKind ref_serialization_kind =
+      ((ref_traits<T>::ref_serialization_kind ==
+        RefSerializationKind::kNeverSerialized) &&
+       ...)
+          ? RefSerializationKind::kNeverSerialized
+          : RefSerializationKind::kBackgroundSerialized;
+};
 
 // Wrapper around heap refs which works roughly like a base::Optional, but
 // doesn't use extra storage for a boolean, but instead uses a null data pointer
@@ -440,9 +478,10 @@ class HeapObjectType {
 
   using Flags = base::Flags<Flag>;
 
-  HeapObjectType(InstanceType instance_type, Flags flags,
-                 OddballType oddball_type, HoleType hole_type)
+  HeapObjectType(InstanceType instance_type, ElementsKind elements_kind,
+                 Flags flags, OddballType oddball_type, HoleType hole_type)
       : instance_type_(instance_type),
+        elements_kind_(elements_kind),
         oddball_type_(oddball_type),
         hole_type_(hole_type),
         flags_(flags) {
@@ -457,12 +496,14 @@ class HeapObjectType {
   HoleType hole_type(JSHeapBroker* broker) const { return hole_type_; }
   InstanceType instance_type() const { return instance_type_; }
   Flags flags() const { return flags_; }
+  ElementsKind elements_kind() const { return elements_kind_; }
 
   bool is_callable() const { return flags_ & kCallable; }
   bool is_undetectable() const { return flags_ & kUndetectable; }
 
  private:
   InstanceType const instance_type_;
+  ElementsKind const elements_kind_;
   OddballType const oddball_type_;
   HoleType const hole_type_;
   Flags const flags_;
@@ -786,16 +827,6 @@ class FeedbackVectorRef : public HeapObjectRef {
   FeedbackCellRef GetClosureFeedbackCell(JSHeapBroker* broker, int index) const;
 };
 
-class CallHandlerInfoRef : public HeapObjectRef {
- public:
-  DEFINE_REF_CONSTRUCTOR(CallHandlerInfo, HeapObjectRef)
-
-  Handle<CallHandlerInfo> object() const;
-
-  Address callback(JSHeapBroker* broker) const;
-  ObjectRef data(JSHeapBroker* broker) const;
-};
-
 class AccessorInfoRef : public HeapObjectRef {
  public:
   DEFINE_REF_CONSTRUCTOR(AccessorInfo, HeapObjectRef)
@@ -919,7 +950,11 @@ class FunctionTemplateInfoRef : public HeapObjectRef {
   int16_t allowed_receiver_instance_type_range_start() const;
   int16_t allowed_receiver_instance_type_range_end() const;
 
-  OptionalCallHandlerInfoRef call_code(JSHeapBroker* broker) const;
+  // Function pointer and a data value that should be passed to the callback.
+  // The |callback_data| must be read before the |callback|.
+  Address callback(JSHeapBroker* broker) const;
+  OptionalObjectRef callback_data(JSHeapBroker* broker) const;
+
   ZoneVector<Address> c_functions(JSHeapBroker* broker) const;
   ZoneVector<const CFunctionInfo*> c_signatures(JSHeapBroker* broker) const;
   HolderLookupResult LookupHolderOfExpectedType(JSHeapBroker* broker,
@@ -977,7 +1012,8 @@ class BytecodeArrayRef : public HeapObjectRef {
   int length() const;
 
   int register_count() const;
-  int parameter_count() const;
+  uint16_t parameter_count() const;
+  uint16_t max_arguments() const;
   interpreter::Register incoming_new_target_or_generator_register() const;
 
   Handle<TrustedByteArray> SourcePositionTable(JSHeapBroker* broker) const;
@@ -1036,6 +1072,7 @@ class ScopeInfoRef : public HeapObjectRef {
   Handle<ScopeInfo> object() const;
 
   int ContextLength() const;
+  bool HasContext() const;
   bool HasOuterScopeInfo() const;
   bool HasContextExtensionSlot() const;
   bool ClassScopeHasPrivateBrand() const;
@@ -1144,6 +1181,15 @@ class JSTypedArrayRef : public JSObjectRef {
   HeapObjectRef buffer(JSHeapBroker* broker) const;
 };
 
+class JSPrimitiveWrapperRef : public JSObjectRef {
+ public:
+  DEFINE_REF_CONSTRUCTOR(JSPrimitiveWrapper, JSObjectRef)
+
+  bool IsStringWrapper(JSHeapBroker* broker) const;
+
+  Handle<JSPrimitiveWrapper> object() const;
+};
+
 class SourceTextModuleRef : public HeapObjectRef {
  public:
   DEFINE_REF_CONSTRUCTOR(SourceTextModule, HeapObjectRef)
@@ -1216,8 +1262,7 @@ class InternalizedStringRef : public StringRef {
   static_assert(std::is_trivially_destructible_v<Name##Ref>);     \
   static_assert(std::is_trivially_destructible_v<OptionalName##Ref>);
 
-V(Object)
-HEAP_BROKER_OBJECT_LIST(V)
+V(Object) HEAP_BROKER_OBJECT_LIST(V)
 #undef V
 
 }  // namespace compiler

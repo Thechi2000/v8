@@ -21,8 +21,10 @@
 #include "src/compiler/simplified-operator.h"
 #include "src/compiler/state-values-utils.h"
 #include "src/interpreter/bytecode-array-iterator.h"
-#include "src/interpreter/bytecode-flags.h"
+#include "src/interpreter/bytecode-flags-and-tokens.h"
+#include "src/interpreter/bytecode-register.h"
 #include "src/interpreter/bytecodes.h"
+#include "src/objects/elements-kind.h"
 #include "src/objects/js-generator.h"
 #include "src/objects/literal-objects-inl.h"
 #include "src/objects/scope-info.h"
@@ -329,6 +331,7 @@ class BytecodeGraphBuilder {
   void BuildJumpIfToBooleanFalse();
   void BuildJumpIfNotHole();
   void BuildJumpIfJSReceiver();
+  void BuildJumpIfForInDone();
 
   void BuildSwitchOnSmi(Node* condition);
   void BuildSwitchOnGeneratorState(
@@ -381,8 +384,8 @@ class BytecodeGraphBuilder {
     // The BytecodeArray itself was fetched by using a barrier so all reads
     // from the constant pool are safe.
     return MakeRefAssumeMemoryFence(
-        broker(), broker()->CanonicalPersistentHandle(Handle<T>::cast(
-                      bytecode_iterator().GetConstantForIndexOperand(
+        broker(), broker()->CanonicalPersistentHandle(
+                      Cast<T>(bytecode_iterator().GetConstantForIndexOperand(
                           operand_index, local_isolate_))));
   }
 
@@ -1063,8 +1066,8 @@ BytecodeGraphBuilder::BytecodeGraphBuilder(
               : JSTypeHintLowering::kNoFlags),
       frame_state_function_info_(common()->CreateFrameStateFunctionInfo(
           FrameStateType::kUnoptimizedFunction,
-          bytecode_array().parameter_count(), bytecode_array().register_count(),
-          shared_info.object())),
+          bytecode_array().parameter_count(), bytecode_array().max_arguments(),
+          bytecode_array().register_count(), shared_info.object())),
       source_position_iterator_(std::make_unique<SourcePositionTableIterator>(
           bytecode_array().SourcePositionTable(broker))),
       bytecode_iterator_(bytecode_array().object()),
@@ -2074,6 +2077,11 @@ void BytecodeGraphBuilder::VisitGetKeyedProperty() {
     node = NewNode(op, object, key, feedback_vector_node());
   }
   environment()->BindAccumulator(node, Environment::kAttachFrameState);
+}
+
+void BytecodeGraphBuilder::VisitGetEnumeratedKeyedProperty() {
+  // TODO(v8:14245): Implement this bytecode in Maglev/Turbofan.
+  UNREACHABLE();
 }
 
 void BytecodeGraphBuilder::BuildNamedStore(NamedStoreMode store_mode) {
@@ -3260,8 +3268,22 @@ void BytecodeGraphBuilder::VisitToBooleanLogicalNot() {
 }
 
 void BytecodeGraphBuilder::VisitTypeOf() {
-  Node* node =
-      NewNode(simplified()->TypeOf(), environment()->LookupAccumulator());
+  PrepareEagerCheckpoint();
+  Node* operand = environment()->LookupAccumulator();
+
+  FeedbackSlot slot = bytecode_iterator().GetSlotOperand(0);
+  JSTypeHintLowering::LoweringResult lowering =
+      TryBuildSimplifiedUnaryOp(simplified()->TypeOf(), operand, slot);
+  if (lowering.IsExit()) return;
+
+  Node* node = nullptr;
+  if (lowering.IsSideEffectFree()) {
+    node = lowering.value();
+  } else {
+    DCHECK(!lowering.Changed());
+    node = NewNode(simplified()->TypeOf(), environment()->LookupAccumulator());
+  }
+
   environment()->BindAccumulator(node);
 }
 
@@ -3575,6 +3597,12 @@ void BytecodeGraphBuilder::VisitJumpIfJSReceiverConstant() {
   BuildJumpIfJSReceiver();
 }
 
+void BytecodeGraphBuilder::VisitJumpIfForInDone() { BuildJumpIfForInDone(); }
+
+void BytecodeGraphBuilder::VisitJumpIfForInDoneConstant() {
+  BuildJumpIfForInDone();
+}
+
 void BytecodeGraphBuilder::VisitJumpIfNull() {
   BuildJumpIfEqual(jsgraph()->NullConstant());
 }
@@ -3709,18 +3737,6 @@ void BytecodeGraphBuilder::VisitForInPrepare() {
       bytecode_iterator().GetRegisterOperand(0), node);
 }
 
-void BytecodeGraphBuilder::VisitForInContinue() {
-  PrepareEagerCheckpoint();
-  Node* index =
-      environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(0));
-  Node* cache_length =
-      environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(1));
-  Node* exit_cond = NewNode(simplified()->SpeculativeNumberLessThan(
-                                NumberOperationHint::kSignedSmall),
-                            index, cache_length);
-  environment()->BindAccumulator(exit_cond);
-}
-
 void BytecodeGraphBuilder::VisitForInNext() {
   PrepareEagerCheckpoint();
   Node* receiver =
@@ -3752,12 +3768,12 @@ void BytecodeGraphBuilder::VisitForInNext() {
 
 void BytecodeGraphBuilder::VisitForInStep() {
   PrepareEagerCheckpoint();
-  Node* index =
-      environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(0));
+  interpreter::Register index_reg = bytecode_iterator().GetRegisterOperand(0);
+  Node* index = environment()->LookupRegister(index_reg);
   index = NewNode(simplified()->SpeculativeSafeIntegerAdd(
                       NumberOperationHint::kSignedSmall),
                   index, jsgraph()->OneConstant());
-  environment()->BindAccumulator(index, Environment::kAttachFrameState);
+  environment()->BindRegister(index_reg, index, Environment::kAttachFrameState);
 }
 
 void BytecodeGraphBuilder::VisitGetIterator() {
@@ -4149,6 +4165,20 @@ void BytecodeGraphBuilder::BuildJumpIfNotHole() {
 void BytecodeGraphBuilder::BuildJumpIfJSReceiver() {
   Node* accumulator = environment()->LookupAccumulator();
   Node* condition = NewNode(simplified()->ObjectIsReceiver(), accumulator);
+  BuildJumpIf(condition);
+}
+
+void BytecodeGraphBuilder::BuildJumpIfForInDone() {
+  // There's an eager checkpoint here for the speculative comparison, but it can
+  // never actually deopt because these are known to be Smi.
+  PrepareEagerCheckpoint();
+  Node* index =
+      environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(1));
+  Node* cache_length =
+      environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(2));
+  Node* condition = NewNode(
+      simplified()->SpeculativeNumberEqual(NumberOperationHint::kSignedSmall),
+      index, cache_length);
   BuildJumpIf(condition);
 }
 

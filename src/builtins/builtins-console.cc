@@ -109,7 +109,7 @@ bool Formatter(Isolate* isolate, BuiltinArguments& args, int index) {
 
       // Recurse into string results from type conversions, as they
       // can themselves contain formatting specifiers.
-      states.push({Handle<String>::cast(current), 0});
+      states.push({Cast<String>(current), 0});
     } else if (specifier == 'c' || specifier == 'o' || specifier == 'O' ||
                specifier == '_') {
       // We leave the interpretation of %c (CSS), %o (optimally useful
@@ -149,15 +149,15 @@ void ConsoleCall(
   if (!isolate->console_delegate()) return;
   HandleScope scope(isolate);
   debug::ConsoleCallArguments wrapper(isolate, args);
-  Handle<Object> context_id_obj = JSObject::GetDataProperty(
+  DirectHandle<Object> context_id_obj = JSObject::GetDataProperty(
       isolate, args.target(), isolate->factory()->console_context_id_symbol());
   int context_id =
-      IsSmi(*context_id_obj) ? Smi::cast(*context_id_obj).value() : 0;
+      IsSmi(*context_id_obj) ? Cast<Smi>(*context_id_obj).value() : 0;
   Handle<Object> context_name_obj = JSObject::GetDataProperty(
       isolate, args.target(),
       isolate->factory()->console_context_name_symbol());
   Handle<String> context_name = IsString(*context_name_obj)
-                                    ? Handle<String>::cast(context_name_obj)
+                                    ? Cast<String>(context_name_obj)
                                     : isolate->factory()->anonymous_string();
   (isolate->console_delegate()->*func)(
       wrapper,

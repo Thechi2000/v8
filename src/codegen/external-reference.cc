@@ -62,6 +62,30 @@ constexpr double double_uint32_bias_constant =
     static_cast<double>(kMaxUInt32) + 1;
 
 constexpr struct alignas(16) {
+  uint16_t a;
+  uint16_t b;
+  uint16_t c;
+  uint16_t d;
+  uint16_t e;
+  uint16_t f;
+  uint16_t g;
+  uint16_t h;
+} fp16_absolute_constant = {0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF,
+                            0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF};
+
+constexpr struct alignas(16) {
+  uint16_t a;
+  uint16_t b;
+  uint16_t c;
+  uint16_t d;
+  uint16_t e;
+  uint16_t f;
+  uint16_t g;
+  uint16_t h;
+} fp16_negate_constant = {0x8000, 0x8000, 0x8000, 0x8000,
+                          0x8000, 0x8000, 0x8000, 0x8000};
+
+constexpr struct alignas(16) {
   uint32_t a;
   uint32_t b;
   uint32_t c;
@@ -166,6 +190,21 @@ constexpr struct alignas(16) {
     uint32_t{0x4f00'0000},
 };
 
+constexpr struct alignas(16) {
+  uint32_t a;
+  uint32_t b;
+  uint32_t c;
+  uint32_t d;
+  uint32_t e;
+  uint32_t f;
+  uint32_t g;
+  uint32_t h;
+} wasm_i32x8_int32_overflow_as_float = {
+    uint32_t{0x4f00'0000}, uint32_t{0x4f00'0000}, uint32_t{0x4f00'0000},
+    uint32_t{0x4f00'0000}, uint32_t{0x4f00'0000}, uint32_t{0x4f00'0000},
+    uint32_t{0x4f00'0000}, uint32_t{0x4f00'0000},
+};
+
 // Implementation of ExternalReference
 
 static ExternalReference::Type BuiltinCallTypeForResultSize(int result_size) {
@@ -260,6 +299,10 @@ ExternalReference ExternalReference::trusted_pointer_table_base_address(
 ExternalReference ExternalReference::code_pointer_table_address() {
   // TODO(saelo): maybe rename to code_pointer_table_base_address?
   return ExternalReference(GetProcessWideCodePointerTable()->base_address());
+}
+
+ExternalReference ExternalReference::memory_chunk_metadata_table_address() {
+  return ExternalReference(MemoryChunk::MetadataTableAddress());
 }
 
 #endif  // V8_ENABLE_SANDBOX
@@ -379,14 +422,14 @@ namespace {
 intptr_t DebugBreakAtEntry(Isolate* isolate, Address raw_sfi) {
   DisallowGarbageCollection no_gc;
   Tagged<SharedFunctionInfo> sfi =
-      SharedFunctionInfo::cast(Tagged<Object>(raw_sfi));
+      Cast<SharedFunctionInfo>(Tagged<Object>(raw_sfi));
   return isolate->debug()->BreakAtEntry(sfi) ? 1 : 0;
 }
 
 Address DebugGetCoverageInfo(Isolate* isolate, Address raw_sfi) {
   DisallowGarbageCollection no_gc;
   Tagged<SharedFunctionInfo> sfi =
-      SharedFunctionInfo::cast(Tagged<Object>(raw_sfi));
+      Cast<SharedFunctionInfo>(Tagged<Object>(raw_sfi));
   base::Optional<Tagged<DebugInfo>> debug_info =
       isolate->debug()->TryGetDebugInfo(sfi);
   if (debug_info.has_value() && debug_info.value()->HasCoverageInfo()) {
@@ -406,19 +449,19 @@ FUNCTION_REFERENCE(delete_handle_scope_extensions,
 FUNCTION_REFERENCE(ephemeron_key_write_barrier_function,
                    Heap::EphemeronKeyWriteBarrierFromCode)
 
-ExternalPointerHandle AllocateAndInitializeExternalPointerTableEntry(
+ExternalPointerHandle AllocateAndInitializeYoungExternalPointerTableEntry(
     Isolate* isolate, Address pointer) {
 #ifdef V8_ENABLE_SANDBOX
   return isolate->external_pointer_table().AllocateAndInitializeEntry(
-      isolate->heap()->external_pointer_space(), pointer,
+      isolate->heap()->young_external_pointer_space(), pointer,
       kExternalObjectValueTag);
 #else
   return 0;
 #endif  // V8_ENABLE_SANDBOX
 }
 
-FUNCTION_REFERENCE(allocate_and_initialize_external_pointer_table_entry,
-                   AllocateAndInitializeExternalPointerTableEntry)
+FUNCTION_REFERENCE(allocate_and_initialize_young_external_pointer_table_entry,
+                   AllocateAndInitializeYoungExternalPointerTableEntry)
 
 FUNCTION_REFERENCE(get_date_field_function, JSDate::GetField)
 
@@ -465,6 +508,7 @@ FUNCTION_REFERENCE(compute_output_frames_function,
                    Deoptimizer::ComputeOutputFrames)
 
 #ifdef V8_ENABLE_WEBASSEMBLY
+FUNCTION_REFERENCE(wasm_delete_deoptimizer, Deoptimizer::DeleteForWasm)
 FUNCTION_REFERENCE(wasm_sync_stack_limit, wasm::sync_stack_limit)
 FUNCTION_REFERENCE(wasm_switch_to_the_central_stack,
                    wasm::switch_to_the_central_stack)
@@ -526,8 +570,22 @@ FUNCTION_REFERENCE(wasm_array_copy, wasm::array_copy_wrapper)
 FUNCTION_REFERENCE(wasm_array_fill, wasm::array_fill_wrapper)
 FUNCTION_REFERENCE_WITH_TYPE(wasm_string_to_f64, wasm::flat_string_to_f64,
                              BUILTIN_FP_POINTER_CALL)
+
 int32_t (&futex_emulation_wake)(void*, uint32_t) = FutexEmulation::Wake;
 FUNCTION_REFERENCE(wasm_atomic_notify, futex_emulation_wake)
+
+void WasmSignatureCheckFail(Address raw_internal_function,
+                            uintptr_t expected_hash) {
+  // WasmInternalFunction::signature_hash doesn't exist in non-sandbox builds.
+#if V8_ENABLE_SANDBOX
+  Tagged<WasmInternalFunction> internal_function =
+      Cast<WasmInternalFunction>(Tagged<Object>(raw_internal_function));
+  PrintF("Wasm sandbox violation! Expected signature hash %lx, got %lx\n",
+         expected_hash, internal_function->signature_hash());
+  SBXCHECK_EQ(expected_hash, internal_function->signature_hash());
+#endif
+}
+FUNCTION_REFERENCE(wasm_signature_check_fail, WasmSignatureCheckFail)
 
 #define V(Name) RAW_FUNCTION_REFERENCE(wasm_##Name, wasm::Name)
 WASM_JS_EXTERNAL_REFERENCE_LIST(V)
@@ -671,11 +729,6 @@ ExternalReference::address_of_mock_arraybuffer_allocator_flag() {
   return ExternalReference(&v8_flags.mock_arraybuffer_allocator);
 }
 
-ExternalReference
-ExternalReference::address_of_FLAG_harmony_regexp_unicode_sets() {
-  return ExternalReference(&v8_flags.harmony_regexp_unicode_sets);
-}
-
 // TODO(jgruber): Update the other extrefs pointing at v8_flags. addresses to be
 // called address_of_FLAG_foo (easier grep-ability).
 ExternalReference ExternalReference::address_of_log_or_trace_osr() {
@@ -719,6 +772,14 @@ ExternalReference ExternalReference::address_of_the_hole_nan() {
 ExternalReference ExternalReference::address_of_uint32_bias() {
   return ExternalReference(
       reinterpret_cast<Address>(&double_uint32_bias_constant));
+}
+
+ExternalReference ExternalReference::address_of_fp16_abs_constant() {
+  return ExternalReference(reinterpret_cast<Address>(&fp16_absolute_constant));
+}
+
+ExternalReference ExternalReference::address_of_fp16_neg_constant() {
+  return ExternalReference(reinterpret_cast<Address>(&fp16_negate_constant));
 }
 
 ExternalReference ExternalReference::address_of_float_abs_constant() {
@@ -796,6 +857,12 @@ ExternalReference ExternalReference::address_of_wasm_int32_overflow_as_float() {
       reinterpret_cast<Address>(&wasm_int32_overflow_as_float));
 }
 
+ExternalReference
+ExternalReference::address_of_wasm_i32x8_int32_overflow_as_float() {
+  return ExternalReference(
+      reinterpret_cast<Address>(&wasm_i32x8_int32_overflow_as_float));
+}
+
 ExternalReference ExternalReference::supports_cetss_address() {
   return ExternalReference(
       reinterpret_cast<Address>(&CpuFeatures::supports_cetss_));
@@ -811,9 +878,9 @@ namespace {
 static uintptr_t BaselinePCForBytecodeOffset(Address raw_code_obj,
                                              int bytecode_offset,
                                              Address raw_bytecode_array) {
-  Tagged<Code> code_obj = Code::cast(Tagged<Object>(raw_code_obj));
+  Tagged<Code> code_obj = Cast<Code>(Tagged<Object>(raw_code_obj));
   Tagged<BytecodeArray> bytecode_array =
-      BytecodeArray::cast(Tagged<Object>(raw_bytecode_array));
+      Cast<BytecodeArray>(Tagged<Object>(raw_bytecode_array));
   return code_obj->GetBaselineStartPCForBytecodeOffset(bytecode_offset,
                                                        bytecode_array);
 }
@@ -821,9 +888,9 @@ static uintptr_t BaselinePCForBytecodeOffset(Address raw_code_obj,
 static uintptr_t BaselinePCForNextExecutedBytecode(Address raw_code_obj,
                                                    int bytecode_offset,
                                                    Address raw_bytecode_array) {
-  Tagged<Code> code_obj = Code::cast(Tagged<Object>(raw_code_obj));
+  Tagged<Code> code_obj = Cast<Code>(Tagged<Object>(raw_code_obj));
   Tagged<BytecodeArray> bytecode_array =
-      BytecodeArray::cast(Tagged<Object>(raw_bytecode_array));
+      Cast<BytecodeArray>(Tagged<Object>(raw_bytecode_array));
   return code_obj->GetBaselinePCForNextExecutedBytecode(bytecode_offset,
                                                         bytecode_array);
 }
@@ -940,11 +1007,6 @@ ExternalReference ExternalReference::address_of_regexp_stack_memory_top_address(
 ExternalReference ExternalReference::address_of_regexp_stack_stack_pointer(
     Isolate* isolate) {
   return ExternalReference(isolate->regexp_stack()->stack_pointer_address());
-}
-
-ExternalReference ExternalReference::javascript_execution_assert(
-    Isolate* isolate) {
-  return ExternalReference(isolate->javascript_execution_assert_address());
 }
 
 FUNCTION_REFERENCE_WITH_TYPE(ieee754_acos_function, base::ieee754::acos,
@@ -1102,13 +1164,13 @@ namespace {
 
 void StringWriteToFlatOneByte(Address source, uint8_t* sink, int32_t start,
                               int32_t length) {
-  return String::WriteToFlat<uint8_t>(String::cast(Tagged<Object>(source)),
+  return String::WriteToFlat<uint8_t>(Cast<String>(Tagged<Object>(source)),
                                       sink, start, length);
 }
 
 void StringWriteToFlatTwoByte(Address source, uint16_t* sink, int32_t start,
                               int32_t length) {
-  return String::WriteToFlat<uint16_t>(String::cast(Tagged<Object>(source)),
+  return String::WriteToFlat<uint16_t>(Cast<String>(Tagged<Object>(source)),
                                        sink, start, length);
 }
 
@@ -1119,7 +1181,7 @@ const uint8_t* ExternalOneByteStringGetChars(Address string) {
   // failing the address range check.
   // TODO(chromium:1160961): Consider removing the CHECK when CFI is fixed.
   CHECK(IsExternalOneByteString(Tagged<Object>(string)));
-  return ExternalOneByteString::cast(Tagged<Object>(string))->GetChars();
+  return Cast<ExternalOneByteString>(Tagged<Object>(string))->GetChars();
 }
 const uint16_t* ExternalTwoByteStringGetChars(Address string) {
   // The following CHECK is a workaround to prevent a CFI bug where
@@ -1128,7 +1190,7 @@ const uint16_t* ExternalTwoByteStringGetChars(Address string) {
   // failing the address range check.
   // TODO(chromium:1160961): Consider removing the CHECK when CFI is fixed.
   CHECK(IsExternalTwoByteString(Tagged<Object>(string)));
-  return ExternalTwoByteString::cast(Tagged<Object>(string))->GetChars();
+  return Cast<ExternalTwoByteString>(Tagged<Object>(string))->GetChars();
 }
 
 }  // namespace
@@ -1167,7 +1229,7 @@ Address GetOrCreateHash(Isolate* isolate, Address raw_key) {
 FUNCTION_REFERENCE(get_or_create_hash_raw, GetOrCreateHash)
 
 static Address JSReceiverCreateIdentityHash(Isolate* isolate, Address raw_key) {
-  Tagged<JSReceiver> key = JSReceiver::cast(Tagged<Object>(raw_key));
+  Tagged<JSReceiver> key = Cast<JSReceiver>(Tagged<Object>(raw_key));
   return JSReceiver::CreateIdentityHash(isolate, key).ptr();
 }
 
@@ -1191,11 +1253,11 @@ static size_t NameDictionaryLookupForwardedString(Isolate* isolate,
   DisallowGarbageCollection no_gc;
   HandleScope handle_scope(isolate);
 
-  Handle<String> key(String::cast(Tagged<Object>(raw_key)), isolate);
+  Handle<String> key(Cast<String>(Tagged<Object>(raw_key)), isolate);
   // This function should only be used as the slow path for forwarded strings.
   DCHECK(Name::IsForwardingIndex(key->raw_hash_field()));
 
-  Tagged<Dictionary> dict = Dictionary::cast(Tagged<Object>(raw_dict));
+  Tagged<Dictionary> dict = Cast<Dictionary>(Tagged<Object>(raw_dict));
   ReadOnlyRoots roots(isolate);
   uint32_t hash = key->hash();
   InternalIndex entry = mode == kFindExisting
@@ -1327,8 +1389,8 @@ FUNCTION_REFERENCE(check_object_type, CheckObjectType)
 #ifdef V8_INTL_SUPPORT
 
 static Address ConvertOneByteToLower(Address raw_src, Address raw_dst) {
-  Tagged<String> src = String::cast(Tagged<Object>(raw_src));
-  Tagged<String> dst = String::cast(Tagged<Object>(raw_dst));
+  Tagged<String> src = Cast<String>(Tagged<Object>(raw_src));
+  Tagged<String> dst = Cast<String>(Tagged<Object>(raw_dst));
   return Intl::ConvertOneByteToLower(src, dst).ptr();
 }
 FUNCTION_REFERENCE(intl_convert_one_byte_to_lower, ConvertOneByteToLower)
@@ -1399,7 +1461,7 @@ ExternalReference ExternalReference::runtime_function_table_address(
 }
 
 static Address InvalidatePrototypeChainsWrapper(Address raw_map) {
-  Tagged<Map> map = Map::cast(Tagged<Object>(raw_map));
+  Tagged<Map> map = Cast<Map>(Tagged<Object>(raw_map));
   return JSObject::InvalidatePrototypeChains(map).ptr();
 }
 
@@ -1699,7 +1761,7 @@ IF_TSAN(FUNCTION_REFERENCE, tsan_relaxed_load_function_64_bits,
 static int EnterContextWrapper(HandleScopeImplementer* hsi,
                                Address raw_context) {
   Tagged<NativeContext> context =
-      NativeContext::cast(Tagged<Object>(raw_context));
+      Cast<NativeContext>(Tagged<Object>(raw_context));
   hsi->EnterContext(context);
   return 0;
 }

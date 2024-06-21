@@ -37,6 +37,16 @@ enum DynamicTiering : bool {
   kNoDynamicTiering = false
 };
 
+// Further information about a location for a deopt: A call_ref can either be
+// just an inline call (that didn't cause a deopt) with a deopt happening within
+// the inlinee or it could be the deopt point itself. This changes whether the
+// relevant stackstate is the one before the call or after the call.
+enum class LocationKindForDeopt : uint8_t {
+  kNone,
+  kEagerDeopt,   // The location is the point of an eager deopt.
+  kInlinedCall,  // The loation is an inlined call, not a deopt.
+};
+
 // The Arm architecture does not specify the results in memory of
 // partially-in-bound writes, which does not align with the wasm spec. This
 // affects when trap handlers can be used for OOB detection; however, Mac
@@ -62,7 +72,10 @@ struct CompilationEnv {
 
   const std::atomic<Address>* fast_api_targets;
 
-  const v8::CFunctionInfo** fast_api_sigs;
+  std::atomic<bool>* fast_api_return_is_bool;
+
+  uint32_t deopt_info_bytecode_offset = std::numeric_limits<uint32_t>::max();
+  LocationKindForDeopt deopt_location_kind = LocationKindForDeopt::kNone;
 
   // Create a {CompilationEnv} object for compilation. The caller has to ensure
   // that the {WasmModule} pointer stays valid while the {CompilationEnv} is
@@ -76,12 +89,12 @@ struct CompilationEnv {
                            WasmFeatures enabled_features,
                            DynamicTiering dynamic_tiering,
                            std::atomic<Address>* fast_api_targets,
-                           const CFunctionInfo** fast_api_sigs)
+                           std::atomic<bool>* fast_api_return_is_bool)
       : module(module),
         enabled_features(enabled_features),
         dynamic_tiering(dynamic_tiering),
         fast_api_targets(fast_api_targets),
-        fast_api_sigs(fast_api_sigs) {}
+        fast_api_return_is_bool(fast_api_return_is_bool) {}
 };
 
 // The wire bytes are either owned by the StreamingDecoder, or (after streaming)
@@ -172,6 +185,9 @@ class V8_EXPORT_PRIVATE CompilationState {
   CompilationState() = delete;
 
   size_t EstimateCurrentMemoryConsumption() const;
+
+  std::vector<WasmCode*> PublishCode(
+      base::Vector<std::unique_ptr<WasmCode>> unpublished_code);
 
  private:
   // NativeModule is allowed to call the static {New} method.

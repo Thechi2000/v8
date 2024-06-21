@@ -130,7 +130,7 @@ namespace {
 void SetInstructionBitsInCodeSpace(Instruction* instr, Instr value,
                                    Heap* heap) {
   CodePageMemoryModificationScopeForDebugging scope(
-      BasicMemoryChunk::FromAddress(reinterpret_cast<Address>(instr)));
+      MemoryChunkMetadata::FromAddress(reinterpret_cast<Address>(instr)));
   instr->SetInstructionBits(value);
 }
 }  // namespace
@@ -396,7 +396,7 @@ void PPCDebugger::Debug() {
           Heap* current_heap = sim_->isolate_->heap();
           if (!skip_obj_print) {
             if (IsSmi(obj) ||
-                IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
+                IsValidHeapObject(current_heap, Cast<HeapObject>(obj))) {
               PrintF(" (");
               if (IsSmi(obj)) {
                 PrintF("smi %d", Smi::ToInt(obj));
@@ -2243,7 +2243,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       break;
     }
     case STFSUX:
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case STFSX: {
       int frs = instr->RSValue();
       int ra = instr->RAValue();
@@ -2274,7 +2274,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
       break;
     }
     case STFDUX:
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case STFDX: {
       int frs = instr->RSValue();
       int ra = instr->RAValue();
@@ -3465,7 +3465,7 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
     }
 
     case STFSU:
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case STFS: {
       int frs = instr->RSValue();
       int ra = instr->RAValue();

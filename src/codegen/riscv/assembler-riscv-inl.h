@@ -162,19 +162,19 @@ void Assembler::deserialization_set_target_internal_reference_at(
 Tagged<HeapObject> RelocInfo::target_object(PtrComprCageBase cage_base) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCompressedEmbeddedObject(rmode_)) {
-    return HeapObject::cast(
+    return Cast<HeapObject>(
         Tagged<Object>(V8HeapCompressionScheme::DecompressTagged(
             cage_base,
             Assembler::target_compressed_address_at(pc_, constant_pool_))));
   } else {
-    return HeapObject::cast(
+    return Cast<HeapObject>(
         Tagged<Object>(Assembler::target_address_at(pc_, constant_pool_)));
   }
 }
 
 Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   if (IsCodeTarget(rmode_)) {
-    return Handle<HeapObject>::cast(
+    return Cast<HeapObject>(
         origin->code_target_object_handle_at(pc_, constant_pool_));
   } else if (IsCompressedEmbeddedObject(rmode_)) {
     return origin->compressed_embedded_object_handle_at(pc_, constant_pool_);
@@ -191,6 +191,12 @@ void WritableRelocInfo::set_target_object(Tagged<HeapObject> target,
                                           ICacheFlushMode icache_flush_mode) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCompressedEmbeddedObject(rmode_)) {
+    DCHECK(COMPRESS_POINTERS_BOOL);
+    // We must not compress pointers to objects outside of the main pointer
+    // compression cage as we wouldn't be able to decompress them with the
+    // correct cage base.
+    DCHECK_IMPLIES(V8_ENABLE_SANDBOX_BOOL, !IsTrustedSpaceObject(target));
+    DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(target));
     Assembler::set_target_compressed_address_at(
         pc_, constant_pool_,
         V8HeapCompressionScheme::CompressObject(target.ptr()),
@@ -238,7 +244,7 @@ Handle<Code> Assembler::relative_code_target_object_handle_at(
   DCHECK(IsAuipc(instr1));
   DCHECK(IsJalr(instr2));
   int32_t code_target_index = BrachlongOffset(instr1, instr2);
-  return Handle<Code>::cast(GetEmbeddedObject(code_target_index));
+  return Cast<Code>(GetEmbeddedObject(code_target_index));
 }
 
 Builtin Assembler::target_builtin_at(Address pc) {

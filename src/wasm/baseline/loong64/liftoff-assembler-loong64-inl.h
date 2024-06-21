@@ -7,7 +7,7 @@
 
 #include "src/codegen/loong64/assembler-loong64-inl.h"
 #include "src/codegen/machine-type.h"
-#include "src/heap/memory-chunk.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
 #include "src/wasm/object-access.h"
@@ -44,13 +44,10 @@ namespace liftoff {
 //  -----+--------------------+  <-- stack ptr (sp)
 //
 
-constexpr int kInstanceDataOffset = 2 * kSystemPointerSize;
-constexpr int kFeedbackVectorOffset = 3 * kSystemPointerSize;
-
 inline MemOperand GetStackSlot(int offset) { return MemOperand(fp, -offset); }
 
 inline MemOperand GetInstanceDataOperand() {
-  return GetStackSlot(kInstanceDataOffset);
+  return GetStackSlot(WasmLiftoffFrameConstants::kInstanceDataOffset);
 }
 
 template <typename T>
@@ -332,7 +329,7 @@ void LiftoffAssembler::AbortCompilation() {}
 
 // static
 constexpr int LiftoffAssembler::StaticStackFrameSize() {
-  return liftoff::kFeedbackVectorOffset;
+  return WasmLiftoffFrameConstants::kFeedbackVectorOffset;
 }
 
 int LiftoffAssembler::SlotSizeForType(ValueKind kind) {
@@ -397,11 +394,10 @@ void LiftoffAssembler::LoadInstanceDataFromFrame(Register dst) {
   Ld_d(dst, liftoff::GetInstanceDataOperand());
 }
 
-void LiftoffAssembler::LoadTrustedDataFromInstanceObject(
-    Register dst, Register instance_object) {
-  MemOperand src{instance_object, wasm::ObjectAccess::ToTagged(
-                                      WasmInstanceObject::kTrustedDataOffset)};
-  LoadTrustedPointerField(dst, src, kWasmTrustedInstanceDataIndirectPointerTag);
+void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
+                                          int offset, IndirectPointerTag tag) {
+  MemOperand src{src_addr, offset};
+  LoadTrustedPointerField(dst, src, tag);
 }
 
 void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
@@ -426,22 +422,6 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      Register instance,
                                                      int32_t offset) {
   LoadTaggedField(dst, MemOperand(instance, offset));
-}
-
-void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
-                                           int offset, ExternalPointerTag tag,
-                                           Register /* scratch */) {
-  LoadExternalPointerField(dst, MemOperand(src_addr, offset), tag,
-                           kRootRegister);
-}
-
-void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
-                                           int offset, Register index,
-                                           ExternalPointerTag tag,
-                                           Register /* scratch */) {
-  MemOperand src_op = liftoff::GetMemOp(this, src_addr, index, offset, false,
-                                        V8_ENABLE_SANDBOX_BOOL ? 2 : 3);
-  LoadExternalPointerField(dst, src_op, tag, kRootRegister);
 }
 
 void LiftoffAssembler::SpillInstanceData(Register instance) {
@@ -488,7 +468,8 @@ void LiftoffAssembler::LoadCodeEntrypointViaCodePointer(Register dst,
                                                         Register src_addr,
                                                         int32_t offset_imm) {
   MemOperand src_op = liftoff::GetMemOp(this, src_addr, no_reg, offset_imm);
-  MacroAssembler::LoadCodeEntrypointViaCodePointer(dst, src_op);
+  MacroAssembler::LoadCodeEntrypointViaCodePointer(dst, src_op,
+                                                   kWasmEntrypointTag);
 }
 #endif
 
@@ -1400,6 +1381,12 @@ void LiftoffAssembler::emit_u32_to_uintptr(Register dst, Register src) {
   bstrpick_d(dst, src, 31, 0);
 }
 
+void LiftoffAssembler::clear_i32_upper_half(Register dst) {
+  // Don't need to clear the upper halves of i32 values for sandbox on
+  // LoongArch64, because we'll explicitly zero-extend their lower halves before
+  // using them for memory accesses anyway.
+}
+
 void LiftoffAssembler::emit_f32_neg(DoubleRegister dst, DoubleRegister src) {
   MacroAssembler::Neg_s(dst, src);
 }
@@ -1807,6 +1794,12 @@ void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
                                            Register lhs, int32_t imm,
                                            const FreezeCacheState& frozen) {
   MacroAssembler::CompareTaggedAndBranch(label, cond, lhs, Operand(imm));
+}
+
+void LiftoffAssembler::emit_ptrsize_cond_jumpi(Condition cond, Label* label,
+                                               Register lhs, int32_t imm,
+                                               const FreezeCacheState& frozen) {
+  MacroAssembler::Branch(label, cond, lhs, Operand(imm));
 }
 
 void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
@@ -3135,8 +3128,8 @@ void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
   bailout(kRelaxedSimd, "emit_f64x2_qfms");
 }
 
-void LiftoffAssembler::set_trap_on_oob_mem64(Register index, int oob_shift,
-                                             MemOperand oob_offset) {
+void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t oob_size,
+                                             uint64_t oob_index) {
   UNREACHABLE();
 }
 

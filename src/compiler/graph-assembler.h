@@ -340,7 +340,7 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   Node* LoadFramePointer();
 #if V8_ENABLE_WEBASSEMBLY
   Node* LoadStackPointer();
-  Node* SetStackPointer(Node* sp, wasm::FPRelativeScope fp_scope);
+  Node* SetStackPointer(Node* sp);
 #endif
 
   Node* LoadHeapNumberValue(Node* heap_number);
@@ -402,6 +402,8 @@ class V8_EXPORT_PRIVATE GraphAssembler {
   Node* Checkpoint(FrameState frame_state);
 
   TNode<RawPtrT> StackSlot(int size, int alignment, bool is_tagged = false);
+
+  Node* AdaptLocalArgument(Node* argument);
 
   Node* Store(StoreRepresentation rep, Node* object, Node* offset, Node* value);
   Node* Store(StoreRepresentation rep, Node* object, int offset, Node* value);

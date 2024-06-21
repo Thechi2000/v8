@@ -33,13 +33,13 @@ WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
   }
 
   if (result.succeeded() && counters) {
+    // TODO(mliedtke): Add counter for deopt data size.
     counters->wasm_generated_code_size()->Increment(
         result.code_desc.instr_size);
     counters->wasm_reloc_size()->Increment(result.code_desc.reloc_size);
   }
 
   result.func_index = func_index_;
-  result.requested_tier = tier_;
 
   return result;
 }
@@ -115,7 +115,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
     case ExecutionTier::kNone:
       UNREACHABLE();
 
-    case ExecutionTier::kLiftoff:
+    case ExecutionTier::kLiftoff: {
       // The --wasm-tier-mask-for-testing flag can force functions to be
       // compiled with TurboFan, and the --wasm-debug-mask-for-testing can force
       // them to be compiled for debugging, see documentation.
@@ -149,9 +149,9 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
       // If Liftoff failed, fall back to TurboFan.
       // TODO(wasm): We could actually stop or remove the tiering unit for this
       // function to avoid compiling it twice with TurboFan.
-      V8_FALLTHROUGH;
-
-    case ExecutionTier::kTurbofan:
+      [[fallthrough]];
+    }
+    case ExecutionTier::kTurbofan: {
       compiler::WasmCompilationData data(func_body);
       data.func_index = func_index_;
       data.wire_bytes_storage = wire_bytes_storage;
@@ -171,6 +171,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
                                                         detected);
       result.for_debugging = for_debugging_;
       break;
+    }
   }
 
   DCHECK(result.succeeded());
@@ -210,13 +211,25 @@ void WasmCompilationUnit::CompileWasmFunction(Counters* counters,
 
 JSToWasmWrapperCompilationUnit::JSToWasmWrapperCompilationUnit(
     Isolate* isolate, const FunctionSig* sig, uint32_t canonical_sig_index,
-    const WasmModule* module, bool is_import, WasmFeatures enabled_features)
+    const WasmModule* module, WasmFeatures enabled_features)
     : isolate_(isolate),
-      is_import_(is_import),
       sig_(sig),
       canonical_sig_index_(canonical_sig_index),
-      job_(compiler::NewJSToWasmCompilationJob(isolate, sig, module, is_import,
-                                               enabled_features)) {}
+      job_(compiler::NewJSToWasmCompilationJob(isolate, sig, module,
+                                               enabled_features)) {
+  OptimizedCompilationInfo* info =
+      v8_flags.turboshaft_wasm_wrappers
+          ? static_cast<compiler::turboshaft::TurboshaftCompilationJob*>(
+                job_.get())
+                ->compilation_info()
+          : static_cast<TurbofanCompilationJob*>(job_.get())
+                ->compilation_info();
+  if (info->trace_turbo_graph()) {
+    // Make sure that code tracer is initialized on the main thread if tracing
+    // is enabled.
+    isolate->GetCodeTracer();
+  }
+}
 
 JSToWasmWrapperCompilationUnit::~JSToWasmWrapperCompilationUnit() = default;
 
@@ -242,7 +255,7 @@ Handle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
     Handle<String> name = isolate_->factory()->NewStringFromAsciiChecked(
         info->GetDebugName().get());
     PROFILE(isolate_, CodeCreateEvent(LogEventListener::CodeTag::kStub,
-                                      Handle<AbstractCode>::cast(code), name));
+                                      Cast<AbstractCode>(code), name));
   }
   return code;
 }
@@ -250,11 +263,11 @@ Handle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
 // static
 Handle<Code> JSToWasmWrapperCompilationUnit::CompileJSToWasmWrapper(
     Isolate* isolate, const FunctionSig* sig, uint32_t canonical_sig_index,
-    const WasmModule* module, bool is_import) {
+    const WasmModule* module) {
   // Run the compilation unit synchronously.
   WasmFeatures enabled_features = WasmFeatures::FromIsolate(isolate);
   JSToWasmWrapperCompilationUnit unit(isolate, sig, canonical_sig_index, module,
-                                      is_import, enabled_features);
+                                      enabled_features);
   unit.Execute();
   return unit.Finalize();
 }

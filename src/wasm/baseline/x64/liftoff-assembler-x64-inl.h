@@ -5,14 +5,13 @@
 #ifndef V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_INL_H_
 #define V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_INL_H_
 
-#include "src/base/v8-fallthrough.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/cpu-features.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/x64/assembler-x64.h"
 #include "src/codegen/x64/register-x64.h"
 #include "src/flags/flags.h"
-#include "src/heap/memory-chunk.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
 #include "src/wasm/baseline/parallel-move.h"
@@ -42,17 +41,12 @@ static_assert((kLiftoffAssemblerFpCacheRegs &
                   .is_empty(),
               "scratch registers must not be used as cache registers");
 
-// rbp-8 holds the stack marker.
-// rbp-16 is the instance parameter.
-constexpr int kInstanceOffset = 16;
-// rbp-24 is the feedback vector.
-constexpr int kFeedbackVectorOffset = 24;
-
 inline constexpr Operand GetStackSlot(int offset) {
   return Operand(rbp, -offset);
 }
 
-constexpr Operand kInstanceDataOperand = GetStackSlot(kInstanceOffset);
+constexpr Operand kInstanceDataOperand =
+    GetStackSlot(WasmLiftoffFrameConstants::kInstanceDataOffset);
 
 constexpr Operand kOSRTargetSlot = GetStackSlot(kOSRTargetOffset);
 
@@ -155,6 +149,7 @@ inline void push(LiftoffAssembler* assm, LiftoffRegister reg, ValueKind kind,
     case kI64:
     case kRef:
     case kRefNull:
+    case kRtt:
       assm->AllocateStackSpace(padding);
       assm->pushq(reg.gp());
       break;
@@ -366,11 +361,9 @@ void LiftoffAssembler::LoadInstanceDataFromFrame(Register dst) {
   movq(dst, liftoff::kInstanceDataOperand);
 }
 
-void LiftoffAssembler::LoadTrustedDataFromInstanceObject(
-    Register dst, Register instance_object) {
-  Operand src{instance_object, wasm::ObjectAccess::ToTagged(
-                                   WasmInstanceObject::kTrustedDataOffset)};
-  LoadTrustedPointerField(dst, src, kWasmTrustedInstanceDataIndirectPointerTag,
+void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
+                                          int offset, IndirectPointerTag tag) {
+  LoadTrustedPointerField(dst, Operand{src_addr, offset}, tag,
                           kScratchRegister);
 }
 
@@ -398,23 +391,6 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      int offset) {
   DCHECK_LE(0, offset);
   LoadTaggedField(dst, Operand(instance, offset));
-}
-
-void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
-                                           int offset, ExternalPointerTag tag,
-                                           Register scratch) {
-  LoadExternalPointerField(dst, Operand(src_addr, offset), tag, scratch,
-                           IsolateRootLocation::kInRootRegister);
-}
-
-void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
-                                           int offset, Register index,
-                                           ExternalPointerTag tag,
-                                           Register scratch) {
-  MemOperand src_op = liftoff::GetMemOp(this, src_addr, index, offset,
-                                        times_external_pointer_size);
-  LoadExternalPointerField(dst, src_op, tag, scratch,
-                           IsolateRootLocation::kInRootRegister);
 }
 
 void LiftoffAssembler::SpillInstanceData(Register instance) {
@@ -1586,6 +1562,8 @@ void LiftoffAssembler::emit_u32_to_uintptr(Register dst, Register src) {
   if (dst != src) movl(dst, src);
 }
 
+void LiftoffAssembler::clear_i32_upper_half(Register dst) { movl(dst, dst); }
+
 void LiftoffAssembler::emit_f32_add(DoubleRegister dst, DoubleRegister lhs,
                                     DoubleRegister rhs) {
   if (CpuFeatures::IsSupported(AVX)) {
@@ -2280,6 +2258,13 @@ void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
                                            Register lhs, int imm,
                                            const FreezeCacheState& frozen) {
   cmpl(lhs, Immediate(imm));
+  j(cond, label);
+}
+
+void LiftoffAssembler::emit_ptrsize_cond_jumpi(Condition cond, Label* label,
+                                               Register lhs, int32_t imm,
+                                               const FreezeCacheState& frozen) {
+  cmpq(lhs, Immediate(imm));
   j(cond, label);
 }
 
@@ -3365,13 +3350,18 @@ void LiftoffAssembler::emit_i32x4_dot_i8x16_i7x16_add_s(LiftoffRegister dst,
                                                         LiftoffRegister lhs,
                                                         LiftoffRegister rhs,
                                                         LiftoffRegister acc) {
-  static constexpr RegClass tmp_rc = reg_class_for(kS128);
-  LiftoffRegister tmp1 =
-      GetUnusedRegister(tmp_rc, LiftoffRegList{dst, lhs, rhs, acc});
-  LiftoffRegister tmp2 =
-      GetUnusedRegister(tmp_rc, LiftoffRegList{dst, lhs, rhs, acc, tmp1});
-  I32x4DotI8x16I7x16AddS(dst.fp(), lhs.fp(), rhs.fp(), acc.fp(), tmp1.fp(),
-                         tmp2.fp());
+  if (CpuFeatures::IsSupported(AVX_VNNI)) {
+    I32x4DotI8x16I7x16AddS(dst.fp(), lhs.fp(), rhs.fp(), acc.fp(),
+                           kScratchDoubleReg, kScratchDoubleReg);
+  } else {
+    static constexpr RegClass tmp_rc = reg_class_for(kS128);
+    LiftoffRegister tmp1 =
+        GetUnusedRegister(tmp_rc, LiftoffRegList{dst, lhs, rhs, acc});
+    LiftoffRegister tmp2 =
+        GetUnusedRegister(tmp_rc, LiftoffRegList{dst, lhs, rhs, acc, tmp1});
+    I32x4DotI8x16I7x16AddS(dst.fp(), lhs.fp(), rhs.fp(), acc.fp(), tmp1.fp(),
+                           tmp2.fp());
+  }
 }
 
 void LiftoffAssembler::emit_i32x4_neg(LiftoffRegister dst,
@@ -4213,11 +4203,14 @@ void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
   F64x2Qfms(dst.fp(), src1.fp(), src2.fp(), src3.fp(), kScratchDoubleReg);
 }
 
-void LiftoffAssembler::set_trap_on_oob_mem64(Register index, int oob_shift,
-                                             MemOperand oob_offset) {
-  movq(kScratchRegister, index);
-  shrq(kScratchRegister, Immediate(oob_shift));
-  cmovq(not_equal, index, oob_offset);
+void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t oob_size,
+                                             uint64_t oob_index) {
+  Label done;
+  movq(kScratchRegister, Immediate64(oob_size));
+  cmpq(index, kScratchRegister);
+  j(below, &done);
+  movq(index, Immediate64(oob_index));
+  bind(&done);
 }
 
 void LiftoffAssembler::StackCheck(Label* ool_code) {

@@ -474,9 +474,9 @@
   'runtime/console-timestamp': [SKIP],
   'runtime/context-destroyed-on-context-collected': [SKIP],
   'runtime/create-context': [SKIP],
+  'runtime/custom-error-stack': [SKIP],
   'runtime/custom-preview': [SKIP],
   'runtime/enable-async-stack': [SKIP],
-  'runtime/error-preview': [SKIP],
   'runtime/es6-module': [SKIP],
   'runtime/evaluate-async': [SKIP],
   'runtime/evaluate-async-with-wrap-error': [SKIP],
@@ -567,5 +567,11 @@
   # Too slow tests.
   'runtime/console-messages-limits': [SKIP],
 }],  # 'clang_coverage and mode == debug'
+
+##############################################################################
+['((arch != x64 and arch != arm64 and arch != ia32 and arch != arm) or (simulator_run and conservative_stack_scanning))', {
+  # Stack switching is only supported on x64/arm64/ia32/arm.
+  'debugger/wasm-jspi-async-stack': [SKIP],
+}],  # (arch != x64 and arch != arm64 and arch != ia32 and arch != arm)
 
 ]

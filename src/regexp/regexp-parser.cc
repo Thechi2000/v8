@@ -1097,7 +1097,7 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
               Advance(2);
               break;
             }
-            V8_FALLTHROUGH;
+            [[fallthrough]];
           }
           case '0': {
             Advance();
@@ -1195,7 +1195,7 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
               break;
             }
           }
-            V8_FALLTHROUGH;
+            [[fallthrough]];
           // AtomEscape ::
           //   CharacterEscape
           default: {
@@ -1216,14 +1216,14 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
         int dummy;
         bool parsed = ParseIntervalQuantifier(&dummy, &dummy CHECK_FAILED);
         if (parsed) return ReportError(RegExpError::kNothingToRepeat);
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       }
       case '}':
       case ']':
         if (IsUnicodeMode()) {
           return ReportError(RegExpError::kLoneQuantifierBrackets);
         }
-        V8_FALLTHROUGH;
+        [[fallthrough]];
       default:
         builder->AddUnicodeCharacter(current());
         Advance();
@@ -1337,19 +1337,31 @@ RegExpParserState* RegExpParserImpl<CharT>::ParseOpenParenthesis(
           break;
         case '=':
           Advance(2);
-          parsing_modifiers = false;
+          if (parsing_modifiers) {
+            DCHECK(v8_flags.js_regexp_modifiers);
+            ReportError(RegExpError::kInvalidGroup);
+            return nullptr;
+          }
           lookaround_type = RegExpLookaround::LOOKAHEAD;
           subexpr_type = POSITIVE_LOOKAROUND;
           break;
         case '!':
           Advance(2);
-          parsing_modifiers = false;
+          if (parsing_modifiers) {
+            DCHECK(v8_flags.js_regexp_modifiers);
+            ReportError(RegExpError::kInvalidGroup);
+            return nullptr;
+          }
           lookaround_type = RegExpLookaround::LOOKAHEAD;
           subexpr_type = NEGATIVE_LOOKAROUND;
           break;
         case '<':
           Advance();
-          parsing_modifiers = false;
+          if (parsing_modifiers) {
+            DCHECK(v8_flags.js_regexp_modifiers);
+            ReportError(RegExpError::kInvalidGroup);
+            return nullptr;
+          }
           if (Next() == '=') {
             Advance(2);
             lookaround_type = RegExpLookaround::LOOKBEHIND;
@@ -2356,7 +2368,7 @@ base::uc32 RegExpParserImpl<CharT>::ParseCharacterEscape(
         Advance();
         return 0;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case '1':
     case '2':
     case '3':
@@ -3227,7 +3239,7 @@ template class RegExpParserImpl<base::uc16>;
 
 // static
 bool RegExpParser::ParseRegExpFromHeapString(Isolate* isolate, Zone* zone,
-                                             Handle<String> input,
+                                             DirectHandle<String> input,
                                              RegExpFlags flags,
                                              RegExpCompileData* result) {
   DisallowGarbageCollection no_gc;

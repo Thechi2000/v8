@@ -42,6 +42,9 @@ class CustomArguments : public CustomArgumentsBase {
   template <typename V>
   Handle<V> GetReturnValue(Isolate* isolate) const;
 
+  template <typename V>
+  Handle<V> GetReturnValueNoHoleCheck(Isolate* isolate) const;
+
   inline Isolate* isolate() const {
     return reinterpret_cast<Isolate*>((*slot_at(T::kIsolateIndex)).ptr());
   }
@@ -75,7 +78,7 @@ class PropertyCallbackArguments final
   static constexpr int kArgsLength = T::kArgsLength;
   static constexpr int kThisIndex = T::kThisIndex;
   static constexpr int kDataIndex = T::kDataIndex;
-  static constexpr int kUnusedIndex = T::kUnusedIndex;
+  static constexpr int kHolderV2Index = T::kHolderV2Index;
   static constexpr int kHolderIndex = T::kHolderIndex;
   static constexpr int kIsolateIndex = T::kIsolateIndex;
   static constexpr int kShouldThrowOnErrorIndex = T::kShouldThrowOnErrorIndex;
@@ -93,52 +96,58 @@ class PropertyCallbackArguments final
 
   // -------------------------------------------------------------------------
   // Accessor Callbacks
-  // Also used for AccessorSetterCallback.
-  inline Handle<Object> CallAccessorSetter(Handle<AccessorInfo> info,
-                                           Handle<Name> name,
-                                           Handle<Object> value);
-  // Also used for AccessorGetterCallback, AccessorNameGetterCallback.
-  inline Handle<Object> CallAccessorGetter(Handle<AccessorInfo> info,
-                                           Handle<Name> name);
+
+  // Returns the result of [[Get]] operation or throws an exception.
+  // In case of exception empty handle is returned.
+  // TODO(ishell, 328490288): stop returning empty handles.
+  inline Handle<JSAny> CallAccessorGetter(DirectHandle<AccessorInfo> info,
+                                          Handle<Name> name);
+  // Returns the result of [[Set]] operation or throws an exception.
+  V8_WARN_UNUSED_RESULT
+  inline bool CallAccessorSetter(DirectHandle<AccessorInfo> info,
+                                 Handle<Name> name, Handle<Object> value);
 
   // -------------------------------------------------------------------------
   // Named Interceptor Callbacks
   inline Handle<Object> CallNamedQuery(Handle<InterceptorInfo> interceptor,
                                        Handle<Name> name);
-  inline Handle<Object> CallNamedGetter(Handle<InterceptorInfo> interceptor,
-                                        Handle<Name> name);
-  inline Handle<Object> CallNamedSetter(Handle<InterceptorInfo> interceptor,
-                                        Handle<Name> name,
-                                        Handle<Object> value);
-  inline Handle<Object> CallNamedDefiner(Handle<InterceptorInfo> interceptor,
-                                         Handle<Name> name,
-                                         const v8::PropertyDescriptor& desc);
-  inline Handle<Object> CallNamedDeleter(Handle<InterceptorInfo> interceptor,
-                                         Handle<Name> name);
-  inline Handle<Object> CallNamedDescriptor(Handle<InterceptorInfo> interceptor,
-                                            Handle<Name> name);
-  inline Handle<JSObject> CallNamedEnumerator(
+  inline Handle<JSAny> CallNamedGetter(Handle<InterceptorInfo> interceptor,
+                                       Handle<Name> name);
+  inline Handle<Object> CallNamedSetter(
+      DirectHandle<InterceptorInfo> interceptor, Handle<Name> name,
+      Handle<Object> value);
+  inline Handle<Object> CallNamedDefiner(
+      DirectHandle<InterceptorInfo> interceptor, Handle<Name> name,
+      const v8::PropertyDescriptor& desc);
+  inline Handle<Object> CallNamedDeleter(
+      DirectHandle<InterceptorInfo> interceptor, Handle<Name> name);
+  inline Handle<JSAny> CallNamedDescriptor(Handle<InterceptorInfo> interceptor,
+                                           Handle<Name> name);
+  // Returns JSArray-like object with property names or undefined.
+  inline Handle<JSObjectOrUndefined> CallNamedEnumerator(
       Handle<InterceptorInfo> interceptor);
 
   // -------------------------------------------------------------------------
   // Indexed Interceptor Callbacks
   inline Handle<Object> CallIndexedQuery(Handle<InterceptorInfo> interceptor,
                                          uint32_t index);
-  inline Handle<Object> CallIndexedGetter(Handle<InterceptorInfo> interceptor,
-                                          uint32_t index);
-  inline Handle<Object> CallIndexedSetter(Handle<InterceptorInfo> interceptor,
-                                          uint32_t index, Handle<Object> value);
-  inline Handle<Object> CallIndexedDefiner(Handle<InterceptorInfo> interceptor,
-                                           uint32_t index,
-                                           const v8::PropertyDescriptor& desc);
+  inline Handle<JSAny> CallIndexedGetter(Handle<InterceptorInfo> interceptor,
+                                         uint32_t index);
+  inline Handle<Object> CallIndexedSetter(
+      DirectHandle<InterceptorInfo> interceptor, uint32_t index,
+      Handle<Object> value);
+  inline Handle<Object> CallIndexedDefiner(
+      DirectHandle<InterceptorInfo> interceptor, uint32_t index,
+      const v8::PropertyDescriptor& desc);
   inline Handle<Object> CallIndexedDeleter(Handle<InterceptorInfo> interceptor,
                                            uint32_t index);
-  inline Handle<Object> CallIndexedDescriptor(
+  inline Handle<JSAny> CallIndexedDescriptor(
       Handle<InterceptorInfo> interceptor, uint32_t index);
-  inline Handle<JSObject> CallIndexedEnumerator(
+  // Returns JSArray-like object with property names or undefined.
+  inline Handle<JSObjectOrUndefined> CallIndexedEnumerator(
       Handle<InterceptorInfo> interceptor);
 
-  // Accept potential JavaScript side effects that might occurr during life
+  // Accept potential JavaScript side effects that might occur during life
   // time of this object.
   inline void AcceptSideEffects() {
 #ifdef DEBUG
@@ -147,15 +156,8 @@ class PropertyCallbackArguments final
   }
 
  private:
-  /*
-   * The following Call functions wrap the calling of all callbacks to handle
-   * calling either the old or the new style callbacks depending on which one
-   * has been registered.
-   * For old callbacks which return an empty handle, the ReturnValue is checked
-   * and used if it's been set to anything inside the callback.
-   * New style callbacks always use the return value.
-   */
-  inline Handle<JSObject> CallPropertyEnumerator(
+  // Returns JSArray-like object with property names or undefined.
+  inline Handle<JSObjectOrUndefined> CallPropertyEnumerator(
       Handle<InterceptorInfo> interceptor);
 
   inline Tagged<JSObject> holder() const;
@@ -179,8 +181,8 @@ class FunctionCallbackArguments
 
   static constexpr int kHolderIndex = T::kHolderIndex;
   static constexpr int kIsolateIndex = T::kIsolateIndex;
-  static constexpr int kUnusedIndex = T::kUnusedIndex;
-  static constexpr int kDataIndex = T::kDataIndex;
+  static constexpr int kContextIndex = T::kContextIndex;
+  static constexpr int kTargetIndex = T::kTargetIndex;
   static constexpr int kNewTargetIndex = T::kNewTargetIndex;
 
   static_assert(T::kThisValuesIndex == BuiltinArguments::kReceiverArgsOffset);
@@ -196,7 +198,8 @@ class FunctionCallbackArguments
   static_assert(T::kValuesOffset == offsetof(T, values_));
   static_assert(T::kLengthOffset == offsetof(T, length_));
 
-  FunctionCallbackArguments(Isolate* isolate, Tagged<Object> data,
+  FunctionCallbackArguments(Isolate* isolate,
+                            Tagged<FunctionTemplateInfo> target,
                             Tagged<Object> holder,
                             Tagged<HeapObject> new_target, Address* argv,
                             int argc);
@@ -209,12 +212,19 @@ class FunctionCallbackArguments
    * and used if it's been set to anything inside the callback.
    * New style callbacks always use the return value.
    */
-  inline Handle<Object> Call(Tagged<CallHandlerInfo> handler);
+  inline Handle<Object> Call(Tagged<FunctionTemplateInfo> function);
+
+  // Unofficial way of getting target FunctionTemplateInfo from
+  // v8::FunctionCallbackInfo<T>.
+  template <typename T>
+  static Tagged<Object> GetTarget(const FunctionCallbackInfo<T>& info) {
+    return Tagged<Object>(info.implicit_args_[kTargetIndex]);
+  }
 
  private:
   inline Tagged<JSReceiver> holder() const;
 
-  internal::Address* argv_;
+  Address* argv_;
   int const argc_;
 };
 

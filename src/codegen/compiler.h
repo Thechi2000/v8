@@ -27,6 +27,11 @@
 #include "src/zone/zone.h"
 
 namespace v8 {
+
+namespace tracing {
+class TracedValue;
+}  // namespace tracing
+
 namespace internal {
 
 // Forward declarations.
@@ -267,6 +272,12 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   static void InstallInterpreterTrampolineCopy(
       Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
       LogEventListener::CodeTag log_tag);
+
+ private:
+  static std::unique_ptr<v8::tracing::TracedValue> AddScriptCompiledTrace(
+      Isolate* isolate, DirectHandle<SharedFunctionInfo> shared);
+  static std::unique_ptr<v8::tracing::TracedValue> AddScriptSourceTextTrace(
+      Isolate* isolate, DirectHandle<SharedFunctionInfo> shared);
 };
 
 // A base class for compilation jobs intended to run concurrent to the main
@@ -428,10 +439,10 @@ class OptimizedCompilationJob : public CompilationJob {
 
   // Register weak object to optimized code dependencies.
   GlobalHandleVector<Map> CollectRetainedMaps(Isolate* isolate,
-                                              Handle<Code> code);
+                                              DirectHandle<Code> code);
   void RegisterWeakObjectsInOptimizedCode(Isolate* isolate,
-                                          Handle<NativeContext> context,
-                                          Handle<Code> code,
+                                          DirectHandle<NativeContext> context,
+                                          DirectHandle<Code> code,
                                           GlobalHandleVector<Map> maps);
 
   base::TimeDelta time_taken_to_prepare_;
@@ -519,7 +530,7 @@ using FinalizeUnoptimizedCompilationDataList =
 class DeferredFinalizationJobData {
  public:
   DeferredFinalizationJobData(Isolate* isolate,
-                              Handle<SharedFunctionInfo> function_handle,
+                              DirectHandle<SharedFunctionInfo> function_handle,
                               std::unique_ptr<UnoptimizedCompilationJob> job) {
     UNREACHABLE();
   }
@@ -586,7 +597,7 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
            ReusableUnoptimizedCompileState* reusable_state);
 
   MaybeHandle<SharedFunctionInfo> FinalizeScript(
-      Isolate* isolate, Handle<String> source,
+      Isolate* isolate, DirectHandle<String> source,
       const ScriptDetails& script_details,
       MaybeHandle<Script> maybe_cached_script);
 
@@ -681,8 +692,8 @@ class V8_EXPORT_PRIVATE BackgroundDeserializeTask {
   void MergeWithExistingScript();
 
   MaybeHandle<SharedFunctionInfo> Finish(Isolate* isolate,
-                                         Handle<String> source,
-                                         ScriptOriginOptions origin_options);
+                                         DirectHandle<String> source,
+                                         const ScriptDetails& script_details);
 
   bool rejected() const { return cached_data_.rejected(); }
 

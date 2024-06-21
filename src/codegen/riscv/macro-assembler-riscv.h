@@ -12,6 +12,7 @@
 #include "src/codegen/assembler-arch.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/bailout-reason.h"
+#include "src/codegen/register.h"
 #include "src/common/globals.h"
 #include "src/execution/frame-constants.h"
 #include "src/execution/isolate-data.h"
@@ -37,8 +38,6 @@ enum class AbortReason : uint8_t;
 // trying to update gp register for position-independent-code. Whenever
 // RISC-V generated code calls C code, it must be via t6 register.
 
-// Flags used for LeaveExitFrame function.
-enum LeaveExitFrameMode { EMIT_RETURN = true, NO_EMIT_RETURN = false };
 
 // Flags used for the li macro-assembler function.
 enum LiFlags {
@@ -91,6 +90,8 @@ inline MemOperand CFunctionArgumentOperand(int index) {
   int offset = (index - 5) * kSystemPointerSize + kCArgsSlotsSize;
   return MemOperand(sp, offset);
 }
+
+enum StackLimitKind { kInterruptStackLimit, kRealStackLimit };
 
 class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
  public:
@@ -310,8 +311,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadCodeInstructionStart(
       Register destination, Register code_object,
       CodeEntrypointTag tag = kDefaultCodeEntrypointTag);
-  void CallCodeObject(Register code_object);
-  void JumpCodeObject(Register code_object,
+  void CallCodeObject(Register code_object, CodeEntrypointTag tag);
+  void JumpCodeObject(Register code_object, CodeEntrypointTag tag,
                       JumpMode jump_mode = JumpMode::kJump);
 
   // Convenience functions to call/jmp to the code of a JSFunction object.
@@ -408,16 +409,26 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void MaybeSaveRegisters(RegList registers);
   void MaybeRestoreRegisters(RegList registers);
 
-  void CallEphemeronKeyBarrier(Register object, Register slot_address,
+  void CallEphemeronKeyBarrier(Register object, Operand offset,
                                SaveFPRegsMode fp_mode);
-
+  void CallIndirectPointerBarrier(Register object, Operand offset,
+                                  SaveFPRegsMode fp_mode,
+                                  IndirectPointerTag tag);
   void CallRecordWriteStubSaveRegisters(
-      Register object, Register slot_address, SaveFPRegsMode fp_mode,
+      Register object, Operand offset, SaveFPRegsMode fp_mode,
       StubCallMode mode = StubCallMode::kCallBuiltinPointer);
   void CallRecordWriteStub(
       Register object, Register slot_address, SaveFPRegsMode fp_mode,
       StubCallMode mode = StubCallMode::kCallBuiltinPointer);
 
+  // For a given |object| and |offset|:
+  //   - Move |object| to |dst_object|.
+  //   - Compute the address of the slot pointed to by |offset| in |object| and
+  //     write it to |dst_slot|.
+  // This method makes sure |object| and |offset| are allowed to overlap with
+  // the destination registers.
+  void MoveObjectAndSlot(Register dst_object, Register dst_slot,
+                         Register object, Operand offset);
   // Push multiple registers on the stack.
   // Registers are saved in numerical order, with higher numbered registers
   // saved in higher memory addresses.
@@ -648,7 +659,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
     li(a1, ref);
   }
 
-  void CheckPageFlag(Register object, Register scratch, int mask, Condition cc,
+  void CheckPageFlag(Register object, int mask, Condition cc,
                      Label* condition_met);
 #undef COND_ARGS
 
@@ -664,21 +675,21 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadZeroIfConditionZero(Register dest, Register condition);
 
   void SignExtendByte(Register rd, Register rs) {
-#if CAN_USE_ZBB_INSTRUCTIONS
-    sextb(rd, rs);
-#else
-    slli(rd, rs, xlen - 8);
-    srai(rd, rd, xlen - 8);
-#endif
+    if (CpuFeatures::IsSupported(ZBB)) {
+      sextb(rd, rs);
+    } else {
+      slli(rd, rs, xlen - 8);
+      srai(rd, rd, xlen - 8);
+    }
   }
 
   void SignExtendShort(Register rd, Register rs) {
-#if CAN_USE_ZBB_INSTRUCTIONS
-    sexth(rd, rs);
-#else
-    slli(rd, rs, xlen - 16);
-    srai(rd, rd, xlen - 16);
-#endif
+    if (CpuFeatures::IsSupported(ZBB)) {
+      sexth(rd, rs);
+    } else {
+      slli(rd, rs, xlen - 16);
+      srai(rd, rd, xlen - 16);
+    }
   }
 
   void Clz32(Register rd, Register rs);
@@ -688,12 +699,12 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 #if V8_TARGET_ARCH_RISCV64
   void SignExtendWord(Register rd, Register rs) { sext_w(rd, rs); }
   void ZeroExtendWord(Register rd, Register rs) {
-#if CAN_USE_ZBA_INSTRUCTIONS
-    zextw(rd, rs);
-#else
-    slli(rd, rs, 32);
-    srli(rd, rd, 32);
-#endif
+    if (CpuFeatures::IsSupported(ZBA)) {
+      zextw(rd, rs);
+    } else {
+      slli(rd, rs, 32);
+      srli(rd, rd, 32);
+    }
   }
   void Popcnt64(Register rd, Register rs, Register scratch);
   void Ctz64(Register rd, Register rs);
@@ -1182,6 +1193,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
                         const MemOperand& field_operand);
   void DecompressTagged(const Register& destination, const Register& source);
   void DecompressTagged(Register dst, Tagged_t immediate);
+  void DecompressProtected(const Register& destination,
+                           const MemOperand& field_operand);
 
   // ---------------------------------------------------------------------------
   // V8 Sandbox support
@@ -1204,6 +1217,26 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // Only available when the sandbox is enabled, but always visible to avoid
   // having to place the #ifdefs into the caller.
   void StoreIndirectPointerField(Register value, MemOperand dst_field_operand);
+
+#ifdef V8_ENABLE_SANDBOX
+  // Retrieve the heap object referenced by the given indirect pointer handle,
+  // which can either be a trusted pointer handle or a code pointer handle.
+  void ResolveIndirectPointerHandle(Register destination, Register handle,
+                                    IndirectPointerTag tag);
+
+  // Retrieve the heap object referenced by the given trusted pointer handle.
+  void ResolveTrustedPointerHandle(Register destination, Register handle,
+                                   IndirectPointerTag tag);
+  // Retrieve the Code object referenced by the given code pointer handle.
+  void ResolveCodePointerHandle(Register destination, Register handle);
+
+  // Load the pointer to a Code's entrypoint via a code pointer.
+  // Only available when the sandbox is enabled as it requires the code pointer
+  // table.
+  void LoadCodeEntrypointViaCodePointer(Register destination,
+                                        MemOperand field_operand,
+                                        CodeEntrypointTag tag);
+#endif
 
   void AtomicDecompressTaggedSigned(Register dst, const MemOperand& src);
   void AtomicDecompressTagged(Register dst, const MemOperand& src);
@@ -1237,6 +1270,13 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void StoreTaggedField(const Register& value,
                         const MemOperand& dst_field_operand) {
     Sw(value, dst_field_operand);
+  }
+
+  void AtomicStoreTaggedField(Register src, const MemOperand& dst) {
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
+    AddWord(scratch, dst.rm(), dst.offset());
+    amoswap_w(true, true, zero_reg, src, scratch);
   }
 #endif
   // Control-flow integrity:
@@ -1338,16 +1378,18 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // stored.  value and scratch registers are clobbered by the operation.
   // The offset is the offset from the start of the object, not the offset from
   // the tagged HeapObject pointer.  For use with FieldOperand(reg, off).
-  void RecordWriteField(Register object, int offset, Register value,
-                        RAStatus ra_status, SaveFPRegsMode save_fp,
-                        SmiCheck smi_check = SmiCheck::kInline);
+  void RecordWriteField(
+      Register object, int offset, Register value, RAStatus ra_status,
+      SaveFPRegsMode save_fp, SmiCheck smi_check = SmiCheck::kInline,
+      SlotDescriptor slot = SlotDescriptor::ForDirectPointerSlot());
 
   // For a given |object| notify the garbage collector that the slot |address|
   // has been written.  |value| is the object being stored. The value and
   // address registers are clobbered by the operation.
-  void RecordWrite(Register object, Operand offset, Register value,
-                   RAStatus ra_status, SaveFPRegsMode save_fp,
-                   SmiCheck smi_check = SmiCheck::kInline);
+  void RecordWrite(
+      Register object, Operand offset, Register value, RAStatus ra_status,
+      SaveFPRegsMode save_fp, SmiCheck smi_check = SmiCheck::kInline,
+      SlotDescriptor slot = SlotDescriptor::ForDirectPointerSlot());
 
   // void Pref(int32_t hint, const MemOperand& rs);
 
@@ -1362,16 +1404,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Msub_s(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft);
   void Msub_d(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft);
 
-  // Enter exit frame.
-  // argc - argument count to be dropped by LeaveExitFrame.
-  // save_doubles - saves FPU registers on stack.
   // stack_space - extra stack space.
-  void EnterExitFrame(int stack_space = 0,
-                      StackFrame::Type frame_type = StackFrame::EXIT);
-
+  void EnterExitFrame(Register scratch, int stack_space,
+                      StackFrame::Type frame_type);
   // Leave the current exit frame.
-  void LeaveExitFrame(Register arg_count, bool do_return = NO_EMIT_RETURN,
-                      bool argument_count_is_length = false);
+  void LeaveExitFrame(Register scratch);
 
   // Make sure the stack is aligned. Only emits code in debug mode.
   void AssertStackIsAligned();
@@ -1487,8 +1524,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // -------------------------------------------------------------------------
   // Stack limit utilities
-
-  enum StackLimitKind { kInterruptStackLimit, kRealStackLimit };
   void LoadStackLimit(Register destination, StackLimitKind kind);
   void StackOverflowCheck(Register num_args, Register scratch1,
                           Register scratch2, Label* stack_overflow,
@@ -1518,13 +1553,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   }
 
   enum ArgumentsCountMode { kCountIncludesReceiver, kCountExcludesReceiver };
-  enum ArgumentsCountType { kCountIsInteger, kCountIsSmi, kCountIsBytes };
-  void DropArguments(Register count, ArgumentsCountType type,
-                     ArgumentsCountMode mode, Register scratch = no_reg);
-  void DropArgumentsAndPushNewReceiver(Register argc, Register receiver,
-                                       ArgumentsCountType type,
-                                       ArgumentsCountMode mode,
-                                       Register scratch = no_reg);
+  enum ArgumentsCountType { kCountIsInteger, kCountIsSmi };
+  void DropArguments(Register count);
+  void DropArgumentsAndPushNewReceiver(Register argc, Register receiver);
+
   void JumpIfCodeIsMarkedForDeoptimization(Register code, Register scratch,
                                            Label* if_marked_for_deoptimization);
   Operand ClearedValue() const;
@@ -1697,10 +1729,17 @@ inline MemOperand ExitFrameCallerStackSlotOperand(int index) {
                             kSystemPointerSize);
 }
 
+// Calls an API function. Allocates HandleScope, extracts returned value
+// from handle and propagates exceptions. Clobbers C argument registers
+// and C caller-saved registers. Restores context. On return removes
+//   (*argc_operand + slots_to_drop_on_return) * kSystemPointerSize
+// (GCed, includes the call JS arguments space and the additional space
+// allocated for the fast call).
 void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                               Register function_address,
                               ExternalReference thunk_ref, Register thunk_arg,
-                              int stack_space, MemOperand* stack_space_operand,
+                              int slots_to_drop_on_return,
+                              MemOperand* argc_operand,
                               MemOperand return_value_operand);
 
 #define ACCESS_MASM(masm) masm->

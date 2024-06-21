@@ -91,7 +91,7 @@ void ThrowLazyCompilationError(Isolate* isolate,
 
 // Trigger tier-up of a particular function to TurboFan. If tier-up was already
 // triggered, we instead increase the priority with exponential back-off.
-V8_EXPORT_PRIVATE void TriggerTierUp(Tagged<WasmTrustedInstanceData>,
+V8_EXPORT_PRIVATE void TriggerTierUp(Isolate*, Tagged<WasmTrustedInstanceData>,
                                      int func_index);
 // Synchronous version of the above.
 void TierUpNowForTesting(Isolate*, Tagged<WasmTrustedInstanceData>,
@@ -146,8 +146,8 @@ class AsyncCompileJob {
   AsyncCompileJob(Isolate* isolate, WasmFeatures enabled_features,
                   CompileTimeImports compile_imports,
                   base::OwnedVector<const uint8_t> bytes,
-                  Handle<Context> context,
-                  Handle<NativeContext> incumbent_context,
+                  DirectHandle<Context> context,
+                  DirectHandle<NativeContext> incumbent_context,
                   const char* api_method_name,
                   std::shared_ptr<CompilationResultResolver> resolver,
                   int compilation_id);

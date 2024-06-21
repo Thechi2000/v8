@@ -210,24 +210,6 @@ Node* FastApiCallBuilder::WrapFastCall(const CallDescriptor* call_descriptor,
                                kNoWriteBarrier),
            target_address, 0, __ BitcastTaggedToWord(target));
 
-  // Disable JS execution
-  Node* javascript_execution_assert = __ ExternalConstant(
-      ExternalReference::javascript_execution_assert(isolate()));
-  static_assert(sizeof(bool) == 1, "Wrong assumption about boolean size.");
-
-  if (v8_flags.debug_code) {
-    auto do_store = __ MakeLabel();
-    Node* old_scope_value =
-        __ Load(MachineType::Int8(), javascript_execution_assert, 0);
-    __ GotoIf(__ Word32Equal(old_scope_value, __ Int32Constant(1)), &do_store);
-
-    // We expect that JS execution is enabled, otherwise assert.
-    __ Unreachable();
-    __ Bind(&do_store);
-  }
-  __ Store(StoreRepresentation(MachineRepresentation::kWord8, kNoWriteBarrier),
-           javascript_execution_assert, 0, __ Int32Constant(0));
-
   // Update effect and control
   if (stack_slot != nullptr) {
     inputs[c_arg_count + 1] = stack_slot;
@@ -240,10 +222,6 @@ Node* FastApiCallBuilder::WrapFastCall(const CallDescriptor* call_descriptor,
 
   // Create the fast call
   Node* call = __ Call(call_descriptor, inputs_size, inputs);
-
-  // Reenable JS execution
-  __ Store(StoreRepresentation(MachineRepresentation::kWord8, kNoWriteBarrier),
-           javascript_execution_assert, 0, __ Int32Constant(1));
 
   // Reset the CPU profiler target address.
   __ Store(StoreRepresentation(MachineType::PointerRepresentation(),
@@ -287,8 +265,10 @@ Node* FastApiCallBuilder::Build(const FastApiCallFunctionVector& c_functions,
   const int kFastTargetAddressInputIndex = 0;
   const int kFastTargetAddressInputCount = 1;
 
-  int extra_input_count = FastApiCallNode::kEffectAndControlInputCount +
-                          (c_signature->HasOptions() ? 1 : 0);
+  const int kEffectAndControlInputCount = 2;
+
+  int extra_input_count =
+      kEffectAndControlInputCount + (c_signature->HasOptions() ? 1 : 0);
 
   Node** const inputs = graph()->zone()->AllocateArray<Node*>(
       kFastTargetAddressInputCount + c_arg_count + extra_input_count);
@@ -340,7 +320,7 @@ Node* FastApiCallBuilder::Build(const FastApiCallFunctionVector& c_functions,
     // If this check fails, you've probably added new fields to
     // v8::FastApiCallbackOptions, which means you'll need to write code
     // that initializes and reads from them too.
-    static_assert(kSize == sizeof(uintptr_t) * 3);
+    static_assert(kSize == sizeof(uintptr_t) * 4);
     stack_slot = __ StackSlot(kSize, kAlign);
 
     __ Store(
@@ -349,7 +329,13 @@ Node* FastApiCallBuilder::Build(const FastApiCallFunctionVector& c_functions,
         static_cast<int>(offsetof(v8::FastApiCallbackOptions, fallback)),
         __ Int32Constant(0));
 
-    Node* data_argument_to_pass = AdaptLocalArgument(gasm(), data_argument);
+    __ Store(StoreRepresentation(MachineType::PointerRepresentation(),
+                                 kNoWriteBarrier),
+             stack_slot,
+             static_cast<int>(offsetof(v8::FastApiCallbackOptions, isolate)),
+             __ ExternalConstant(ExternalReference::isolate_address(isolate_)));
+
+    Node* data_argument_to_pass = __ AdaptLocalArgument(data_argument);
 
     __ Store(StoreRepresentation(MachineType::PointerRepresentation(),
                                  kNoWriteBarrier),

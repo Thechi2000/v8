@@ -4,6 +4,8 @@
 
 #include "src/wasm/canonical-types.h"
 
+#include "src/init/v8.h"
+#include "src/utils/utils.h"
 #include "src/wasm/std-object-sizes.h"
 #include "src/wasm/wasm-engine.h"
 
@@ -18,6 +20,22 @@ TypeCanonicalizer* GetTypeCanonicalizer() {
 TypeCanonicalizer::TypeCanonicalizer() {
   AddPredefinedArrayType(kPredefinedArrayI8Index, kWasmI8);
   AddPredefinedArrayType(kPredefinedArrayI16Index, kWasmI16);
+}
+
+// For convenience, limit canonicalized type indices to Smi range.
+// We could squeeze out a few more bits if necessary by passing them
+// from compiled wrappers to runtime functions as Smi-tagged unsigned ints.
+// That would give us "uint31" range on 32-bit platforms, and allow
+// uint32_t (or even more) on 64-bit platforms. But we probably don't want
+// to store that many types in the TypeCanonicalizer anyway.
+static constexpr size_t kMaxCanonicalTypes = kSmiMaxValue;
+static_assert(kMaxCanonicalTypes >= kV8MaxWasmTypes);
+static_assert(kInvalidCanonicalIndex > kMaxCanonicalTypes);
+
+void TypeCanonicalizer::CheckMaxCanonicalIndex() const {
+  if (canonical_supertypes_.size() > kMaxCanonicalTypes) {
+    V8::FatalProcessOutOfMemory(nullptr, "too many canonicalized types");
+  }
 }
 
 void TypeCanonicalizer::AddRecursiveGroup(WasmModule* module, uint32_t size) {
@@ -60,6 +78,7 @@ void TypeCanonicalizer::AddRecursiveGroup(WasmModule* module, uint32_t size,
   uint32_t first_canonical_index =
       static_cast<uint32_t>(canonical_supertypes_.size());
   canonical_supertypes_.resize(first_canonical_index + size);
+  CheckMaxCanonicalIndex();
   for (uint32_t i = 0; i < size; i++) {
     CanonicalType& canonical_type = group.types[i];
     // Compute the canonical index of the supertype: If it is relative, we
@@ -106,6 +125,7 @@ void TypeCanonicalizer::AddRecursiveSingletonGroup(WasmModule* module,
   uint32_t first_canonical_index =
       static_cast<uint32_t>(canonical_supertypes_.size());
   canonical_supertypes_.resize(first_canonical_index + 1);
+  CheckMaxCanonicalIndex();
   CanonicalType& canonical_type = group.type;
   // Compute the canonical index of the supertype: If it is relative, we
   // need to add {first_canonical_index}.
@@ -137,6 +157,7 @@ uint32_t TypeCanonicalizer::AddRecursiveGroup(const FunctionSig* sig) {
   group.type.is_relative_supertype = false;
   int canonical_index = FindCanonicalGroup(group);
   if (canonical_index >= 0) return canonical_index;
+  static_assert(kMaxCanonicalTypes <= kMaxInt);
   canonical_index = static_cast<int>(canonical_supertypes_.size());
   // We need to copy the signature in the local zone, or else we risk
   // storing a dangling pointer in the future.
@@ -151,6 +172,7 @@ uint32_t TypeCanonicalizer::AddRecursiveGroup(const FunctionSig* sig) {
   group.type.is_relative_supertype = false;
   canonical_singleton_groups_.emplace(group, canonical_index);
   canonical_supertypes_.emplace_back(kNoSuperType);
+  CheckMaxCanonicalIndex();
   return canonical_index;
 }
 
@@ -167,6 +189,7 @@ void TypeCanonicalizer::AddPredefinedArrayType(uint32_t index,
   group.type.is_relative_supertype = false;
   canonical_singleton_groups_.emplace(group, index);
   canonical_supertypes_.emplace_back(kNoSuperType);
+  DCHECK_LE(canonical_supertypes_.size(), kMaxCanonicalTypes);
 }
 
 ValueType TypeCanonicalizer::CanonicalizeValueType(
@@ -284,6 +307,7 @@ int TypeCanonicalizer::FindCanonicalGroup(const CanonicalGroup& group) const {
 int TypeCanonicalizer::FindCanonicalGroup(
     const CanonicalSingletonGroup& group) const {
   auto it = canonical_singleton_groups_.find(group);
+  static_assert(kMaxCanonicalTypes <= kMaxInt);
   return it == canonical_singleton_groups_.end() ? -1 : it->second;
 }
 

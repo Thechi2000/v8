@@ -5,9 +5,8 @@
 #ifndef V8_WASM_BASELINE_PPC_LIFTOFF_ASSEMBLER_PPC_INL_H_
 #define V8_WASM_BASELINE_PPC_LIFTOFF_ASSEMBLER_PPC_INL_H_
 
-#include "src/base/v8-fallthrough.h"
 #include "src/codegen/assembler.h"
-#include "src/heap/memory-chunk.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
 #include "src/wasm/object-access.h"
@@ -45,10 +44,6 @@ namespace liftoff {
 //
 //
 
-constexpr int32_t kInstanceDataOffset =
-    (V8_EMBEDDED_CONSTANT_POOL_BOOL ? 3 : 2) * kSystemPointerSize;
-constexpr int kFeedbackVectorOffset =
-    (V8_EMBEDDED_CONSTANT_POOL_BOOL ? 4 : 3) * kSystemPointerSize;
 
 // TODO(tpearson): Much of this logic is already implemented in
 // the MacroAssembler GenerateMemoryOperationWithAlignPrefixed()
@@ -83,18 +78,12 @@ inline MemOperand GetMemOp(LiftoffAssembler* assm, Register addr,
   }
 }
 
-inline MemOperand GetHalfStackSlot(int offset, RegPairHalf half) {
-  int32_t half_offset =
-      half == kLowWord ? 0 : LiftoffAssembler::kStackSlotSize / 2;
-  return MemOperand(fp, -kInstanceDataOffset - offset + half_offset);
-}
-
 inline MemOperand GetStackSlot(uint32_t offset) {
   return MemOperand(fp, -static_cast<int32_t>(offset));
 }
 
 inline MemOperand GetInstanceDataOperand() {
-  return GetStackSlot(kInstanceDataOffset);
+  return GetStackSlot(WasmLiftoffFrameConstants::kInstanceDataOffset);
 }
 
 inline void StoreToMemory(LiftoffAssembler* assm, MemOperand dst,
@@ -271,7 +260,7 @@ void LiftoffAssembler::AbortCompilation() { FinishCode(); }
 
 // static
 constexpr int LiftoffAssembler::StaticStackFrameSize() {
-  return liftoff::kFeedbackVectorOffset;
+  return WasmLiftoffFrameConstants::kFeedbackVectorOffset;
 }
 
 int LiftoffAssembler::SlotSizeForType(ValueKind kind) {
@@ -347,12 +336,10 @@ void LiftoffAssembler::LoadInstanceDataFromFrame(Register dst) {
   LoadU64(dst, liftoff::GetInstanceDataOperand(), r0);
 }
 
-void LiftoffAssembler::LoadTrustedDataFromInstanceObject(
-    Register dst, Register instance_object) {
-  MemOperand src{instance_object, wasm::ObjectAccess::ToTagged(
-                                      WasmInstanceObject::kTrustedDataOffset)};
-  LoadTrustedPointerField(dst, src, kWasmTrustedInstanceDataIndirectPointerTag,
-                          r0);
+void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
+                                          int offset, IndirectPointerTag tag) {
+  MemOperand src{src_addr, offset};
+  LoadTrustedPointerField(dst, src, tag, r0);
 }
 
 void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
@@ -377,32 +364,6 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      Register instance,
                                                      int offset) {
   LoadTaggedField(dst, MemOperand(instance, offset), r0);
-}
-
-void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
-                                           int offset, ExternalPointerTag tag,
-                                           Register scratch) {
-#ifdef V8_ENABLE_SANDBOX
-  LoadExternalPointerField(dst, MemOperand{src_addr, offset}, tag,
-                           kRootRegister, scratch);
-#else
-  LoadFullPointer(dst, src_addr, offset);
-#endif
-}
-
-void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
-                                           int offset, Register index,
-                                           ExternalPointerTag tag,
-                                           Register scratch) {
-#ifdef V8_ENABLE_SANDBOX
-  UseScratchRegisterScope temps(this);
-  MemOperand src_op = liftoff::GetMemOp(this, src_addr, index, offset, scratch,
-                                        false, V8_ENABLE_SANDBOX_BOOL ? 2 : 3);
-  LoadExternalPointerField(dst, src_op, tag, kRootRegister, scratch);
-#else
-  ShiftLeftU64(scratch, index, Operand(kSystemPointerSizeLog2));
-  LoadU64(dst, MemOperand(src_addr, scratch, offset), r0);
-#endif
 }
 
 void LiftoffAssembler::SpillInstanceData(Register instance) {
@@ -1834,6 +1795,18 @@ void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
   b(to_condition(cond), label);
 }
 
+void LiftoffAssembler::emit_ptrsize_cond_jumpi(Condition cond, Label* label,
+                                               Register lhs, int32_t imm,
+                                               const FreezeCacheState& frozen) {
+  bool use_signed = is_signed(cond);
+  if (use_signed) {
+    CmpS64(lhs, Operand(imm), r0);
+  } else {
+    CmpU64(lhs, Operand(imm), r0);
+  }
+  b(to_condition(cond), label);
+}
+
 void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
   Label done;
   CmpS32(src, Operand(0), r0);
@@ -1924,6 +1897,10 @@ bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
                                    LiftoffRegister false_value,
                                    ValueKind kind) {
   return false;
+}
+
+void LiftoffAssembler::clear_i32_upper_half(Register dst) {
+  ZeroExtWord32(dst, dst);
 }
 
 #define SIMD_BINOP_LIST(V)                           \
@@ -2637,8 +2614,8 @@ void LiftoffAssembler::emit_i32x4_uconvert_i16x8_high(LiftoffRegister dst,
                          kScratchSimd128Reg);
 }
 
-void LiftoffAssembler::set_trap_on_oob_mem64(Register index, int oob_shift,
-                                             MemOperand oob_offset) {
+void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t oob_size,
+                                             uint64_t oob_index) {
   UNREACHABLE();
 }
 

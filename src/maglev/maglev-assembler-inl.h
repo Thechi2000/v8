@@ -254,6 +254,25 @@ inline void MaglevAssembler::JumpToDeferredIf(Condition cond,
                    std::forward<Args>(args)...));
 }
 
+template <typename T>
+inline void AllocateSlow(MaglevAssembler* masm,
+                         RegisterSnapshot register_snapshot, Register object,
+                         Builtin builtin, T size_in_bytes, ZoneLabelRef done) {
+  // Remove {object} from snapshot, since it is the returned allocated
+  // HeapObject.
+  register_snapshot.live_registers.clear(object);
+  register_snapshot.live_tagged_registers.clear(object);
+  {
+    SaveRegisterStateForCall save_register_state(masm, register_snapshot);
+    using D = AllocateDescriptor;
+    masm->Move(D::GetRegisterParameter(D::kRequestedSize), size_in_bytes);
+    masm->CallBuiltin(builtin);
+    save_register_state.DefineSafepoint();
+    masm->Move(object, kReturnRegister0);
+  }
+  masm->Jump(*done);
+}
+
 inline void MaglevAssembler::SmiToDouble(DoubleRegister result, Register smi) {
   AssertSmi(smi);
   SmiUntag(smi);
@@ -359,7 +378,8 @@ inline bool ClobberedBy(RegList written_registers, Register reg) {
 inline bool ClobberedBy(RegList written_registers, DoubleRegister reg) {
   return false;
 }
-inline bool ClobberedBy(RegList written_registers, Handle<Object> handle) {
+inline bool ClobberedBy(RegList written_registers,
+                        DirectHandle<Object> handle) {
   return false;
 }
 inline bool ClobberedBy(RegList written_registers, Tagged<Smi> smi) {
@@ -386,7 +406,7 @@ inline bool ClobberedBy(DoubleRegList written_registers, DoubleRegister reg) {
   return written_registers.has(reg);
 }
 inline bool ClobberedBy(DoubleRegList written_registers,
-                        Handle<Object> handle) {
+                        DirectHandle<Object> handle) {
   return false;
 }
 inline bool ClobberedBy(DoubleRegList written_registers, Tagged<Smi> smi) {
@@ -418,7 +438,8 @@ inline bool MachineTypeMatches(MachineType type, DoubleRegister reg) {
 inline bool MachineTypeMatches(MachineType type, MemOperand reg) {
   return true;
 }
-inline bool MachineTypeMatches(MachineType type, Handle<HeapObject> handle) {
+inline bool MachineTypeMatches(MachineType type,
+                               DirectHandle<HeapObject> handle) {
   return type.IsTagged() && !type.IsTaggedSigned();
 }
 inline bool MachineTypeMatches(MachineType type, Tagged<Smi> smi) {

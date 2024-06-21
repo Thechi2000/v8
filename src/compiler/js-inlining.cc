@@ -249,8 +249,9 @@ FrameState JSInliner::CreateArtificialFrameState(
   const int parameter_count_with_receiver =
       parameter_count + JSCallOrConstructNode::kReceiverOrNewTargetInputCount;
   const FrameStateFunctionInfo* state_info =
-      common()->CreateFrameStateFunctionInfo(
-          frame_state_type, parameter_count_with_receiver, 0, shared.object());
+      common()->CreateFrameStateFunctionInfo(frame_state_type,
+                                             parameter_count_with_receiver, 0,
+                                             0, shared.object());
 
   const Operator* op = common()->FrameState(
       BytecodeOffset::None(), OutputFrameStateCombine::Ignore(), state_info);
@@ -501,7 +502,6 @@ Reduction JSInliner::ReduceJSWasmCall(Node* node) {
     bool set_in_wasm_flag = !inline_result.can_inline_body;
     BuildInlinedJSToWasmWrapper(
         graph()->zone(), jsgraph(), sig,
-        native_module->module()->functions[fct_index].imported,
         wasm_call_params.module(), isolate(), source_positions_,
         wasm::WasmFeatures::FromFlags(), continuation_frame_state,
         set_in_wasm_flag);
@@ -764,11 +764,13 @@ Reduction JSInliner::ReduceJSCall(Node* node) {
       info_->AddInlinedFunction(shared_info->object(), bytecode_array.object(),
                                 source_positions_->GetSourcePosition(node));
   if (v8_flags.profile_guided_optimization &&
-      FeedbackVector::cast(feedback_cell.object()->value())
-              ->invocation_count_before_stable() >
+      feedback_cell.feedback_vector(broker()).has_value() &&
+      feedback_cell.feedback_vector(broker())
+              .value()
+              .object()
+              ->invocation_count_before_stable(kRelaxedLoad) >
           v8_flags.invocation_count_for_early_optimization) {
-    shared_info->object()->set_cached_tiering_decision(
-        CachedTieringDecision::kNormal);
+    info_->set_could_not_inline_all_candidates();
   }
 
   // Create the subgraph for the inlinee.

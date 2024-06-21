@@ -82,6 +82,10 @@ V8_BASE_EXPORT void SetPrintStackTrace(void (*print_stack_trace_)());
 V8_BASE_EXPORT void SetDcheckFunction(void (*dcheck_Function)(const char*, int,
                                                               const char*));
 
+// Override the default function invoked during V8_Fatal.
+V8_BASE_EXPORT void SetFatalFunction(void (*fatal_Function)(const char*, int,
+                                                            const char*));
+
 enum class OOMType {
   // We ran out of memory in the JavaScript heap.
   kJavaScript,
@@ -118,12 +122,20 @@ enum class OOMType {
 
 #ifdef DEBUG
 
+#define DCHECK_WITH_MSG_AND_LOC(condition, message, loc)                \
+  do {                                                                  \
+    if (V8_UNLIKELY(!(condition))) {                                    \
+      V8_Dcheck(loc.FileName(), static_cast<int>(loc.Line()), message); \
+    }                                                                   \
+  } while (false)
 #define DCHECK_WITH_MSG(condition, message)   \
   do {                                        \
     if (V8_UNLIKELY(!(condition))) {          \
       V8_Dcheck(__FILE__, __LINE__, message); \
     }                                         \
   } while (false)
+#define DCHECK_WITH_LOC(condition, loc) \
+  DCHECK_WITH_MSG_AND_LOC(condition, #condition, loc)
 #define DCHECK(condition) DCHECK_WITH_MSG(condition, #condition)
 
 // Helper macro for binary operators.
@@ -437,6 +449,8 @@ DEFINE_CHECK_OP_IMPL(GT, > )
   DCHECK_WITH_MSG(!(lhs) || (rhs), #lhs " implies " #rhs)
 #else
 #define DCHECK(condition)      ((void) 0)
+#define DCHECK_WITH_LOC(condition, location) ((void)0)
+#define DCHECK_WITH_MSG_AND_LOC(condition, message, location) ((void)0)
 #define DCHECK_EQ(v1, v2)      ((void) 0)
 #define DCHECK_NE(v1, v2)      ((void) 0)
 #define DCHECK_GT(v1, v2)      ((void) 0)

@@ -497,7 +497,7 @@ Handle<Code> Assembler::code_target_object_handle_at(Address pc) {
   } else {
     DCHECK(instr->IsBranchAndLink() || instr->IsUnconditionalBranch());
     DCHECK_EQ(instr->ImmPCOffset() % kInstrSize, 0);
-    return Handle<Code>::cast(
+    return Cast<Code>(
         GetEmbeddedObject(instr->ImmPCOffset() >> kInstrSizeLog2));
   }
 }
@@ -667,9 +667,9 @@ Tagged<HeapObject> RelocInfo::target_object(PtrComprCageBase cage_base) {
     DCHECK(!HAS_SMI_TAG(compressed));
     Tagged<Object> obj(
         V8HeapCompressionScheme::DecompressTagged(cage_base, compressed));
-    return HeapObject::cast(obj);
+    return Cast<HeapObject>(obj);
   } else {
-    return HeapObject::cast(
+    return Cast<HeapObject>(
         Tagged<Object>(Assembler::target_address_at(pc_, constant_pool_)));
   }
 }
@@ -852,10 +852,14 @@ inline void Assembler::DataProcImmediate(const Register& rd, const Register& rn,
        RnSP(rn));
 }
 
-int Assembler::LinkAndGetInstructionOffsetTo(Label* label) {
+int Assembler::LinkAndGetBranchInstructionOffsetTo(Label* label) {
   DCHECK_EQ(kStartOfLabelLinkChain, 0);
   int offset = LinkAndGetByteOffsetTo(label);
   DCHECK(IsAligned(offset, kInstrSize));
+  if (label->is_linked() && (offset != kStartOfLabelLinkChain)) {
+    branch_link_chain_back_edge_.emplace(
+        std::pair<int, int>(pc_offset() + offset, pc_offset()));
+  }
   return offset >> kInstrSizeLog2;
 }
 

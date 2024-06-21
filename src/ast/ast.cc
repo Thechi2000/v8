@@ -38,25 +38,7 @@ namespace internal {
 
 #ifdef DEBUG
 
-static const char* NameForNativeContextIntrinsicIndex(uint32_t idx) {
-  switch (idx) {
-#define NATIVE_CONTEXT_FIELDS_IDX(NAME, Type, name) \
-  case Context::NAME:                               \
-    return #name;
-
-    NATIVE_CONTEXT_FIELDS(NATIVE_CONTEXT_FIELDS_IDX)
-#undef NATIVE_CONTEXT_FIELDS_IDX
-
-    default:
-      break;
-  }
-
-  return "UnknownIntrinsicIndex";
-}
-
-void AstNode::Print(Isolate* isolate) {
-  AstPrinter::PrintOut(isolate, this);
-}
+void AstNode::Print(Isolate* isolate) { AstPrinter::PrintOut(isolate, this); }
 
 #endif  // DEBUG
 
@@ -512,13 +494,14 @@ void ObjectLiteralBoilerplateBuilder::BuildBoilerplateDescription(
     // in at runtime. The enumeration order is maintained.
     Literal* key_literal = property->key()->AsLiteral();
     uint32_t element_index = 0;
-    Handle<Object> key =
+    DirectHandle<Object> key =
         key_literal->AsArrayIndex(&element_index)
             ? isolate->factory()
                   ->template NewNumberFromUint<AllocationType::kOld>(
                       element_index)
-            : Handle<Object>::cast(key_literal->AsRawPropertyName()->string());
-    Handle<Object> value = GetBoilerplateValue(property->value(), isolate);
+            : Cast<Object>(key_literal->AsRawPropertyName()->string());
+    DirectHandle<Object> value =
+        GetBoilerplateValue(property->value(), isolate);
     boilerplate_description->set_key_value(position++, *key, *value);
   }
 
@@ -679,15 +662,15 @@ void ArrayLiteralBoilerplateBuilder::BuildBoilerplateDescription(
       if (literal && literal->type() == Literal::kTheHole) {
         DCHECK(IsHoleyElementsKind(kind));
         DCHECK(IsTheHole(*GetBoilerplateValue(element, isolate), isolate));
-        FixedDoubleArray::cast(*elements)->set_the_hole(array_index);
+        Cast<FixedDoubleArray>(*elements)->set_the_hole(array_index);
         continue;
       } else if (literal && literal->IsNumber()) {
-        FixedDoubleArray::cast(*elements)->set(array_index,
+        Cast<FixedDoubleArray>(*elements)->set(array_index,
                                                literal->AsNumber());
       } else {
         DCHECK(
             IsUninitialized(*GetBoilerplateValue(element, isolate), isolate));
-        FixedDoubleArray::cast(*elements)->set(array_index, 0);
+        Cast<FixedDoubleArray>(*elements)->set(array_index, 0);
       }
 
     } else {
@@ -717,7 +700,7 @@ void ArrayLiteralBoilerplateBuilder::BuildBoilerplateDescription(
                                     boilerplate_value,
                                     GetPtrComprCageBase(*elements))));
 
-      FixedArray::cast(*elements)->set(array_index, boilerplate_value);
+      Cast<FixedArray>(*elements)->set(array_index, boilerplate_value);
     }
   }  // namespace internal
 
@@ -1129,15 +1112,6 @@ Literal* AstNodeFactory::NewNumberLiteral(double number, int pos) {
     return NewSmiLiteral(int_value, pos);
   }
   return zone_->New<Literal>(number, pos);
-}
-
-const char* CallRuntime::debug_name() {
-#ifdef DEBUG
-  return is_jsruntime() ? NameForNativeContextIntrinsicIndex(context_index_)
-                        : function_->name;
-#else
-  return is_jsruntime() ? "(context function)" : function_->name;
-#endif  // DEBUG
 }
 
 }  // namespace internal

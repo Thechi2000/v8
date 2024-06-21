@@ -50,7 +50,7 @@
 // - JMP: Instead of incrementing the PC value after execution of this
 //   instruction by 1, set PC of this thread to the value specified in the
 //   instruction payload and continue there.
-// - SET_REGISTER_TO_CP: Set a register specified in the paylod to the current
+// - SET_REGISTER_TO_CP: Set a register specified in the payload to the current
 //   position (CP) within the input, then continue with the next instruction.
 // - CLEAR_REGISTER: Clear the register specified in the payload by resetting
 //   it to the initial value -1.
@@ -97,6 +97,7 @@ struct RegExpInstruction {
   enum Opcode : int32_t {
     ACCEPT,
     ASSERTION,
+    CLEAR_REGISTER,
     CONSUME_RANGE,
     FORK,
     JMP,
@@ -112,6 +113,8 @@ struct RegExpInstruction {
     END_LOOKAROUND,
     WRITE_LOOKAROUND_TABLE,
     READ_LOOKAROUND_TABLE,
+    WRITE_LOOKBEHIND_TABLE,
+    READ_LOOKBEHIND_TABLE,
   };
 
   struct Uc16Range {
@@ -201,6 +204,13 @@ struct RegExpInstruction {
     RegExpInstruction result;
     result.opcode = ASSERTION;
     result.payload.assertion_type = t;
+    return result;
+  }
+
+  static RegExpInstruction ClearRegister(int32_t register_index) {
+    RegExpInstruction result;
+    result.opcode = CLEAR_REGISTER;
+    result.payload.register_index = register_index;
     return result;
   }
 

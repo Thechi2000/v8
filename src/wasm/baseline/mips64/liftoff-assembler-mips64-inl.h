@@ -6,7 +6,7 @@
 #define V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_INL_H_
 
 #include "src/codegen/machine-type.h"
-#include "src/heap/memory-chunk.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
 #include "src/wasm/object-access.h"
@@ -43,13 +43,10 @@ namespace liftoff {
 //  -----+--------------------+  <-- stack ptr (sp)
 //
 
-constexpr int kInstanceDataOffset = 2 * kSystemPointerSize;
-constexpr int kFeedbackVectorOffset = 3 * kSystemPointerSize;
-
 inline MemOperand GetStackSlot(int offset) { return MemOperand(fp, -offset); }
 
 inline MemOperand GetInstanceDataOperand() {
-  return GetStackSlot(kInstanceDataOffset);
+  return GetStackSlot(WasmLiftoffFrameConstants::kInstanceDataOffset);
 }
 
 template <typename T>
@@ -181,7 +178,7 @@ inline void ChangeEndiannessLoad(LiftoffAssembler* assm, LiftoffRegister dst,
       is_float = true;
       tmp = assm->GetUnusedRegister(kGpReg, pinned);
       assm->emit_type_conversion(kExprI32ReinterpretF32, tmp, dst);
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case LoadType::kI64Load32U:
       assm->MacroAssembler::ByteSwapUnsigned(tmp.gp(), tmp.gp(), 4);
       break;
@@ -201,7 +198,7 @@ inline void ChangeEndiannessLoad(LiftoffAssembler* assm, LiftoffRegister dst,
       is_float = true;
       tmp = assm->GetUnusedRegister(kGpReg, pinned);
       assm->emit_type_conversion(kExprI64ReinterpretF64, tmp, dst);
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case LoadType::kI64Load:
       assm->MacroAssembler::ByteSwapSigned(tmp.gp(), tmp.gp(), 8);
       break;
@@ -236,7 +233,7 @@ inline void ChangeEndiannessStore(LiftoffAssembler* assm, LiftoffRegister src,
       is_float = true;
       tmp = assm->GetUnusedRegister(kGpReg, pinned);
       assm->emit_type_conversion(kExprI32ReinterpretF32, tmp, src);
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case StoreType::kI32Store:
       assm->MacroAssembler::ByteSwapSigned(tmp.gp(), tmp.gp(), 4);
       break;
@@ -247,7 +244,7 @@ inline void ChangeEndiannessStore(LiftoffAssembler* assm, LiftoffRegister src,
       is_float = true;
       tmp = assm->GetUnusedRegister(kGpReg, pinned);
       assm->emit_type_conversion(kExprI64ReinterpretF64, tmp, src);
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case StoreType::kI64Store:
       assm->MacroAssembler::ByteSwapSigned(tmp.gp(), tmp.gp(), 8);
       break;
@@ -415,7 +412,7 @@ void LiftoffAssembler::AbortCompilation() {}
 
 // static
 constexpr int LiftoffAssembler::StaticStackFrameSize() {
-  return liftoff::kFeedbackVectorOffset;
+  return WasmLiftoffFrameConstants::kFeedbackVectorOffset;
 }
 
 int LiftoffAssembler::SlotSizeForType(ValueKind kind) {
@@ -480,11 +477,11 @@ void LiftoffAssembler::LoadInstanceDataFromFrame(Register dst) {
   Ld(dst, liftoff::GetInstanceDataOperand());
 }
 
-void LiftoffAssembler::LoadTrustedDataFromInstanceObject(
-    Register dst, Register instance_object) {
-  LoadTaggedPointerFromInstance(
-      dst, instance_object,
-      wasm::ObjectAccess::ToTagged(WasmInstanceObject::kTrustedDataOffset));
+void LiftoffAssembler::LoadTrustedPointer(Register dst, Register src_addr,
+                                          int offset, IndirectPointerTag tag) {
+  static_assert(!V8_ENABLE_SANDBOX_BOOL);
+  static_assert(!COMPRESS_POINTERS_BOOL);
+  Ld(dst, MemOperand{src_addr, offset});
 }
 
 void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
@@ -510,21 +507,6 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      int32_t offset) {
   static_assert(kTaggedSize == kSystemPointerSize);
   Ld(dst, MemOperand(instance, offset));
-}
-
-void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
-                                           int offset, ExternalPointerTag tag,
-                                           Register scratch) {
-  LoadFullPointer(dst, src_addr, offset);
-}
-
-void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
-                                           int offset, Register index,
-                                           ExternalPointerTag tag,
-                                           Register scratch) {
-  MemOperand src_op = liftoff::GetMemOp(this, src_addr, index, offset, false,
-                                        kSystemPointerSizeLog2);
-  Ld(dst, src_op);
 }
 
 void LiftoffAssembler::SpillInstanceData(Register instance) {
@@ -1446,6 +1428,12 @@ void LiftoffAssembler::emit_u32_to_uintptr(Register dst, Register src) {
   Dext(dst, src, 0, 32);
 }
 
+void LiftoffAssembler::clear_i32_upper_half(Register dst) {
+  // Don't need to clear the upper halves of i32 values for sandbox on MIPS64,
+  // because we'll explicitly zero-extend their lower halves before using them
+  // for memory accesses anyway.
+}
+
 void LiftoffAssembler::emit_f32_neg(DoubleRegister dst, DoubleRegister src) {
   MacroAssembler::Neg_s(dst, src);
 }
@@ -1948,6 +1936,12 @@ void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
 void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
                                            Register lhs, int32_t imm,
                                            const FreezeCacheState& frozen) {
+  MacroAssembler::Branch(label, cond, lhs, Operand(imm));
+}
+
+void LiftoffAssembler::emit_ptrsize_cond_jumpi(Condition cond, Label* label,
+                                               Register lhs, int32_t imm,
+                                               const FreezeCacheState& frozen) {
   MacroAssembler::Branch(label, cond, lhs, Operand(imm));
 }
 
@@ -3652,8 +3646,8 @@ void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
   bailout(kRelaxedSimd, "emit_f64x2_qfms");
 }
 
-void LiftoffAssembler::set_trap_on_oob_mem64(Register index, int oob_shift,
-                                             MemOperand oob_offset) {
+void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t oob_size,
+                                             uint64_t oob_index) {
   UNREACHABLE();
 }
 

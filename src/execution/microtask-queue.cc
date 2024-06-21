@@ -72,7 +72,7 @@ MicrotaskQueue::~MicrotaskQueue() {
 Address MicrotaskQueue::CallEnqueueMicrotask(Isolate* isolate,
                                              intptr_t microtask_queue_pointer,
                                              Address raw_microtask) {
-  Tagged<Microtask> microtask = Microtask::cast(Tagged<Object>(raw_microtask));
+  Tagged<Microtask> microtask = Cast<Microtask>(Tagged<Object>(raw_microtask));
   reinterpret_cast<MicrotaskQueue*>(microtask_queue_pointer)
       ->EnqueueMicrotask(microtask);
   return Smi::zero().ptr();
@@ -82,8 +82,8 @@ void MicrotaskQueue::EnqueueMicrotask(v8::Isolate* v8_isolate,
                                       v8::Local<Function> function) {
   Isolate* isolate = reinterpret_cast<Isolate*>(v8_isolate);
   HandleScope scope(isolate);
-  Handle<CallableTask> microtask = isolate->factory()->NewCallableTask(
-      Utils::OpenHandle(*function), isolate->native_context());
+  DirectHandle<CallableTask> microtask = isolate->factory()->NewCallableTask(
+      Utils::OpenDirectHandle(*function), isolate->native_context());
   EnqueueMicrotask(*microtask);
 }
 
@@ -92,9 +92,11 @@ void MicrotaskQueue::EnqueueMicrotask(v8::Isolate* v8_isolate,
                                       void* data) {
   Isolate* isolate = reinterpret_cast<Isolate*>(v8_isolate);
   HandleScope scope(isolate);
-  Handle<CallbackTask> microtask = isolate->factory()->NewCallbackTask(
-      isolate->factory()->NewForeign(reinterpret_cast<Address>(callback)),
-      isolate->factory()->NewForeign(reinterpret_cast<Address>(data)));
+  DirectHandle<CallbackTask> microtask = isolate->factory()->NewCallbackTask(
+      isolate->factory()->NewForeign<kGenericForeignTag>(
+          reinterpret_cast<Address>(callback)),
+      isolate->factory()->NewForeign<kGenericForeignTag>(
+          reinterpret_cast<Address>(data)));
   EnqueueMicrotask(*microtask);
 }
 
@@ -166,6 +168,13 @@ int MicrotaskQueue::RunMicrotasks(Isolate* isolate) {
   HandleScope handle_scope(isolate);
   MaybeHandle<Object> maybe_result;
 
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+  DirectHandle<Object> continuation_preserved_embedder_data(
+      isolate->isolate_data()->continuation_preserved_embedder_data(), isolate);
+  isolate->isolate_data()->set_continuation_preserved_embedder_data(
+      ReadOnlyRoots(isolate).undefined_value());
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+
   int processed_microtask_count;
   {
     HandleScopeImplementer::EnteredContextRewindScope rewind_scope(
@@ -181,6 +190,11 @@ int MicrotaskQueue::RunMicrotasks(Isolate* isolate) {
                      processed_microtask_count);
   }
 
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+  isolate->isolate_data()->set_continuation_preserved_embedder_data(
+      *continuation_preserved_embedder_data);
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+
   if (isolate->is_execution_terminating()) {
     DCHECK(isolate->has_exception());
     DCHECK(maybe_result.is_null());
@@ -193,6 +207,7 @@ int MicrotaskQueue::RunMicrotasks(Isolate* isolate) {
     OnCompleted(isolate);
     return -1;
   }
+
   DCHECK_EQ(0, size());
   OnCompleted(isolate);
 
@@ -256,7 +271,7 @@ void MicrotaskQueue::OnCompleted(Isolate* isolate) const {
 Tagged<Microtask> MicrotaskQueue::get(intptr_t index) const {
   DCHECK_LT(index, size_);
   Tagged<Object> microtask(ring_buffer_[(index + start_) % capacity_]);
-  return Microtask::cast(microtask);
+  return Cast<Microtask>(microtask);
 }
 
 void MicrotaskQueue::ResizeBuffer(intptr_t new_capacity) {

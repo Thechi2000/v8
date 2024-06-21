@@ -153,9 +153,9 @@ Tagged<HeapObject> RelocInfo::target_object(PtrComprCageBase cage_base) {
     DCHECK(!HAS_SMI_TAG(compressed));
     Tagged<Object> obj(
         V8HeapCompressionScheme::DecompressTagged(cage_base, compressed));
-    return HeapObject::cast(obj);
+    return Cast<HeapObject>(obj);
   } else {
-    return HeapObject::cast(
+    return Cast<HeapObject>(
         Tagged<Object>(Assembler::target_address_at(pc_, constant_pool_)));
   }
 }
@@ -168,7 +168,7 @@ Handle<HeapObject> Assembler::compressed_embedded_object_handle_at(
 Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCodeTarget(rmode_)) {
-    return Handle<HeapObject>::cast(
+    return Cast<HeapObject>(
         origin->code_target_object_handle_at(pc_, constant_pool_));
   } else {
     if (IsCompressedEmbeddedObject(rmode_)) {

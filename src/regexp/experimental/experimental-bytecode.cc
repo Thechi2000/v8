@@ -68,6 +68,9 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
     case RegExpInstruction::SET_REGISTER_TO_CP:
       os << "SET_REGISTER_TO_CP " << inst.payload.register_index;
       break;
+    case RegExpInstruction::CLEAR_REGISTER:
+      os << "CLEAR_REGISTER " << inst.payload.register_index;
+      break;
     case RegExpInstruction::SET_QUANTIFIER_TO_CLOCK:
       os << "SET_QUANTIFIER_TO_CLOCK " << inst.payload.quantifier_id;
       break;
@@ -90,7 +93,7 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
       os << "END_LOOP";
       break;
     case RegExpInstruction::START_LOOKAROUND:
-      os << "START_LOOKBEHIND "
+      os << "START_LOOKAROUND "
          << inst.payload.start_lookaround.lookaround_index()
          << (inst.payload.start_lookaround.is_ahead() ? "(ahead)" : "(behind)");
       break;
@@ -102,6 +105,16 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
       break;
     case RegExpInstruction::READ_LOOKAROUND_TABLE:
       os << "READ_LOOKAROUND_TABLE "
+         << inst.payload.read_lookaround.lookaround_index() << " ("
+         << (inst.payload.read_lookaround.is_positive() ? "positive"
+                                                        : "negative")
+         << ")";
+      break;
+    case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
+      os << "WRITE_LOOKBEHIND_TABLE " << inst.payload.lookaround_id;
+      break;
+    case RegExpInstruction::READ_LOOKBEHIND_TABLE:
+      os << "READ_LOOKBEHIND_TABLE "
          << inst.payload.read_lookaround.lookaround_index() << " ("
          << (inst.payload.read_lookaround.is_positive() ? "positive"
                                                         : "negative")

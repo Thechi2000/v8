@@ -298,6 +298,8 @@ inline MemOperand MaglevAssembler::StackSlotOperand(StackSlot slot) {
   return MemOperand(fp, slot.index);
 }
 
+inline Register MaglevAssembler::GetFramePointer() { return fp; }
+
 // TODO(Victorgomes): Unify this to use StackSlot struct.
 inline MemOperand MaglevAssembler::GetStackSlot(
     const compiler::AllocatedOperand& operand) {
@@ -497,6 +499,18 @@ inline void MaglevAssembler::IncrementInt32(Register reg) {
   add(reg, reg, Operand(1));
 }
 
+inline void MaglevAssembler::DecrementInt32(Register reg) {
+  sub(reg, reg, Operand(1));
+}
+
+inline void MaglevAssembler::AddInt32(Register reg, int amount) {
+  add(reg, reg, Operand(amount));
+}
+
+inline void MaglevAssembler::ShiftLeft(Register reg, int amount) {
+  lsl(reg, reg, Operand(amount));
+}
+
 inline void MaglevAssembler::IncrementAddress(Register reg, int32_t delta) {
   add(reg, reg, Operand(delta));
 }
@@ -512,7 +526,7 @@ inline void MaglevAssembler::EmitEnterExitFrame(int extra_slots,
                                                 StackFrame::Type frame_type,
                                                 Register c_function,
                                                 Register scratch) {
-  EnterExitFrame(extra_slots, frame_type);
+  EnterExitFrame(scratch, extra_slots, frame_type);
 }
 
 inline void MaglevAssembler::Move(StackSlot dst, Register src) {

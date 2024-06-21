@@ -18,7 +18,7 @@ namespace v8 {
 class SharedArrayBuffer;
 
 #ifndef V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT
-// The number of required internal fields can be defined by embedder.
+// Defined using gn arg `v8_array_buffer_internal_field_count`.
 #define V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT 2
 #endif
 
@@ -87,6 +87,9 @@ class V8_EXPORT BackingStore : public v8::internal::BackingStoreBase {
    * Assumes that the backing_store was allocated by the ArrayBuffer allocator
    * of the given isolate.
    */
+  V8_DEPRECATED(
+      "Reallocate is unsafe, please do not use. Please allocate a new "
+      "BackingStore and copy instead.")
   static std::unique_ptr<BackingStore> Reallocate(
       v8::Isolate* isolate, std::unique_ptr<BackingStore> backing_store,
       size_t byte_length);
@@ -179,6 +182,9 @@ class V8_EXPORT ArrayBuffer : public Object {
      *
      * The default implementation allocates a new block and copies data.
      */
+    V8_DEPRECATED(
+        "Reallocate is unsafe, please do not use. Please allocate new memory "
+        "and copy instead.")
     virtual void* Reallocate(void* data, size_t old_length, size_t new_length);
 
     /**
@@ -287,7 +293,7 @@ class V8_EXPORT ArrayBuffer : public Object {
    * preventing JavaScript from ever accessing underlying backing store.
    * ArrayBuffer should have been externalized and must be detachable.
    */
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "Use the version which takes a key parameter (passing a null handle is "
       "ok).")
   void Detach();
@@ -337,8 +343,9 @@ class V8_EXPORT ArrayBuffer : public Object {
     return static_cast<ArrayBuffer*>(value);
   }
 
-  static const int kInternalFieldCount = V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT;
-  static const int kEmbedderFieldCount = V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT;
+  static constexpr int kInternalFieldCount =
+      V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT;
+  static constexpr int kEmbedderFieldCount = kInternalFieldCount;
 
  private:
   ArrayBuffer();
@@ -346,7 +353,7 @@ class V8_EXPORT ArrayBuffer : public Object {
 };
 
 #ifndef V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT
-// The number of required internal fields can be defined by embedder.
+// Defined using gn arg `v8_array_buffer_view_internal_field_count`.
 #define V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT 2
 #endif
 
@@ -393,10 +400,9 @@ class V8_EXPORT ArrayBufferView : public Object {
     return static_cast<ArrayBufferView*>(value);
   }
 
-  static const int kInternalFieldCount =
+  static constexpr int kInternalFieldCount =
       V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT;
-  static const int kEmbedderFieldCount =
-      V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT;
+  static const int kEmbedderFieldCount = kInternalFieldCount;
 
  private:
   ArrayBufferView();
@@ -506,7 +512,8 @@ class V8_EXPORT SharedArrayBuffer : public Object {
     return static_cast<SharedArrayBuffer*>(value);
   }
 
-  static const int kInternalFieldCount = V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT;
+  static constexpr int kInternalFieldCount =
+      V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT;
 
  private:
   SharedArrayBuffer();

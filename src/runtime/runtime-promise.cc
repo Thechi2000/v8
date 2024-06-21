@@ -63,9 +63,9 @@ RUNTIME_FUNCTION(Runtime_PromiseRevokeReject) {
 RUNTIME_FUNCTION(Runtime_EnqueueMicrotask) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
-  Handle<JSFunction> function = args.at<JSFunction>(0);
+  DirectHandle<JSFunction> function = args.at<JSFunction>(0);
 
-  Handle<CallableTask> microtask = isolate->factory()->NewCallableTask(
+  DirectHandle<CallableTask> microtask = isolate->factory()->NewCallableTask(
       function, handle(function->native_context(), isolate));
   MicrotaskQueue* microtask_queue =
       function->native_context()->microtask_queue();
@@ -92,13 +92,6 @@ RUNTIME_FUNCTION(Runtime_RunMicrotaskCallback) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-RUNTIME_FUNCTION(Runtime_PromiseStatus) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  Handle<JSPromise> promise = args.at<JSPromise>(0);
-  return Smi::FromInt(promise->status());
-}
-
 RUNTIME_FUNCTION(Runtime_PromiseHookInit) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
@@ -114,7 +107,7 @@ RUNTIME_FUNCTION(Runtime_PromiseHookBefore) {
   DCHECK_EQ(1, args.length());
   Handle<JSReceiver> promise = args.at<JSReceiver>(0);
   if (IsJSPromise(*promise)) {
-    isolate->OnPromiseBefore(Handle<JSPromise>::cast(promise));
+    isolate->OnPromiseBefore(Cast<JSPromise>(promise));
     RETURN_FAILURE_IF_EXCEPTION(isolate);
   }
   return ReadOnlyRoots(isolate).undefined_value();
@@ -125,7 +118,7 @@ RUNTIME_FUNCTION(Runtime_PromiseHookAfter) {
   DCHECK_EQ(1, args.length());
   Handle<JSReceiver> promise = args.at<JSReceiver>(0);
   if (IsJSPromise(*promise)) {
-    isolate->OnPromiseAfter(Handle<JSPromise>::cast(promise));
+    isolate->OnPromiseAfter(Cast<JSPromise>(promise));
     RETURN_FAILURE_IF_EXCEPTION(isolate);
   }
   return ReadOnlyRoots(isolate).undefined_value();
@@ -136,7 +129,7 @@ RUNTIME_FUNCTION(Runtime_RejectPromise) {
   DCHECK_EQ(3, args.length());
   Handle<JSPromise> promise = args.at<JSPromise>(0);
   Handle<Object> reason = args.at(1);
-  Handle<Boolean> debug_event = args.at<Boolean>(2);
+  DirectHandle<Boolean> debug_event = args.at<Boolean>(2);
   return *JSPromise::Reject(promise, reason,
                             Object::BooleanValue(*debug_event, isolate));
 }
@@ -159,7 +152,7 @@ RUNTIME_FUNCTION(Runtime_ConstructAggregateErrorHelper) {
   DCHECK_EQ(4, args.length());
   Handle<JSFunction> target = args.at<JSFunction>(0);
   Handle<Object> new_target = args.at(1);
-  Handle<Object> message = args.at(2);
+  DirectHandle<Object> message = args.at(2);
   Handle<Object> options = args.at(3);
 
   DCHECK_EQ(*target, *isolate->aggregate_error_function());
@@ -179,7 +172,7 @@ RUNTIME_FUNCTION(Runtime_ConstructInternalAggregateErrorHelper) {
   int message_template_index = args.smi_value_at(0);
 
   constexpr int kMaxMessageArgs = 3;
-  Handle<Object> message_args[kMaxMessageArgs];
+  DirectHandle<Object> message_args[kMaxMessageArgs];
   int num_message_args = 0;
 
   while (num_message_args < kMaxMessageArgs &&
@@ -190,7 +183,7 @@ RUNTIME_FUNCTION(Runtime_ConstructInternalAggregateErrorHelper) {
   Handle<Object> options =
       args.length() >= 5 ? args.at(4) : isolate->factory()->undefined_value();
 
-  Handle<Object> message_string =
+  DirectHandle<Object> message_string =
       MessageFormatter::Format(isolate, MessageTemplate(message_template_index),
                                base::VectorOf(message_args, num_message_args));
 

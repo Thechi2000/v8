@@ -156,7 +156,15 @@ void* ObjectAllocator::OutOfLineAllocateImpl(NormalPageSpace& space,
       result = TryAllocateLargeObject(page_backend_, large_space,
                                       stats_collector_, size, gcinfo);
       if (!result) {
+#if defined(CPPGC_CAGED_HEAP)
+        const std::string suffix =
+            CagedHeap::Instance().page_allocator().ran_out_of_reservation()
+                ? "Ran out of cage reservation."
+                : "";
+        oom_handler_("Oilpan: Large allocation." + suffix);
+#else
         oom_handler_("Oilpan: Large allocation.");
+#endif
       }
     }
     return result;
@@ -176,7 +184,15 @@ void* ObjectAllocator::OutOfLineAllocateImpl(NormalPageSpace& space,
         GCConfig::FreeMemoryHandling::kDiscardWherePossible;
     garbage_collector_.CollectGarbage(config);
     if (!TryRefillLinearAllocationBuffer(space, request_size)) {
+#if defined(CPPGC_CAGED_HEAP)
+      const std::string suffix =
+          CagedHeap::Instance().page_allocator().ran_out_of_reservation()
+              ? "Ran out of cage reservation."
+              : "";
+      oom_handler_("Oilpan: Normal allocation." + suffix);
+#else
       oom_handler_("Oilpan: Normal allocation.");
+#endif
     }
   }
 
@@ -307,6 +323,23 @@ void ObjectAllocator::MarkAllPagesAsYoung() {
 bool ObjectAllocator::in_disallow_gc_scope() const {
   return raw_heap_.heap()->IsGCForbidden();
 }
+
+#ifdef V8_ENABLE_ALLOCATION_TIMEOUT
+void ObjectAllocator::UpdateAllocationTimeout() {
+  allocation_timeout_ = garbage_collector_.UpdateAllocationTimeout();
+}
+
+void ObjectAllocator::TriggerGCOnAllocationTimeoutIfNeeded() {
+  if (!allocation_timeout_) return;
+  DCHECK_GT(*allocation_timeout_, 0);
+  if (--*allocation_timeout_ == 0) {
+    garbage_collector_.CollectGarbage(GCConfig::ConservativeAtomicConfig());
+    allocation_timeout_ = garbage_collector_.UpdateAllocationTimeout();
+    DCHECK(allocation_timeout_);
+    DCHECK_GT(*allocation_timeout_, 0);
+  }
+}
+#endif  // V8_ENABLE_ALLOCATION_TIMEOUT
 
 }  // namespace internal
 }  // namespace cppgc

@@ -18,21 +18,58 @@ static void CheckReturnValue(const T& info, i::Address callback) {
   CHECK_EQ(CcTest::isolate(), info.GetIsolate());
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
   CHECK_EQ(info.GetIsolate(), returnValue.GetIsolate());
+
+  auto CheckValueMap = [](const v8::ReturnValue<v8::Value>& returnValue) {
+    i::Tagged<i::Object> obj = *v8::Utils::OpenHandle(*returnValue.Get());
+    i::Tagged<i::HeapObject> heap_obj;
+    if (obj.GetHeapObject(&heap_obj)) {
+      return i::IsMap(heap_obj->map());
+    }
+    return true;
+  };
+
+  // TODO(ishell): refactor the whole test.
   CHECK(IsTheHole(*returnObjectSlot, isolate) ||
-        IsUndefined(*returnObjectSlot, isolate));
+        IsUndefined(*returnObjectSlot, isolate) ||
+        // This is a default value for Deleter callbacks.
+        IsFalse(*returnObjectSlot, isolate) ||
+        // This is a default value for Query callbacks.
+        (*returnObjectSlot == i::Smi::FromInt(v8::None)));
+  CHECK(CheckValueMap(returnValue));
   // Verify reset
   bool is_runtime = IsTheHole(*returnObjectSlot, isolate);
   if (is_runtime) {
     CHECK(returnValue.Get()->IsUndefined());
   } else {
-    i::Handle<i::Object> v = v8::Utils::OpenHandle(*returnValue.Get());
+    i::DirectHandle<i::Object> v =
+        v8::Utils::OpenDirectHandle(*returnValue.Get());
     CHECK_EQ(*v, *returnObjectSlot);
   }
   returnValue.Set(true);
   CHECK_EQ(*returnObjectSlot, i::ReadOnlyRoots(isolate).true_value());
+  CHECK(CheckValueMap(returnValue));
+
+  returnValue.Set(42);
+  CHECK_EQ(*returnObjectSlot, i::Smi::FromInt(42));
+  CHECK(CheckValueMap(returnValue));
+
+  returnValue.SetNull();
+  CHECK_EQ(*returnObjectSlot, i::ReadOnlyRoots(isolate).null_value());
+  CHECK(CheckValueMap(returnValue));
+
+  returnValue.Set(-153);
+  CHECK_EQ(*returnObjectSlot, i::Smi::FromInt(-153));
+  CHECK(CheckValueMap(returnValue));
+
   returnValue.Set(v8::Local<v8::Object>());
   CHECK(IsTheHole(*returnObjectSlot, isolate) ||
-        IsUndefined(*returnObjectSlot, isolate));
+        IsUndefined(*returnObjectSlot, isolate) ||
+        // This is a default value for Deleter callbacks.
+        IsFalse(*returnObjectSlot, isolate) ||
+        // This is a default value for Query callbacks.
+        (*returnObjectSlot == i::Smi::FromInt(v8::None)));
+  CHECK(CheckValueMap(returnValue));
+
   // If CPU profiler is active check that when API callback is invoked
   // VMState is set to EXTERNAL.
   if (isolate->is_profiling()) {

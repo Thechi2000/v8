@@ -38,7 +38,7 @@ class MaglevCodeGenerator final {
   void EmitMetadata();
   void RecordInlinedFunctions();
 
-  GlobalHandleVector<Map> CollectRetainedMaps(Handle<Code> code);
+  GlobalHandleVector<Map> CollectRetainedMaps(DirectHandle<Code> code);
   Handle<DeoptimizationData> GenerateDeoptimizationData(
       LocalIsolate* local_isolate);
   MaybeHandle<Code> BuildCodeObject(LocalIsolate* local_isolate);
@@ -47,6 +47,7 @@ class MaglevCodeGenerator final {
   int stack_slot_count_with_fixed_frame() const {
     return stack_slot_count() + StandardFrameConstants::kFixedSlotCount;
   }
+  uint16_t parameter_count() const { return code_gen_state_.parameter_count(); }
 
   MaglevAssembler* masm() { return &masm_; }
 

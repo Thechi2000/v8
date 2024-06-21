@@ -592,6 +592,9 @@ TEST(HeapSnapshotSlicedString) {
   heap_profiler->DeleteAllHeapSnapshots();
 }
 
+// Allow usages of v8::Object::GetPrototype() for now.
+// TODO(https://crbug.com/333672197): remove.
+START_ALLOW_USE_DEPRECATED()
 
 TEST(HeapSnapshotConsString) {
   v8::Isolate* isolate = CcTest::isolate();
@@ -601,6 +604,7 @@ TEST(HeapSnapshotConsString) {
   global_template->SetInternalFieldCount(1);
   LocalContext env(nullptr, global_template);
   v8::Local<v8::Object> global_proxy = env->Global();
+  CHECK_EQ(1, global_proxy->InternalFieldCount());
   v8::Local<v8::Object> global = global_proxy->GetPrototype().As<v8::Object>();
   CHECK_EQ(1, global->InternalFieldCount());
 
@@ -610,6 +614,7 @@ TEST(HeapSnapshotConsString) {
   i::Handle<i::String> cons_string =
       factory->NewConsString(first, second).ToHandleChecked();
 
+  global_proxy->SetInternalField(0, v8::ToApiHandle<v8::String>(cons_string));
   global->SetInternalField(0, v8::ToApiHandle<v8::String>(cons_string));
 
   v8::HeapProfiler* heap_profiler = isolate->GetHeapProfiler();
@@ -633,6 +638,9 @@ TEST(HeapSnapshotConsString) {
   heap_profiler->DeleteAllHeapSnapshots();
 }
 
+// Allow usages of v8::Object::GetPrototype() for now.
+// TODO(https://crbug.com/333672197): remove.
+END_ALLOW_USE_DEPRECATED()
 
 TEST(HeapSnapshotSymbol) {
   LocalContext env;
@@ -831,6 +839,10 @@ TEST(HeapSnapshotMap) {
                     "transition"));
 }
 
+// Allow usages of v8::Object::GetPrototype() for now.
+// TODO(https://crbug.com/333672197): remove.
+START_ALLOW_USE_DEPRECATED()
+
 TEST(HeapSnapshotInternalReferences) {
   v8::Isolate* isolate = CcTest::isolate();
   v8::HandleScope scope(isolate);
@@ -855,6 +867,10 @@ TEST(HeapSnapshotInternalReferences) {
   CHECK(GetProperty(env->GetIsolate(), global_node,
                     v8::HeapGraphEdge::kInternal, "1"));
 }
+
+// Allow usages of v8::Object::GetPrototype() for now.
+// TODO(https://crbug.com/333672197): remove.
+END_ALLOW_USE_DEPRECATED()
 
 TEST(HeapSnapshotEphemeron) {
   LocalContext env;
@@ -1756,7 +1772,7 @@ class EmbedderGraphBuilderForNativeSnapshotObjectId final {
     BuildParameter* parameter = reinterpret_cast<BuildParameter*>(data);
     v8::Local<v8::String> local_str =
         v8::Local<v8::String>::New(isolate, *(parameter->wrapper));
-    auto* v8_node = graph->V8Node(local_str);
+    auto* v8_node = graph->V8Node(local_str.As<v8::Value>());
     CHECK(!v8_node->IsEmbedderNode());
     auto* root_node =
         graph->AddNode(std::unique_ptr<RootNode>(new RootNode("root")));
@@ -1848,9 +1864,10 @@ TEST(NativeSnapshotObjectIdMoving) {
   {
     v8::HandleScope inner_scope(isolate);
     auto local = v8::Local<v8::String>::New(isolate, wrapper);
-    i::Handle<i::String> internal = i::Handle<i::String>::cast(
-        v8::Utils::OpenHandle(*v8::Local<v8::String>::Cast(local)));
-    i::heap::ForceEvacuationCandidate(i::Page::FromHeapObject(*internal));
+    i::DirectHandle<i::String> internal = i::Cast<i::String>(
+        v8::Utils::OpenDirectHandle(*v8::Local<v8::String>::Cast(local)));
+    i::heap::ForceEvacuationCandidate(
+        i::PageMetadata::FromHeapObject(*internal));
   }
   i::heap::InvokeMajorGC(CcTest::heap());
 
@@ -2002,6 +2019,9 @@ TEST(NodesIteration) {
   CHECK_EQ(1, count);
 }
 
+// Allow usages of v8::Object::GetPrototype() for now.
+// TODO(https://crbug.com/333672197): remove.
+START_ALLOW_USE_DEPRECATED()
 
 TEST(GetHeapValueForNode) {
   LocalContext env;
@@ -2061,7 +2081,13 @@ TEST(GetHeapValueForDeletedObject) {
     CHECK(heap_profiler->FindObjectById(prop->GetId())->IsObject());
   }
   CompileRun("delete a.p;");
-  CHECK(heap_profiler->FindObjectById(prop->GetId()).IsEmpty());
+  {
+    // Exclude the stack during object finding, so that conservative stack
+    // scanning may not accidentally mark the object as reachable.
+    i::Heap* heap = reinterpret_cast<i::Isolate*>(env->GetIsolate())->heap();
+    i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
+    CHECK(heap_profiler->FindObjectById(prop->GetId()).IsEmpty());
+  }
 }
 
 static int StringCmp(const char* ref, i::Tagged<i::String> act) {
@@ -2096,38 +2122,38 @@ TEST(GetConstructor) {
   v8::Local<v8::Object> obj1 = js_global->Get(env.local(), v8_str("obj1"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj1 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj1));
+  i::DirectHandle<i::JSObject> js_obj1 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj1));
   CHECK(!i::V8HeapExplorer::GetConstructor(i_isolate, *js_obj1).is_null());
   v8::Local<v8::Object> obj2 = js_global->Get(env.local(), v8_str("obj2"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj2 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj2));
+  i::DirectHandle<i::JSObject> js_obj2 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj2));
   CHECK(!i::V8HeapExplorer::GetConstructor(i_isolate, *js_obj2).is_null());
   v8::Local<v8::Object> obj3 = js_global->Get(env.local(), v8_str("obj3"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj3 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj3));
+  i::DirectHandle<i::JSObject> js_obj3 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj3));
   CHECK(!i::V8HeapExplorer::GetConstructor(i_isolate, *js_obj3).is_null());
   v8::Local<v8::Object> obj4 = js_global->Get(env.local(), v8_str("obj4"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj4 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj4));
+  i::DirectHandle<i::JSObject> js_obj4 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj4));
   CHECK(!i::V8HeapExplorer::GetConstructor(i_isolate, *js_obj4).is_null());
   v8::Local<v8::Object> obj5 = js_global->Get(env.local(), v8_str("obj5"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj5 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj5));
+  i::DirectHandle<i::JSObject> js_obj5 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj5));
   CHECK(i::V8HeapExplorer::GetConstructor(i_isolate, *js_obj5).is_null());
   v8::Local<v8::Object> obj6 = js_global->Get(env.local(), v8_str("obj6"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj6 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj6));
+  i::DirectHandle<i::JSObject> js_obj6 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj6));
   CHECK(i::V8HeapExplorer::GetConstructor(i_isolate, *js_obj6).is_null());
 }
 
@@ -2155,47 +2181,50 @@ TEST(GetConstructorName) {
   v8::Local<v8::Object> obj1 = js_global->Get(env.local(), v8_str("obj1"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj1 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj1));
+  i::DirectHandle<i::JSObject> js_obj1 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj1));
   CHECK_EQ(0, StringCmp("Constructor1", i::V8HeapExplorer::GetConstructorName(
                                             i_isolate, *js_obj1)));
   v8::Local<v8::Object> obj2 = js_global->Get(env.local(), v8_str("obj2"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj2 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj2));
+  i::DirectHandle<i::JSObject> js_obj2 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj2));
   CHECK_EQ(0, StringCmp("Constructor2", i::V8HeapExplorer::GetConstructorName(
                                             i_isolate, *js_obj2)));
   v8::Local<v8::Object> obj3 = js_global->Get(env.local(), v8_str("obj3"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj3 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj3));
+  i::DirectHandle<i::JSObject> js_obj3 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj3));
   CHECK_EQ(0, StringCmp("Constructor3", i::V8HeapExplorer::GetConstructorName(
                                             i_isolate, *js_obj3)));
   v8::Local<v8::Object> obj4 = js_global->Get(env.local(), v8_str("obj4"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj4 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj4));
+  i::DirectHandle<i::JSObject> js_obj4 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj4));
   CHECK_EQ(0, StringCmp("Constructor4", i::V8HeapExplorer::GetConstructorName(
                                             i_isolate, *js_obj4)));
   v8::Local<v8::Object> obj5 = js_global->Get(env.local(), v8_str("obj5"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj5 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj5));
+  i::DirectHandle<i::JSObject> js_obj5 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj5));
   CHECK_EQ(0, StringCmp("Object", i::V8HeapExplorer::GetConstructorName(
                                       i_isolate, *js_obj5)));
   v8::Local<v8::Object> obj6 = js_global->Get(env.local(), v8_str("obj6"))
                                    .ToLocalChecked()
                                    .As<v8::Object>();
-  i::Handle<i::JSObject> js_obj6 =
-      i::Handle<i::JSObject>::cast(v8::Utils::OpenHandle(*obj6));
+  i::DirectHandle<i::JSObject> js_obj6 =
+      i::Cast<i::JSObject>(v8::Utils::OpenDirectHandle(*obj6));
   CHECK_EQ(0, StringCmp("Object", i::V8HeapExplorer::GetConstructorName(
                                       i_isolate, *js_obj6)));
 }
 
+// Allow usages of v8::Object::GetPrototype() for now.
+// TODO(https://crbug.com/333672197): remove.
+END_ALLOW_USE_DEPRECATED()
 
 TEST(FastCaseAccessors) {
   LocalContext env;
@@ -2232,6 +2261,9 @@ TEST(FastCaseAccessors) {
   CHECK(!func);
 }
 
+// Allow usages of v8::Object::GetPrototype() for now.
+// TODO(https://crbug.com/333672197): remove.
+START_ALLOW_USE_DEPRECATED()
 
 TEST(FastCaseRedefinedAccessors) {
   LocalContext env;
@@ -2276,6 +2308,9 @@ TEST(FastCaseRedefinedAccessors) {
   CHECK(func);
 }
 
+// Allow usages of v8::Object::GetPrototype() for now.
+// TODO(https://crbug.com/333672197): remove.
+END_ALLOW_USE_DEPRECATED()
 
 TEST(SlowCaseAccessors) {
   LocalContext env;
@@ -2834,8 +2869,6 @@ TEST(ArrayGrowLeftTrim) {
   AllocationTracker* tracker =
       reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
   CHECK(tracker);
-  // Resolve all function locations.
-  tracker->PrepareForSerialization();
   // Print for better diagnostics in case of failure.
   tracker->trace_tree()->Print(tracker);
 
@@ -2858,8 +2891,6 @@ TEST(TrackHeapAllocationsWithInlining) {
   AllocationTracker* tracker =
       reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
   CHECK(tracker);
-  // Resolve all function locations.
-  tracker->PrepareForSerialization();
   // Print for better diagnostics in case of failure.
   tracker->trace_tree()->Print(tracker);
 
@@ -2892,8 +2923,6 @@ TEST(TrackHeapAllocationsWithoutInlining) {
   AllocationTracker* tracker =
       reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
   CHECK(tracker);
-  // Resolve all function locations.
-  tracker->PrepareForSerialization();
   // Print for better diagnostics in case of failure.
   tracker->trace_tree()->Print(tracker);
 
@@ -2942,8 +2971,6 @@ TEST(TrackBumpPointerAllocations) {
     AllocationTracker* tracker =
         reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
     CHECK(tracker);
-    // Resolve all function locations.
-    tracker->PrepareForSerialization();
     // Print for better diagnostics in case of failure.
     tracker->trace_tree()->Print(tracker);
 
@@ -2968,8 +2995,6 @@ TEST(TrackBumpPointerAllocations) {
     AllocationTracker* tracker =
         reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
     CHECK(tracker);
-    // Resolve all function locations.
-    tracker->PrepareForSerialization();
     // Print for better diagnostics in case of failure.
     tracker->trace_tree()->Print(tracker);
 
@@ -2997,8 +3022,6 @@ TEST(TrackV8ApiAllocation) {
   AllocationTracker* tracker =
       reinterpret_cast<i::HeapProfiler*>(heap_profiler)->allocation_tracker();
   CHECK(tracker);
-  // Resolve all function locations.
-  tracker->PrepareForSerialization();
   // Print for better diagnostics in case of failure.
   tracker->trace_tree()->Print(tracker);
 
@@ -3960,8 +3983,8 @@ TEST(SamplingHeapProfilerPretenuredInlineAllocations) {
 
   // Make sure the function is producing pre-tenured objects.
   auto res = f->Call(env.local(), env->Global(), 0, nullptr).ToLocalChecked();
-  i::Handle<i::JSObject> o = i::Handle<i::JSObject>::cast(
-      v8::Utils::OpenHandle(*v8::Local<v8::Object>::Cast(res)));
+  i::DirectHandle<i::JSObject> o = i::Cast<i::JSObject>(
+      v8::Utils::OpenDirectHandle(*v8::Local<v8::Object>::Cast(res)));
   CHECK(CcTest::heap()->InOldSpace(o->elements()));
   CHECK(CcTest::heap()->InOldSpace(*o));
 
@@ -4149,22 +4172,21 @@ TEST(WeakReference) {
   v8::MaybeLocal<v8::Value> value = script->Run(isolate->GetCurrentContext());
   CHECK(!value.IsEmpty());
 
-  i::Handle<i::Object> obj = v8::Utils::OpenHandle(*script);
-  i::Handle<i::SharedFunctionInfo> shared_function =
-      i::Handle<i::SharedFunctionInfo>(i::JSFunction::cast(*obj)->shared(),
-                                       i_isolate);
-  i::Handle<i::ClosureFeedbackCellArray> feedback_cell_array =
+  i::DirectHandle<i::Object> obj = v8::Utils::OpenDirectHandle(*script);
+  i::DirectHandle<i::SharedFunctionInfo> shared_function(
+      i::Cast<i::JSFunction>(*obj)->shared(), i_isolate);
+  i::DirectHandle<i::ClosureFeedbackCellArray> feedback_cell_array =
       i::ClosureFeedbackCellArray::New(i_isolate, shared_function);
-  i::Handle<i::FeedbackVector> fv = factory->NewFeedbackVector(
+  i::DirectHandle<i::FeedbackVector> fv = factory->NewFeedbackVector(
       shared_function, feedback_cell_array,
-      handle(i::JSFunction::cast(*obj)->raw_feedback_cell(), i_isolate));
+      handle(i::Cast<i::JSFunction>(*obj)->raw_feedback_cell(), i_isolate));
 
   // Create a Code object.
   i::Assembler assm(i::AssemblerOptions{});
   assm.nop();  // supported on all architectures
   i::CodeDesc desc;
   assm.GetCode(i_isolate, &desc);
-  i::Handle<i::Code> code =
+  i::DirectHandle<i::Code> code =
       i::Factory::CodeBuilder(i_isolate, desc, i::CodeKind::FOR_TESTING)
           .Build();
   CHECK(IsCode(*code));

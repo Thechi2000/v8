@@ -56,12 +56,14 @@ inline v8::internal::Address ToCData(
     v8::internal::Tagged<v8::internal::Object> obj);
 
 template <typename T>
-inline v8::internal::Handle<v8::internal::Object> FromCData(
-    v8::internal::Isolate* isolate, T obj);
+inline v8::internal::Handle<
+    v8::internal::UnionOf<v8::internal::Smi, v8::internal::Foreign>>
+FromCData(v8::internal::Isolate* isolate, T obj);
 
 template <>
-inline v8::internal::Handle<v8::internal::Object> FromCData(
-    v8::internal::Isolate* isolate, v8::internal::Address obj);
+inline v8::internal::Handle<
+    v8::internal::UnionOf<v8::internal::Smi, v8::internal::Foreign>>
+FromCData(v8::internal::Isolate* isolate, v8::internal::Address obj);
 
 class ApiFunction {
  public:
@@ -127,7 +129,8 @@ class RegisteredExtension {
   V(ToLocalPrimitive, Object, Primitive)                 \
   V(FixedArrayToLocal, FixedArray, FixedArray)           \
   V(PrimitiveArrayToLocal, FixedArray, PrimitiveArray)   \
-  V(ToLocal, ScriptOrModule, ScriptOrModule)
+  V(ToLocal, ScriptOrModule, ScriptOrModule)             \
+  IF_WASM(V, ToLocal, WasmModuleObject, WasmModuleObject)
 
 #define OPEN_HANDLE_LIST(V)                     \
   V(Template, TemplateInfo)                     \
@@ -136,6 +139,7 @@ class RegisteredExtension {
   V(DictionaryTemplate, DictionaryTemplateInfo) \
   V(Signature, FunctionTemplateInfo)            \
   V(Data, Object)                               \
+  V(Number, Number)                             \
   V(RegExp, JSRegExp)                           \
   V(Object, JSReceiver)                         \
   V(Array, JSArray)                             \
@@ -151,6 +155,7 @@ class RegisteredExtension {
   V(Int16Array, JSTypedArray)                   \
   V(Uint32Array, JSTypedArray)                  \
   V(Int32Array, JSTypedArray)                   \
+  V(Float16Array, JSTypedArray)                 \
   V(Float32Array, JSTypedArray)                 \
   V(Float64Array, JSTypedArray)                 \
   V(DataView, JSDataViewOrRabGsabDataView)      \
@@ -163,6 +168,7 @@ class RegisteredExtension {
   V(UnboundScript, SharedFunctionInfo)          \
   V(Module, Module)                             \
   V(Function, JSReceiver)                       \
+  V(CompileHintsCollector, Script)              \
   V(Message, JSMessageObject)                   \
   V(Context, NativeContext)                     \
   V(External, Object)                           \

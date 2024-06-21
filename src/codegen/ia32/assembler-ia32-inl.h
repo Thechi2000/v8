@@ -82,12 +82,12 @@ int RelocInfo::target_address_size() { return Assembler::kSpecialTargetSize; }
 
 Tagged<HeapObject> RelocInfo::target_object(PtrComprCageBase cage_base) {
   DCHECK(IsCodeTarget(rmode_) || IsFullEmbeddedObject(rmode_));
-  return HeapObject::cast(Tagged<Object>(ReadUnalignedValue<Address>(pc_)));
+  return Cast<HeapObject>(Tagged<Object>(ReadUnalignedValue<Address>(pc_)));
 }
 
 Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   DCHECK(IsCodeTarget(rmode_) || IsFullEmbeddedObject(rmode_));
-  return Handle<HeapObject>::cast(ReadUnalignedValue<Handle<Object>>(pc_));
+  return Cast<HeapObject>(ReadUnalignedValue<Handle<Object>>(pc_));
 }
 
 void WritableRelocInfo::set_target_object(Tagged<HeapObject> target,

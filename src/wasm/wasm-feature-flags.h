@@ -9,6 +9,16 @@
 #ifndef V8_WASM_WASM_FEATURE_FLAGS_H_
 #define V8_WASM_WASM_FEATURE_FLAGS_H_
 
+// Each entry in this file generates a V8 command-line flag with the prefix
+// "--experimental-wasm-".
+//
+// For example, to enable "my_feature", pass
+// --experimental-wasm-my-feature to d8, or
+// --js-flags=--experimental-wasm-my-feature to Chrome.
+//
+// To disable "my_feature", add the "--no-" prefix:
+// --no-experimental-wasm-my-feature.
+//
 // See https://github.com/WebAssembly/proposals for an overview of current
 // WebAssembly proposals.
 
@@ -44,11 +54,6 @@
   /* https://github.com/WebAssembly/stack-switching */                         \
   /* V8 side owner: thibaudm, fgm */                                           \
   V(stack_switching, "stack switching", false)                                 \
-                                                                               \
-  /* JavaScript Promise Integration proposal. */                               \
-  /* https://github.com/WebAssembly/js-promise-integration */                  \
-  /* V8 side owner: thibaudm, fgm */                                           \
-  V(jspi, "javascript promise integration", false)                             \
                                                                                \
   /* Shared-Everything Threads proposal. */                                    \
   /* https://github.com/WebAssembly/shared-everything-threads */               \
@@ -87,17 +92,15 @@
   /* V8 side owner: jkummerow */                                               \
   V(imported_strings, "imported strings", false)                               \
                                                                                \
-  /* Not user-visible, defined here so an Origin Trial can control it. */      \
-  /* V8 side owner: manoskouk, clemensb */                                     \
-  /* Staged in v11.3 */                                                        \
-  /* Shipped for wasm-gc modules as part of wasm-gc in v11.9 */                \
-  /* Launch bug: https://crbug.com/1424350 */                                  \
-  V(inlining, "wasm-into-wasm inlining", false)                                \
-                                                                               \
   /* Exnref */                                                                 \
   /* This flag enables the new exception handling proposal */                  \
   /* V8 side owner: thibaudm */                                                \
-  V(exnref, "exnref", false)
+  V(exnref, "exnref", false)                                                   \
+                                                                               \
+  /* JavaScript Promise Integration proposal. */                               \
+  /* https://github.com/WebAssembly/js-promise-integration */                  \
+  /* V8 side owner: thibaudm, fgm */                                           \
+  V(jspi, "javascript promise integration", false)
 
 // #############################################################################
 // Shipped features (enabled by default). Remove the feature flag once they hit
@@ -110,7 +113,22 @@
   /* Shipped in v12.0. */                                                      \
   /* ITS: */                                                                   \
   /* https://groups.google.com/a/chromium.org/g/blink-dev/c/WSrXwhKeSas */     \
-  V(multi_memory, "multi-memory", true)
+  V(multi_memory, "multi-memory", true)                                        \
+                                                                               \
+  /* Legacy exception handling proposal. */                                    \
+  /* https://github.com/WebAssembly/exception-handling */                      \
+  /* V8 side owner: thibaudm */                                                \
+  /* Staged in v8.9 */                                                         \
+  /* Shipped in v9.5 */                                                        \
+  V(legacy_eh, "legacy exception handling opcodes", true)                      \
+                                                                               \
+  /* Not user-visible, defined here so an Origin Trial can control it. */      \
+  /* V8 side owner: manoskouk, clemensb */                                     \
+  /* Staged in v11.3 */                                                        \
+  /* Shipped in V12.7 */                                                       \
+  /* Shipped for wasm-gc modules as part of wasm-gc in v11.9 */                \
+  /* Launch bug: https://crbug.com/40898108 */                                 \
+  V(inlining, "wasm-into-wasm inlining", true)
 
 // Combination of all available wasm feature flags.
 #define FOREACH_WASM_FEATURE_FLAG(V)        \

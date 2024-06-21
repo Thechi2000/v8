@@ -132,3 +132,8 @@ Test(/(?:(?:(a)|b){2,}|c)*/, 'abcabc', ['abcabc', undefined], 0);
 Test(/(?:(?:(a)|b){1}|c){3,4}/, 'abcabc', ['abca', 'a'], 0);
 Test(/(?:(?:(a)|b)*?|c)+?/, 'abcaac', ['', undefined], 0);
 Test(/(?:(?:(a)|b)+|c){3}/, 'bbcbac', ['bbcba', 'a'], 0);
+
+// This test allows to detect abnormal memory usage. Itself cannot check the
+// consumption or trigger an out-of-memory error, but it creates a detectable
+// anomaly.
+Test(/(((((a?)+)+)+)+)b/, ('a'.repeat(100000)), null, 0);

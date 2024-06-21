@@ -70,7 +70,7 @@ class ReadOnlyHeapImageDeserializer final {
 
   void DeserializeSegment() {
     uint32_t page_index = source_->GetUint30();
-    ReadOnlyPage* page = PageAt(page_index);
+    ReadOnlyPageMetadata* page = PageAt(page_index);
 
     // Copy over raw contents.
     Address start = page->area_start() + source_->GetUint30();
@@ -92,7 +92,7 @@ class ReadOnlyHeapImageDeserializer final {
   }
 
   Address Decode(ro::EncodedTagged encoded) const {
-    ReadOnlyPage* page = PageAt(encoded.page_index);
+    ReadOnlyPageMetadata* page = PageAt(encoded.page_index);
     return page->OffsetToAddress(encoded.offset * kTaggedSize);
   }
 
@@ -114,7 +114,7 @@ class ReadOnlyHeapImageDeserializer final {
     }
   }
 
-  ReadOnlyPage* PageAt(size_t index) const {
+  ReadOnlyPageMetadata* PageAt(size_t index) const {
     DCHECK_LT(index, ro_space()->pages().size());
     return ro_space()->pages()[index];
   }
@@ -207,7 +207,7 @@ class ObjectPostProcessor final {
   }
 #define POST_PROCESS_TYPE_LIST(V) \
   V(AccessorInfo)                 \
-  V(CallHandlerInfo)              \
+  V(FunctionTemplateInfo)         \
   V(Code)                         \
   V(SharedFunctionInfo)
 
@@ -216,7 +216,7 @@ class ObjectPostProcessor final {
     DCHECK_EQ(o->map(isolate_)->instance_type(), instance_type);
 #define V(TYPE)                                       \
   if (InstanceTypeChecker::Is##TYPE(instance_type)) { \
-    return PostProcess##TYPE(TYPE::cast(o));          \
+    return PostProcess##TYPE(Cast<TYPE>(o));          \
   }
     POST_PROCESS_TYPE_LIST(V)
 #undef V
@@ -240,7 +240,8 @@ class ObjectPostProcessor final {
     return isolate_->external_reference_table_unsafe()->address(index);
   }
 
-  void DecodeExternalPointerSlot(ExternalPointerSlot slot) {
+  void DecodeExternalPointerSlot(Tagged<HeapObject> host,
+                                 ExternalPointerSlot slot) {
     // Constructing no_gc here is not the intended use pattern (instead we
     // should pass it along the entire callchain); but there's little point of
     // doing that here - all of the code in this file relies on GC being
@@ -250,7 +251,7 @@ class ObjectPostProcessor final {
         slot.GetContentAsIndexAfterDeserialization(no_gc));
     Address slot_value =
         GetAnyExternalReferenceAt(encoded.index, encoded.is_api_reference);
-    slot.init(isolate_, slot_value);
+    slot.init(isolate_, host, slot_value);
 #ifdef V8_ENABLE_SANDBOX
     // Register these slots during deserialization s.t. later isolates (which
     // share the RO space we are currently deserializing) can properly
@@ -261,16 +262,19 @@ class ObjectPostProcessor final {
 #endif  // V8_ENABLE_SANDBOX
   }
   void PostProcessAccessorInfo(Tagged<AccessorInfo> o) {
-    DecodeExternalPointerSlot(o->RawExternalPointerField(
-        AccessorInfo::kSetterOffset, kAccessorInfoSetterTag));
-    DecodeExternalPointerSlot(o->RawExternalPointerField(
-        AccessorInfo::kMaybeRedirectedGetterOffset, kAccessorInfoGetterTag));
+    DecodeExternalPointerSlot(
+        o, o->RawExternalPointerField(AccessorInfo::kSetterOffset,
+                                      kAccessorInfoSetterTag));
+    DecodeExternalPointerSlot(o, o->RawExternalPointerField(
+                                     AccessorInfo::kMaybeRedirectedGetterOffset,
+                                     kAccessorInfoGetterTag));
     if (USE_SIMULATOR_BOOL) o->init_getter_redirection(isolate_);
   }
-  void PostProcessCallHandlerInfo(Tagged<CallHandlerInfo> o) {
-    DecodeExternalPointerSlot(o->RawExternalPointerField(
-        CallHandlerInfo::kMaybeRedirectedCallbackOffset,
-        kCallHandlerInfoCallbackTag));
+  void PostProcessFunctionTemplateInfo(Tagged<FunctionTemplateInfo> o) {
+    DecodeExternalPointerSlot(
+        o, o->RawExternalPointerField(
+               FunctionTemplateInfo::kMaybeRedirectedCallbackOffset,
+               kFunctionTemplateInfoCallbackTag));
     if (USE_SIMULATOR_BOOL) o->init_callback_redirection(isolate_);
   }
   void PostProcessCode(Tagged<Code> o) {
@@ -313,7 +317,7 @@ void ReadOnlyDeserializer::PostProcessNewObjects() {
     const InstanceType instance_type = o->map(cage_base)->instance_type();
     if (should_rehash()) {
       if (InstanceTypeChecker::IsString(instance_type)) {
-        Tagged<String> str = String::cast(o);
+        Tagged<String> str = Cast<String>(o);
         str->set_raw_hash_field(Name::kEmptyHashField);
         PushObjectToRehash(handle(str, isolate()));
       } else if (o->NeedsRehashing(instance_type)) {

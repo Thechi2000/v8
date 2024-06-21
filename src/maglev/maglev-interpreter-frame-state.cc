@@ -54,6 +54,14 @@ void KnownNodeAspects::Merge(const KnownNodeAspects& other, Zone* zone) {
                          merge_loaded_properties);
   DestructivelyIntersect(loaded_context_constants,
                          other.loaded_context_constants);
+  if (may_have_aliasing_contexts != other.may_have_aliasing_contexts) {
+    if (may_have_aliasing_contexts == ContextSlotLoadsAlias::None) {
+      may_have_aliasing_contexts = other.may_have_aliasing_contexts;
+    } else if (other.may_have_aliasing_contexts !=
+               ContextSlotLoadsAlias::None) {
+      may_have_aliasing_contexts = ContextSlotLoadsAlias::Yes;
+    }
+  }
   DestructivelyIntersect(loaded_context_slots, other.loaded_context_slots);
 }
 
@@ -146,12 +154,14 @@ MergePointInterpreterFrameState*
 MergePointInterpreterFrameState::NewForCatchBlock(
     const MaglevCompilationUnit& unit,
     const compiler::BytecodeLivenessState* liveness, int handler_offset,
-    interpreter::Register context_register, Graph* graph) {
+    bool was_used, interpreter::Register context_register, Graph* graph) {
   Zone* const zone = unit.zone();
   MergePointInterpreterFrameState* state =
       zone->New<MergePointInterpreterFrameState>(
           unit, handler_offset, 0, 0, nullptr,
-          BasicBlockType::kExceptionHandlerStart, liveness);
+          was_used ? BasicBlockType::kExceptionHandlerStart
+                   : BasicBlockType::kUnusedExceptionHandlerStart,
+          liveness);
   auto& frame_state = state->frame_state_;
   // If the accumulator is live, the ExceptionPhi associated to it is the
   // first one in the block. That ensures it gets kReturnValue0 in the
@@ -306,49 +316,58 @@ void MergePointInterpreterFrameState::MergeLoop(
       });
   predecessors_so_far_++;
   DCHECK_EQ(predecessors_so_far_, predecessor_count_);
+
+  // We have to clear the LoopInfo (which is used to record more precise use
+  // hints for Phis) for 2 reasons:
+  //
+  //  - Phi::RecordUseReprHint checks if a use is inside the loop defining the
+  //    Phi by checking if the LoopInfo of the loop Phi "Contains" the current
+  //    bytecode offset, but this will be wrong if the Phi is in a function that
+  //    was inlined (because the LoopInfo contains the first and last bytecode
+  //    offset of the loop **in its own function**).
+  //
+  //  - LoopInfo is obtained from the {header_to_info_} member of
+  //    BytecodeAnalysis, but the BytecodeAnalysis is a member of the
+  //    MaglevGraphBuilder, and thus gets destructed when the MaglevGraphBuilder
+  //    created for inlining is destructed. LoopInfo would then become a stale
+  //    pointer.
+  ClearLoopInfo();
 }
 
 void MergePointInterpreterFrameState::MergeThrow(
-    MaglevGraphBuilder* builder, const MaglevCompilationUnit* handler_unit,
-    InterpreterFrameState& unmerged) {
+    const MaglevGraphBuilder* builder,
+    const MaglevCompilationUnit* handler_unit,
+    const KnownNodeAspects& known_node_aspects) {
   // We don't count total predecessors on exception handlers, but we do want to
   // special case the first predecessor so we do count predecessors_so_far
   DCHECK_EQ(predecessor_count_, 0);
   DCHECK(is_exception_handler());
 
-  // Find the graph builder that contains the actual handler, so that we merge
-  // in the right function's interpreter frame state.
-  const MaglevGraphBuilder* handler_builder = builder;
-  while (handler_builder->compilation_unit() != handler_unit) {
-    handler_builder = handler_builder->parent();
-  }
-  const InterpreterFrameState& handler_builder_frame =
-      handler_builder->current_interpreter_frame();
+  DCHECK_EQ(builder->compilation_unit(), handler_unit);
+
+  const InterpreterFrameState& builder_frame =
+      builder->current_interpreter_frame();
 
   if (v8_flags.trace_maglev_graph_building) {
-    if (handler_builder == builder) {
-      std::cout << "Merging into exception handler..." << std::endl;
-    } else {
-      std::cout << "Merging into parent exception handler..." << std::endl;
-    }
+    std::cout << "Merging into exception handler..." << std::endl;
   }
 
-  frame_state_.ForEachParameter(*handler_unit, [&](ValueNode*& value,
-                                                   interpreter::Register reg) {
-    PrintBeforeMerge(*handler_unit, value, handler_builder_frame.get(reg), reg,
-                     known_node_aspects_);
-    value = MergeValue(builder, reg, *unmerged.known_node_aspects(), value,
-                       handler_builder_frame.get(reg), nullptr);
-    PrintAfterMerge(*handler_unit, value, known_node_aspects_);
-  });
-  frame_state_.ForEachLocal(*handler_unit, [&](ValueNode*& value,
-                                               interpreter::Register reg) {
-    PrintBeforeMerge(*handler_unit, value, handler_builder_frame.get(reg), reg,
-                     known_node_aspects_);
-    value = MergeValue(builder, reg, *unmerged.known_node_aspects(), value,
-                       handler_builder_frame.get(reg), nullptr);
-    PrintAfterMerge(*handler_unit, value, known_node_aspects_);
-  });
+  frame_state_.ForEachParameter(
+      *handler_unit, [&](ValueNode*& value, interpreter::Register reg) {
+        PrintBeforeMerge(*handler_unit, value, builder_frame.get(reg), reg,
+                         known_node_aspects_);
+        value = MergeValue(builder, reg, known_node_aspects, value,
+                           builder_frame.get(reg), nullptr);
+        PrintAfterMerge(*handler_unit, value, known_node_aspects_);
+      });
+  frame_state_.ForEachLocal(
+      *handler_unit, [&](ValueNode*& value, interpreter::Register reg) {
+        PrintBeforeMerge(*handler_unit, value, builder_frame.get(reg), reg,
+                         known_node_aspects_);
+        value = MergeValue(builder, reg, known_node_aspects, value,
+                           builder_frame.get(reg), nullptr);
+        PrintAfterMerge(*handler_unit, value, known_node_aspects_);
+      });
 
   // Pick out the context value from the incoming registers.
   // TODO(leszeks): This should be the same for all incoming states, but we lose
@@ -356,27 +375,27 @@ void MergePointInterpreterFrameState::MergeThrow(
   // were handled differently, we could avoid emitting a Phi here.
   ValueNode*& context = frame_state_.context(*handler_unit);
   PrintBeforeMerge(*handler_unit, context,
-                   handler_builder_frame.get(catch_block_context_register_),
+                   builder_frame.get(catch_block_context_register_),
                    catch_block_context_register_, known_node_aspects_);
-  context = MergeValue(builder, catch_block_context_register_,
-                       *unmerged.known_node_aspects(), context,
-                       handler_builder_frame.get(catch_block_context_register_),
-                       nullptr);
+  context = MergeValue(
+      builder, catch_block_context_register_, known_node_aspects, context,
+      builder_frame.get(catch_block_context_register_), nullptr);
   PrintAfterMerge(*handler_unit, context, known_node_aspects_);
 
   if (known_node_aspects_ == nullptr) {
     DCHECK_EQ(predecessors_so_far_, 0);
-    known_node_aspects_ = unmerged.known_node_aspects()->Clone(builder->zone());
+    known_node_aspects_ = known_node_aspects.Clone(builder->zone());
   } else {
-    known_node_aspects_->Merge(*unmerged.known_node_aspects(), builder->zone());
+    known_node_aspects_->Merge(known_node_aspects, builder->zone());
   }
   predecessors_so_far_++;
 }
 
 namespace {
 
-ValueNode* FromInt32ToTagged(MaglevGraphBuilder* builder, NodeType node_type,
-                             ValueNode* value, BasicBlock* predecessor) {
+ValueNode* FromInt32ToTagged(const MaglevGraphBuilder* builder,
+                             NodeType node_type, ValueNode* value,
+                             BasicBlock* predecessor) {
   DCHECK_EQ(value->properties().value_representation(),
             ValueRepresentation::kInt32);
   DCHECK(!value->properties().is_conversion());
@@ -402,8 +421,9 @@ ValueNode* FromInt32ToTagged(MaglevGraphBuilder* builder, NodeType node_type,
   return tagged;
 }
 
-ValueNode* FromUint32ToTagged(MaglevGraphBuilder* builder, NodeType node_type,
-                              ValueNode* value, BasicBlock* predecessor) {
+ValueNode* FromUint32ToTagged(const MaglevGraphBuilder* builder,
+                              NodeType node_type, ValueNode* value,
+                              BasicBlock* predecessor) {
   DCHECK_EQ(value->properties().value_representation(),
             ValueRepresentation::kUint32);
   DCHECK(!value->properties().is_conversion());
@@ -420,8 +440,9 @@ ValueNode* FromUint32ToTagged(MaglevGraphBuilder* builder, NodeType node_type,
   return tagged;
 }
 
-ValueNode* FromFloat64ToTagged(MaglevGraphBuilder* builder, NodeType node_type,
-                               ValueNode* value, BasicBlock* predecessor) {
+ValueNode* FromFloat64ToTagged(const MaglevGraphBuilder* builder,
+                               NodeType node_type, ValueNode* value,
+                               BasicBlock* predecessor) {
   DCHECK_EQ(value->properties().value_representation(),
             ValueRepresentation::kFloat64);
   DCHECK(!value->properties().is_conversion());
@@ -436,7 +457,7 @@ ValueNode* FromFloat64ToTagged(MaglevGraphBuilder* builder, NodeType node_type,
   return tagged;
 }
 
-ValueNode* FromHoleyFloat64ToTagged(MaglevGraphBuilder* builder,
+ValueNode* FromHoleyFloat64ToTagged(const MaglevGraphBuilder* builder,
                                     NodeType node_type, ValueNode* value,
                                     BasicBlock* predecessor) {
   DCHECK_EQ(value->properties().value_representation(),
@@ -453,8 +474,9 @@ ValueNode* FromHoleyFloat64ToTagged(MaglevGraphBuilder* builder,
   return tagged;
 }
 
-ValueNode* NonTaggedToTagged(MaglevGraphBuilder* builder, NodeType node_type,
-                             ValueNode* value, BasicBlock* predecessor) {
+ValueNode* NonTaggedToTagged(const MaglevGraphBuilder* builder,
+                             NodeType node_type, ValueNode* value,
+                             BasicBlock* predecessor) {
   switch (value->properties().value_representation()) {
     case ValueRepresentation::kIntPtr:
     case ValueRepresentation::kTagged:
@@ -469,7 +491,7 @@ ValueNode* NonTaggedToTagged(MaglevGraphBuilder* builder, NodeType node_type,
       return FromHoleyFloat64ToTagged(builder, node_type, value, predecessor);
   }
 }
-ValueNode* EnsureTagged(MaglevGraphBuilder* builder,
+ValueNode* EnsureTagged(const MaglevGraphBuilder* builder,
                         const KnownNodeAspects& known_node_aspects,
                         ValueNode* value, BasicBlock* predecessor) {
   if (value->properties().value_representation() ==
@@ -511,7 +533,7 @@ NodeType MergePointInterpreterFrameState::AlternativeType(
 }
 
 ValueNode* MergePointInterpreterFrameState::MergeValue(
-    MaglevGraphBuilder* builder, interpreter::Register owner,
+    const MaglevGraphBuilder* builder, interpreter::Register owner,
     const KnownNodeAspects& unmerged_aspects, ValueNode* merged,
     ValueNode* unmerged, Alternatives::List* per_predecessor_alternatives) {
   // If the merged node is null, this is a pre-created loop header merge
@@ -649,7 +671,7 @@ ValueNode* MergePointInterpreterFrameState::MergeValue(
 }
 void MergePointInterpreterFrameState::MergeLoopValue(
     MaglevGraphBuilder* builder, interpreter::Register owner,
-    KnownNodeAspects& unmerged_aspects, ValueNode* merged,
+    const KnownNodeAspects& unmerged_aspects, ValueNode* merged,
     ValueNode* unmerged) {
   Phi* result = merged->TryCast<Phi>();
   if (result == nullptr || result->merge_state() != this) {

@@ -627,6 +627,25 @@ constexpr auto KeyedLoadBaselineDescriptor::registers() {
 }
 
 // static
+constexpr auto EnumeratedKeyedLoadBaselineDescriptor::registers() {
+  return RegisterArray(KeyedLoadBaselineDescriptor::ReceiverRegister(),
+                       KeyedLoadBaselineDescriptor::NameRegister(),
+                       EnumIndexRegister(), CacheTypeRegister(),
+                       SlotRegister());
+}
+
+// static
+constexpr auto EnumeratedKeyedLoadDescriptor::registers() {
+  return RegisterArray(
+      KeyedLoadBaselineDescriptor::ReceiverRegister(),
+      KeyedLoadBaselineDescriptor::NameRegister(),
+      EnumeratedKeyedLoadBaselineDescriptor::EnumIndexRegister(),
+      EnumeratedKeyedLoadBaselineDescriptor::CacheTypeRegister(),
+      EnumeratedKeyedLoadBaselineDescriptor::SlotRegister(),
+      KeyedLoadWithVectorDescriptor::VectorRegister());
+}
+
+// static
 constexpr auto KeyedLoadDescriptor::registers() {
   return KeyedLoadBaselineDescriptor::registers();
 }
@@ -672,15 +691,15 @@ constexpr auto DefineKeyedOwnWithVectorDescriptor::registers() {
 // static
 constexpr auto CallApiCallbackOptimizedDescriptor::registers() {
   return RegisterArray(ApiFunctionAddressRegister(),
-                       ActualArgumentsCountRegister(), CallDataRegister(),
-                       HolderRegister());
+                       ActualArgumentsCountRegister(),
+                       FunctionTemplateInfoRegister(), HolderRegister());
 }
 
 // static
 constexpr auto CallApiCallbackGenericDescriptor::registers() {
   return RegisterArray(ActualArgumentsCountRegister(),
                        TopmostScriptHavingContextRegister(),
-                       CallHandlerInfoRegister(), HolderRegister());
+                       FunctionTemplateInfoRegister(), HolderRegister());
 }
 
 // static
@@ -768,7 +787,7 @@ constexpr auto WasmToJSWrapperDescriptor::return_double_registers() {
   struct CallInterfaceDescriptorFor<Builtin::k##Name> {               \
     using type = DescriptorName##Descriptor;                          \
   };
-BUILTIN_LIST(IGNORE_BUILTIN, IGNORE_BUILTIN,
+BUILTIN_LIST(IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN,
              /*TFC*/ DEFINE_STATIC_BUILTIN_DESCRIPTOR_GETTER, IGNORE_BUILTIN,
              /*TFH*/ DEFINE_STATIC_BUILTIN_DESCRIPTOR_GETTER, IGNORE_BUILTIN,
              /*ASM*/ DEFINE_STATIC_BUILTIN_DESCRIPTOR_GETTER)

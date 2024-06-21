@@ -66,7 +66,7 @@ MaybeHandle<Object> DebugEvaluate::Global(Isolate* isolate,
   }
   // TODO(cbruni, 1244145): Use host-defined options from script context.
   Handle<FixedArray> host_defined_options(
-      Script::cast(function->shared()->script())->host_defined_options(),
+      Cast<Script>(function->shared()->script())->host_defined_options(),
       isolate);
   MaybeHandle<Object> result = Execution::CallScript(
       isolate, function, Handle<JSObject>(context->global_proxy(), isolate),
@@ -93,7 +93,7 @@ MaybeHandle<Object> DebugEvaluate::Local(Isolate* isolate,
     Handle<SharedFunctionInfo> outer_info(
         isolate->native_context()->empty_function()->shared(), isolate);
     Handle<JSObject> context_extension = GetWasmDebugProxy(frame);
-    Handle<ScopeInfo> scope_info =
+    DirectHandle<ScopeInfo> scope_info =
         ScopeInfo::CreateForWithScope(isolate, Handle<ScopeInfo>::null());
     Handle<Context> context = isolate->factory()->NewWithContext(
         isolate->native_context(), scope_info, context_extension);
@@ -130,8 +130,8 @@ MaybeHandle<Object> DebugEvaluate::WithTopmostArguments(Isolate* isolate,
   JavaScriptStackFrameIterator it(isolate);
 
   // Get context and receiver.
-  Handle<Context> native_context(
-      Context::cast(it.frame()->context())->native_context(), isolate);
+  DirectHandle<Context> native_context(
+      Cast<Context>(it.frame()->context())->native_context(), isolate);
 
   // Materialize arguments as property on an extension object.
   Handle<JSObject> materialized = factory->NewSlowJSObjectWithNullProto();
@@ -152,7 +152,7 @@ MaybeHandle<Object> DebugEvaluate::WithTopmostArguments(Isolate* isolate,
   }
 
   // Use extension object in a debug-evaluate scope.
-  Handle<ScopeInfo> scope_info =
+  DirectHandle<ScopeInfo> scope_info =
       ScopeInfo::CreateForWithScope(isolate, Handle<ScopeInfo>::null());
   scope_info->SetIsDebugEvaluateScope();
   Handle<Context> evaluation_context = factory->NewDebugEvaluateContext(
@@ -178,8 +178,7 @@ MaybeHandle<Object> DebugEvaluate::Evaluate(
       Compiler::GetFunctionFromEval(
           source, outer_info, context, LanguageMode::kSloppy,
           NO_PARSE_RESTRICTION, kNoSourcePosition, kNoSourcePosition,
-          kNoSourcePosition, ParsingWhileDebugging::kYes),
-      Object);
+          kNoSourcePosition, ParsingWhileDebugging::kYes));
 
   Handle<Object> result;
   bool success = false;
@@ -268,7 +267,7 @@ DebugEvaluate::ContextBuilder::ContextBuilder(Isolate* isolate,
           isolate_->LocalsBlockListCacheGet(function_scope_info), isolate_);
       CHECK(IsStringSet(*block_list));
       isolate_->LocalsBlockListCacheSet(scope_info, Handle<ScopeInfo>::null(),
-                                        Handle<StringSet>::cast(block_list));
+                                        Cast<StringSet>(block_list));
     }
 
     evaluation_context_ = factory->NewDebugEvaluateContext(
@@ -281,7 +280,7 @@ void DebugEvaluate::ContextBuilder::UpdateValues() {
   scope_iterator_.Restart();
   for (ContextChainElement& element : context_chain_) {
     if (!element.materialized_object.is_null()) {
-      Handle<FixedArray> keys =
+      DirectHandle<FixedArray> keys =
           KeyAccumulator::GetKeys(isolate_, element.materialized_object,
                                   KeyCollectionMode::kOwnOnly,
                                   ENUMERABLE_STRINGS)
@@ -289,7 +288,7 @@ void DebugEvaluate::ContextBuilder::UpdateValues() {
 
       for (int i = 0; i < keys->length(); i++) {
         DCHECK(IsString(keys->get(i)));
-        Handle<String> key(String::cast(keys->get(i)), isolate_);
+        Handle<String> key(Cast<String>(keys->get(i)), isolate_);
         Handle<Object> value = JSReceiver::GetDataProperty(
             isolate_, element.materialized_object, key);
         scope_iterator_.SetVariableValue(key, value);
@@ -314,7 +313,6 @@ bool DebugEvaluate::IsSideEffectFreeIntrinsic(Runtime::FunctionId id) {
   V(IsArray)                             \
   V(IsJSProxy)                           \
   V(IsJSReceiver)                        \
-  V(IsRegExp)                            \
   V(IsSmi)                               \
   /* Loads */                            \
   V(LoadLookupSlotForCall)               \
@@ -342,7 +340,6 @@ bool DebugEvaluate::IsSideEffectFreeIntrinsic(Runtime::FunctionId id) {
   V(StringToNumber)                      \
   /* BigInts */                          \
   V(BigIntEqualToBigInt)                 \
-  V(BigIntToBoolean)                     \
   V(BigIntToNumber)                      \
   /* Literals */                         \
   V(CreateArrayLiteral)                  \
@@ -352,13 +349,10 @@ bool DebugEvaluate::IsSideEffectFreeIntrinsic(Runtime::FunctionId id) {
   /* Called from builtins */             \
   V(AllocateInYoungGeneration)           \
   V(AllocateInOldGeneration)             \
-  V(AllocateSeqOneByteString)            \
-  V(AllocateSeqTwoByteString)            \
   V(ArrayIncludes_Slow)                  \
   V(ArrayIndexOf)                        \
   V(ArrayIsArray)                        \
   V(GetFunctionName)                     \
-  V(GetOwnPropertyDescriptor)            \
   V(GlobalPrint)                         \
   V(HasProperty)                         \
   V(ObjectCreate)                        \
@@ -518,7 +512,6 @@ bool BytecodeHasNoSideEffect(interpreter::Bytecode bytecode) {
     case Bytecode::kIncBlockCounter:  // Coverage counters.
     case Bytecode::kForInEnumerate:
     case Bytecode::kForInPrepare:
-    case Bytecode::kForInContinue:
     case Bytecode::kForInNext:
     case Bytecode::kForInStep:
     case Bytecode::kJumpLoop:
@@ -566,7 +559,9 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     // Array builtins.
     case Builtin::kArrayIsArray:
     case Builtin::kArrayConstructor:
+    case Builtin::kArrayFrom:
     case Builtin::kArrayIndexOf:
+    case Builtin::kArrayOf:
     case Builtin::kArrayPrototypeValues:
     case Builtin::kArrayIncludes:
     case Builtin::kArrayPrototypeAt:
@@ -648,6 +643,7 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kDataViewPrototypeGetUint16:
     case Builtin::kDataViewPrototypeGetInt32:
     case Builtin::kDataViewPrototypeGetUint32:
+    case Builtin::kDataViewPrototypeGetFloat16:
     case Builtin::kDataViewPrototypeGetFloat32:
     case Builtin::kDataViewPrototypeGetFloat64:
     case Builtin::kDataViewPrototypeGetBigInt64:
@@ -692,6 +688,9 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kDatePrototypeToJson:
     case Builtin::kDatePrototypeToPrimitive:
     case Builtin::kDatePrototypeValueOf:
+    // DisposableStack builtins.
+    case Builtin::kDisposableStackConstructor:
+    case Builtin::kDisposableStackPrototypeGetDisposed:
     // Map builtins.
     case Builtin::kMapConstructor:
     case Builtin::kMapGroupBy:
@@ -723,6 +722,7 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kMathCosh:
     case Builtin::kMathExp:
     case Builtin::kMathFloor:
+    case Builtin::kMathF16round:
     case Builtin::kMathFround:
     case Builtin::kMathHypot:
     case Builtin::kMathImul:
@@ -983,6 +983,12 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kDatePrototypeSetUTCMonth:
     case Builtin::kDatePrototypeSetUTCSeconds:
     case Builtin::kDatePrototypeSetYear:
+    // DisposableStack builtins.
+    case Builtin::kDisposableStackPrototypeUse:
+    case Builtin::kDisposableStackPrototypeDispose:
+    case Builtin::kDisposableStackPrototypeAdopt:
+    case Builtin::kDisposableStackPrototypeDefer:
+    case Builtin::kDisposableStackPrototypeMove:
     // RegExp builtins.
     case Builtin::kRegExpPrototypeTest:
     case Builtin::kRegExpPrototypeExec:
@@ -1026,7 +1032,7 @@ bool BytecodeRequiresRuntimeCheck(interpreter::Bytecode bytecode) {
 
 // static
 DebugInfo::SideEffectState DebugEvaluate::FunctionGetSideEffectState(
-    Isolate* isolate, Handle<SharedFunctionInfo> info) {
+    Isolate* isolate, DirectHandle<SharedFunctionInfo> info) {
   if (v8_flags.trace_side_effect_free_debug_evaluate) {
     PrintF("[debug-evaluate] Checking function %s for side effect.\n",
            info->DebugNameCStr().get());
@@ -1122,6 +1128,7 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
     case Builtin::kCEntry_Return2_ArgvInRegister_NoBuiltinExit:
     case Builtin::kWasmCEntry:
     case Builtin::kCloneFastJSArray:
+    case Builtin::kCloneFastJSArrayFillingHoles:
     case Builtin::kConstruct:
     case Builtin::kConvertToLocaleString:
     case Builtin::kCreateTypedArray:
@@ -1140,6 +1147,7 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
     case Builtin::kGroupByGeneric:
     case Builtin::kHasProperty:
     case Builtin::kCreateHTML:
+    case Builtin::kMapIteratorToList:
     case Builtin::kNonNumberToNumber:
     case Builtin::kNonPrimitiveToPrimitive_Number:
     case Builtin::kNumberToString:
@@ -1153,10 +1161,12 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
     case Builtin::kProxyGetPrototypeOf:
     case Builtin::kRecordWriteSaveFP:
     case Builtin::kRecordWriteIgnoreFP:
+    case Builtin::kSetOrSetIteratorToList:
     case Builtin::kStringAdd_CheckNone:
     case Builtin::kStringEqual:
     case Builtin::kStringIndexOf:
     case Builtin::kStringRepeat:
+    case Builtin::kStringToList:
     case Builtin::kBigIntEqual:
     case Builtin::kToInteger:
     case Builtin::kToLength:
@@ -1201,18 +1211,22 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
       }
     case Builtin::kFastCreateDataProperty:
       switch (caller) {
+        case Builtin::kArrayOf:
         case Builtin::kArrayPrototypeSlice:
         case Builtin::kArrayPrototypeToSpliced:
         case Builtin::kArrayPrototypeWith:
         case Builtin::kArrayFilter:
+        case Builtin::kArrayFrom:
           return true;
         default:
           return false;
       }
     case Builtin::kSetProperty:
       switch (caller) {
+        case Builtin::kArrayOf:
         case Builtin::kArrayPrototypeSlice:
         case Builtin::kArrayPrototypeToSorted:
+        case Builtin::kArrayFrom:
         case Builtin::kTypedArrayPrototypeMap:
         case Builtin::kStringPrototypeMatchAll:
           return true;

@@ -250,6 +250,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArm64S32x4UnzipRight:
     case kArm64S32x4TransposeLeft:
     case kArm64S32x4TransposeRight:
+    case kArm64S32x4OneLaneSwizzle:
     case kArm64S32x4Shuffle:
     case kArm64S16x8ZipLeft:
     case kArm64S16x8ZipRight:
@@ -266,6 +267,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArm64S8x16Concat:
     case kArm64I8x16Swizzle:
     case kArm64I8x16Shuffle:
+    case kArm64S32x4Reverse:
     case kArm64S32x2Reverse:
     case kArm64S16x4Reverse:
     case kArm64S16x2Reverse:
@@ -317,6 +319,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kArm64Ldr:
     case kArm64LdrDecompressTaggedSigned:
     case kArm64LdrDecompressTagged:
+    case kArm64LdrDecompressProtected:
     case kArm64LdarDecompressTaggedSigned:
     case kArm64LdarDecompressTagged:
     case kArm64LdrDecodeSandboxedPointer:
@@ -438,6 +441,7 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
 
     case kArm64LdrDecompressTaggedSigned:
     case kArm64LdrDecompressTagged:
+    case kArm64LdrDecompressProtected:
     case kArm64Ldr:
     case kArm64LdrD:
     case kArm64LdrS:

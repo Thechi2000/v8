@@ -172,7 +172,6 @@
   V(_, add_string, "add")                                                     \
   V(_, AggregateError_string, "AggregateError")                               \
   V(_, always_string, "always")                                               \
-  V(_, anonymous_function_string, "(anonymous function)")                     \
   V(_, anonymous_string, "anonymous")                                         \
   V(_, apply_string, "apply")                                                 \
   V(_, Arguments_string, "Arguments")                                         \
@@ -188,7 +187,6 @@
   V(_, AtomicsCondition_string, "Atomics.Condition")                          \
   V(_, AtomicsMutex_string, "Atomics.Mutex")                                  \
   V(_, auto_string, "auto")                                                   \
-  V(_, await_string, "await")                                                 \
   V(_, BigInt_string, "BigInt")                                               \
   V(_, bigint_string, "bigint")                                               \
   V(_, BigInt64Array_string, "BigInt64Array")                                 \
@@ -266,6 +264,7 @@
   V(_, fields_string, "fields")                                               \
   V(_, FinalizationRegistry_string, "FinalizationRegistry")                   \
   V(_, flags_string, "flags")                                                 \
+  V(_, Float16Array_string, "Float16Array")                                   \
   V(_, Float32Array_string, "Float32Array")                                   \
   V(_, Float64Array_string, "Float64Array")                                   \
   V(_, fractionalSecondDigits_string, "fractionalSecondDigits")               \
@@ -367,10 +366,10 @@
   V(_, object_string, "object")                                               \
   V(_, object_to_string, "[object Object]")                                   \
   V(_, Object_prototype_string, "Object.prototype")                           \
-  V(_, of_string, "of")                                                       \
   V(_, offset_string, "offset")                                               \
   V(_, offsetNanoseconds_string, "offsetNanoseconds")                         \
   V(_, ok_string, "ok")                                                       \
+  V(_, optimizedLinear_string, "optimizedLinear") /* TODO Should this be generated ? */ \
   V(_, one_string, "1")                                                       \
   V(_, other_string, "other")                                                 \
   V(_, overflow_string, "overflow")                                           \
@@ -464,7 +463,6 @@
   V(_, unit_string, "unit")                                                   \
   V(_, URIError_string, "URIError")                                           \
   V(_, UTC_string, "UTC")                                                     \
-  V(_, valueOf_string, "valueOf")                                             \
   V(_, WeakMap_string, "WeakMap")                                             \
   V(_, WeakRef_string, "WeakRef")                                             \
   V(_, WeakSet_string, "WeakSet")                                             \
@@ -489,6 +487,7 @@
   V(_, uninitialized_symbol)                          \
   V(_, megamorphic_symbol)                            \
   V(_, elements_transition_symbol)                    \
+  V(_, object_clone_transition_symbol)                \
   V(_, mega_dom_symbol)
 
 #define NOT_IMPORTANT_PRIVATE_SYMBOL_LIST_GENERATOR(V, _) \
@@ -499,6 +498,7 @@
   V(_, class_fields_symbol)                               \
   V(_, class_positions_symbol)                            \
   V(_, error_end_pos_symbol)                              \
+  V(_, error_message_symbol)                              \
   V(_, error_script_symbol)                               \
   V(_, error_stack_symbol)                                \
   V(_, error_start_pos_symbol)                            \
@@ -535,8 +535,9 @@
   V(_, intl_fallback_symbol, IntlLegacyConstructedSymbol) \
   V(_, match_symbol, Symbol.match)                        \
   V(_, search_symbol, Symbol.search)                      \
-  V(_, to_primitive_symbol, Symbol.toPrimitive)           \
-  V(_, unscopables_symbol, Symbol.unscopables)
+  V(_, unscopables_symbol, Symbol.unscopables)            \
+  V(_, dispose_symbol, Symbol.dispose)                    \
+  V(_, async_dispose_symbol, Symbol.asyncDispose)
 
 // Well-Known Symbols are "Public" symbols, which have a bit set which causes
 // them to produce an undefined value when a load results in a failed access
@@ -552,7 +553,8 @@
   V(_, constructor_string, "constructor")                      \
   V(_, next_string, "next")                                    \
   V(_, resolve_string, "resolve")                              \
-  V(_, then_string, "then")
+  V(_, then_string, "then")                                    \
+  V(_, valueOf_string, "valueOf")
 
 // Note that the description string should be part of the internalized
 // string roots to make sure we don't accidentally end up allocating the
@@ -563,6 +565,9 @@
   V(_, replace_symbol, Symbol.replace)            \
   V(_, species_symbol, Symbol.species)            \
   V(_, split_symbol, Symbol.split)
+
+#define PUBLIC_SYMBOL_FOR_PROTECTOR_LIST_GENERATOR(V, _) \
+  V(_, to_primitive_symbol, Symbol.toPrimitive)
 
 #define WELL_KNOWN_SYMBOL_FOR_PROTECTOR_LIST_GENERATOR(V, _) \
   V(_, is_concat_spreadable_symbol, Symbol.isConcatSpreadable)

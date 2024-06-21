@@ -46,26 +46,25 @@ Tagged<SourceTextModuleInfo> SourceTextModule::info() const {
 }
 
 OBJECT_CONSTRUCTORS_IMPL(SourceTextModuleInfo, FixedArray)
-CAST_ACCESSOR(SourceTextModuleInfo)
 
 Tagged<FixedArray> SourceTextModuleInfo::module_requests() const {
-  return FixedArray::cast(get(kModuleRequestsIndex));
+  return Cast<FixedArray>(get(kModuleRequestsIndex));
 }
 
 Tagged<FixedArray> SourceTextModuleInfo::special_exports() const {
-  return FixedArray::cast(get(kSpecialExportsIndex));
+  return Cast<FixedArray>(get(kSpecialExportsIndex));
 }
 
 Tagged<FixedArray> SourceTextModuleInfo::regular_exports() const {
-  return FixedArray::cast(get(kRegularExportsIndex));
+  return Cast<FixedArray>(get(kRegularExportsIndex));
 }
 
 Tagged<FixedArray> SourceTextModuleInfo::regular_imports() const {
-  return FixedArray::cast(get(kRegularImportsIndex));
+  return Cast<FixedArray>(get(kRegularImportsIndex));
 }
 
 Tagged<FixedArray> SourceTextModuleInfo::namespace_imports() const {
-  return FixedArray::cast(get(kNamespaceImportsIndex));
+  return Cast<FixedArray>(get(kNamespaceImportsIndex));
 }
 
 #ifdef DEBUG
@@ -79,13 +78,14 @@ bool SourceTextModuleInfo::Equals(Tagged<SourceTextModuleInfo> other) const {
 #endif
 
 struct ModuleHandleHash {
-  V8_INLINE size_t operator()(Handle<Module> module) const {
+  V8_INLINE size_t operator()(DirectHandle<Module> module) const {
     return module->hash();
   }
 };
 
 struct ModuleHandleEqual {
-  V8_INLINE bool operator()(Handle<Module> lhs, Handle<Module> rhs) const {
+  V8_INLINE bool operator()(DirectHandle<Module> lhs,
+                            DirectHandle<Module> rhs) const {
     return *lhs == *rhs;
   }
 };
@@ -106,16 +106,16 @@ Handle<SourceTextModule> SourceTextModule::GetCycleRoot(
     Isolate* isolate) const {
   CHECK_GE(status(), kEvaluated);
   DCHECK(!IsTheHole(cycle_root(), isolate));
-  Handle<SourceTextModule> root(SourceTextModule::cast(cycle_root()), isolate);
+  Handle<SourceTextModule> root(Cast<SourceTextModule>(cycle_root()), isolate);
   return root;
 }
 
-void SourceTextModule::AddAsyncParentModule(Isolate* isolate,
-                                            Handle<SourceTextModule> module,
-                                            Handle<SourceTextModule> parent) {
+void SourceTextModule::AddAsyncParentModule(
+    Isolate* isolate, DirectHandle<SourceTextModule> module,
+    DirectHandle<SourceTextModule> parent) {
   Handle<ArrayList> async_parent_modules(module->async_parent_modules(),
                                          isolate);
-  Handle<ArrayList> new_array_list =
+  DirectHandle<ArrayList> new_array_list =
       ArrayList::Add(isolate, async_parent_modules, parent);
   module->set_async_parent_modules(*new_array_list);
 }
@@ -123,7 +123,7 @@ void SourceTextModule::AddAsyncParentModule(Isolate* isolate,
 Handle<SourceTextModule> SourceTextModule::GetAsyncParentModule(
     Isolate* isolate, int index) {
   Handle<SourceTextModule> module(
-      SourceTextModule::cast(async_parent_modules()->get(index)), isolate);
+      Cast<SourceTextModule>(async_parent_modules()->get(index)), isolate);
   return module;
 }
 

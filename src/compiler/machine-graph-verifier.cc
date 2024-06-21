@@ -4,7 +4,6 @@
 
 #include "src/compiler/machine-graph-verifier.h"
 
-#include "src/base/v8-fallthrough.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/graph.h"
 #include "src/compiler/linkage.h"
@@ -284,6 +283,7 @@ class MachineRepresentationInferrer {
             break;
           case IrOpcode::kRoundInt64ToFloat64:
           case IrOpcode::kRoundUint64ToFloat64:
+          case IrOpcode::kBitcastInt64ToFloat64:
           case IrOpcode::kChangeFloat32ToFloat64:
           case IrOpcode::kChangeInt32ToFloat64:
           case IrOpcode::kChangeUint32ToFloat64:
@@ -361,6 +361,7 @@ class MachineRepresentationChecker {
           case IrOpcode::kRoundInt64ToFloat32:
           case IrOpcode::kRoundUint64ToFloat32:
           case IrOpcode::kTruncateInt64ToInt32:
+          case IrOpcode::kBitcastInt64ToFloat64:
           case IrOpcode::kWord64Ctz:
           case IrOpcode::kWord64Clz:
           case IrOpcode::kWord64Popcnt:
@@ -526,6 +527,12 @@ class MachineRepresentationChecker {
             CheckValueInputForFloat64Op(node, 0);
             CheckValueInputForInt32Op(node, 1);
             break;
+          case IrOpcode::kInt32PairAdd:
+          case IrOpcode::kInt32PairSub:
+            for (int j = 0; j < node->op()->ValueInputCount(); ++j) {
+              CheckValueInputForInt32Op(node, j);
+            }
+            break;
           case IrOpcode::kParameter:
           case IrOpcode::kProjection:
             break;
@@ -551,7 +558,7 @@ class MachineRepresentationChecker {
           case IrOpcode::kWord32AtomicPairExchange:
             CheckValueInputRepresentationIs(node, 3,
                                             MachineRepresentation::kWord32);
-            V8_FALLTHROUGH;
+            [[fallthrough]];
           case IrOpcode::kStore:
           case IrOpcode::kStoreIndirectPointer:
           case IrOpcode::kUnalignedStore:
@@ -627,7 +634,7 @@ class MachineRepresentationChecker {
                                             MachineRepresentation::kWord32);
             CheckValueInputRepresentationIs(node, 5,
                                             MachineRepresentation::kWord32);
-            V8_FALLTHROUGH;
+            [[fallthrough]];
           case IrOpcode::kWord32AtomicCompareExchange:
           case IrOpcode::kWord64AtomicCompareExchange:
             CheckValueInputIsTaggedOrPointer(node, 0);
@@ -1032,6 +1039,7 @@ class MachineRepresentationChecker {
         // happens in dead code.
         return IsAnyTagged(actual);
       case MachineRepresentation::kCompressedPointer:
+      case MachineRepresentation::kProtectedPointer:
       case MachineRepresentation::kIndirectPointer:
       case MachineRepresentation::kSandboxedPointer:
       case MachineRepresentation::kFloat32:

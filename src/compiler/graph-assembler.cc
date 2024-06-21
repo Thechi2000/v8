@@ -137,10 +137,9 @@ Node* GraphAssembler::LoadStackPointer() {
   return AddNode(graph()->NewNode(machine()->LoadStackPointer(), effect()));
 }
 
-Node* GraphAssembler::SetStackPointer(Node* node,
-                                      wasm::FPRelativeScope fp_scope) {
+Node* GraphAssembler::SetStackPointer(Node* node) {
   return AddNode(
-      graph()->NewNode(machine()->SetStackPointer(fp_scope), node, effect()));
+      graph()->NewNode(machine()->SetStackPointer(), node, effect()));
 }
 #endif
 
@@ -670,8 +669,17 @@ class ArrayBufferViewAccessBuilder {
           AccessBuilder::ForJSArrayBufferViewByteOffset(), view,
           UseInfo::Word());
 
-      return a.UintPtrDiv(a.UintPtrSub(byte_length, byte_offset),
-                          a.ChangeUint32ToUintPtr(element_size));
+      return a
+          .MachineSelectIf<UintPtrT>(
+              a.UintPtrLessThanOrEqual(byte_offset, byte_length))
+          .Then([&]() {
+            // length = floor((byte_length - byte_offset) / element_size)
+            return a.UintPtrDiv(a.UintPtrSub(byte_length, byte_offset),
+                                a.ChangeUint32ToUintPtr(element_size));
+          })
+          .Else([&]() { return a.UintPtrConstant(0); })
+          .ExpectTrue()
+          .Value();
     };
 
     return a.MachineSelectIf<UintPtrT>(length_tracking_bit)
@@ -791,7 +799,17 @@ class ArrayBufferViewAccessBuilder {
       TNode<UintPtrT> byte_offset = MachineLoadField<UintPtrT>(
           AccessBuilder::ForJSArrayBufferViewByteOffset(), view,
           UseInfo::Word());
-      return RoundDownToElementSize(a.UintPtrSub(byte_length, byte_offset));
+
+      return a
+          .MachineSelectIf<UintPtrT>(
+              a.UintPtrLessThanOrEqual(byte_offset, byte_length))
+          .Then([&]() {
+            return RoundDownToElementSize(
+                a.UintPtrSub(byte_length, byte_offset));
+          })
+          .Else([&]() { return a.UintPtrConstant(0); })
+          .ExpectTrue()
+          .Value();
     };
 
     return a.MachineSelectIf<UintPtrT>(length_tracking_bit)
@@ -1015,6 +1033,21 @@ TNode<RawPtrT> GraphAssembler::StackSlot(int size, int alignment,
                                          bool is_tagged) {
   return AddNode<RawPtrT>(
       graph()->NewNode(machine()->StackSlot(size, alignment, is_tagged)));
+}
+
+Node* GraphAssembler::AdaptLocalArgument(Node* argument) {
+#ifdef V8_ENABLE_DIRECT_LOCAL
+  // With direct locals, the argument can be passed directly.
+  return BitcastTaggedToWord(argument);
+#else
+  // With indirect locals, the argument has to be stored on the stack and the
+  // slot address is passed.
+  Node* stack_slot = StackSlot(sizeof(uintptr_t), alignof(uintptr_t), true);
+  Store(StoreRepresentation(MachineType::PointerRepresentation(),
+                            kNoWriteBarrier),
+        stack_slot, 0, BitcastTaggedToWord(argument));
+  return stack_slot;
+#endif
 }
 
 Node* GraphAssembler::Store(StoreRepresentation rep, Node* object, Node* offset,

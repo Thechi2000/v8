@@ -105,7 +105,8 @@ class TestingModuleBuilder {
   ~TestingModuleBuilder();
 
   uint8_t* AddMemory(uint32_t size, SharedFlag shared = SharedFlag::kNotShared,
-                     TestingModuleMemoryType = kMemory32);
+                     TestingModuleMemoryType = kMemory32,
+                     std::optional<size_t> max_size = {});
 
   size_t CodeTableLength() const { return native_module_->num_functions(); }
 
@@ -187,14 +188,6 @@ class TestingModuleBuilder {
     v8::base::RandomNumberGenerator rng;
     rng.SetSeed(seed);
     rng.NextBytes(raw, end - raw);
-  }
-
-  void SetMaxMemPages(uint32_t maximum_pages) {
-    CHECK_EQ(1, test_module_->memories.size());
-    test_module_->memories[0].maximum_pages = maximum_pages;
-    DCHECK_EQ(trusted_instance_data_->memory_objects()->length(),
-              test_module_->memories.size());
-    trusted_instance_data_->memory_object(0)->set_maximum_pages(maximum_pages);
   }
 
   void SetMemoryShared() {
@@ -421,12 +414,12 @@ class WasmRunnerBase : public InitializedHandleScope {
     if (retval.is_null()) {
       CHECK_EQ(expected, static_cast<double>(0xDEADBEEF));
     } else {
-      Handle<Object> result = retval.ToHandleChecked();
+      DirectHandle<Object> result = retval.ToHandleChecked();
       if (IsSmi(*result)) {
         CHECK_EQ(expected, Smi::ToInt(*result));
       } else {
         CHECK(IsHeapNumber(*result));
-        CHECK_DOUBLE_EQ(expected, HeapNumber::cast(*result)->value());
+        CHECK_DOUBLE_EQ(expected, Cast<HeapNumber>(*result)->value());
       }
     }
   }
@@ -542,17 +535,17 @@ class WasmRunner : public WasmRunnerBase {
       return static_cast<ReturnType>(0xDEADBEEFDEADBEEF);
     }
 
-    Handle<Object> result = retval.ToHandleChecked();
+    DirectHandle<Object> result = retval.ToHandleChecked();
     // For int64_t and uint64_t returns we will get a BigInt.
     if constexpr (std::is_integral_v<ReturnType> &&
                   sizeof(ReturnType) == sizeof(int64_t)) {
       CHECK(IsBigInt(*result));
-      return BigInt::cast(*result)->AsInt64();
+      return Cast<BigInt>(*result)->AsInt64();
     }
 
     // Otherwise it must be a number (Smi or HeapNumber).
     CHECK(IsNumber(*result));
-    double value = Object::Number(*result);
+    double value = Object::NumberValue(Cast<Number>(*result));
     // The JS API interprets all Wasm values as signed, hence we cast via the
     // signed equivalent type to avoid undefined behaviour in the casting.
     if constexpr (std::is_integral_v<ReturnType> &&

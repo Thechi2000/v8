@@ -4,7 +4,6 @@
 
 #include "src/compiler/turboshaft/decompression-optimization.h"
 
-#include "src/base/v8-fallthrough.h"
 #include "src/codegen/machine-type.h"
 #include "src/compiler/turboshaft/copying-phase.h"
 #include "src/compiler/turboshaft/operations.h"
@@ -193,7 +192,8 @@ void DecompressionAnalyzer::MarkAddressingBase(OpIndex base_idx) {
     bool keep_compressed = true;
     for (OpIndex input_idx : base.inputs()) {
       const Operation& input = graph.Get(input_idx);
-      if (!input.Is<LoadOp>() || !base.IsOnlyUserOf(input, graph)) {
+      if (!input.Is<LoadOp>() || !base.IsOnlyUserOf(input, graph) ||
+          !input.Cast<LoadOp>().loaded_rep.IsTagged()) {
         keep_compressed = false;
         break;
       }

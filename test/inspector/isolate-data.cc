@@ -8,6 +8,8 @@
 #include "include/v8-exception.h"
 #include "include/v8-microtask-queue.h"
 #include "include/v8-template.h"
+#include "src/execution/isolate.h"
+#include "src/heap/heap.h"
 #include "src/init/v8.h"
 #include "src/inspector/test-interface.h"
 #include "test/inspector/frontend-channel.h"
@@ -54,7 +56,6 @@ InspectorIsolateData::InspectorIsolateData(
       v8::ArrayBuffer::Allocator::NewDefaultAllocator());
   params.array_buffer_allocator = array_buffer_allocator_.get();
   params.snapshot_blob = startup_data;
-  params.only_terminate_in_safe_scope = true;
   isolate_.reset(v8::Isolate::New(params));
   v8::Isolate::Scope isolate_scope(isolate_.get());
   isolate_->SetMicrotasksPolicy(v8::MicrotasksPolicy::kScoped);
@@ -511,6 +512,14 @@ v8::MaybeLocal<v8::Value> InspectorIsolateData::memoryInfo(
 
 void InspectorIsolateData::runMessageLoopOnPause(int) {
   v8::SealHandleScope seal_handle_scope(isolate());
+  // Pumping the message loop below may trigger the execution of a stackless
+  // GC. We need to override the embedder stack state, to force scanning the
+  // stack, if this happens.
+  i::Heap* heap =
+      reinterpret_cast<i::Isolate*>(task_runner_->isolate())->heap();
+  i::EmbedderStackStateScope scope(
+      heap, i::EmbedderStackStateOrigin::kExplicitInvocation,
+      StackState::kMayContainHeapPointers);
   task_runner_->RunMessageLoop(true);
 }
 

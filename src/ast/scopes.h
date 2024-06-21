@@ -164,11 +164,6 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
   // tree and its children are reparented.
   Scope* FinalizeBlockScope();
 
-  // Inserts outer_scope into this scope's scope chain (and removes this
-  // from the current outer_scope_'s inner scope list).
-  // Assumes outer_scope_ is non-null.
-  void ReplaceOuterScope(Scope* outer_scope);
-
   Zone* zone() const { return variables_.zone(); }
 
   void SetMustUsePreparseData() {
@@ -378,6 +373,11 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
   bool inner_scope_calls_eval() const { return inner_scope_calls_eval_; }
   bool private_name_lookup_skips_outer_class() const {
     return private_name_lookup_skips_outer_class_;
+  }
+
+  bool has_using_declaration() const { return has_using_declaration_; }
+  bool has_await_using_declaration() const {
+    return has_await_using_declaration_;
   }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -604,10 +604,6 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
     needs_home_object_ = true;
   }
 
-  VariableProxy* NewHomeObjectVariableProxy(AstNodeFactory* factory,
-                                            const AstRawString* name,
-                                            int start_pos);
-
   bool RemoveInnerScope(Scope* inner_scope) {
     DCHECK_NOT_NULL(inner_scope);
     if (inner_scope == inner_scope_) {
@@ -655,6 +651,8 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
     Variable* result = variables_.Declare(
         zone, this, name, mode, kind, initialization_flag, maybe_assigned_flag,
         IsStaticFlag::kNotStatic, was_added);
+    if (mode == VariableMode::kUsing) has_using_declaration_ = true;
+    if (mode == VariableMode::kAwaitUsing) has_await_using_declaration_ = true;
     if (*was_added) locals_.Add(result);
     return result;
   }
@@ -850,6 +848,10 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
 
   bool needs_home_object_ : 1;
   bool is_block_scope_for_object_literal_ : 1;
+
+  // If declarations include any `using` or `await using` declarations.
+  bool has_using_declaration_ : 1;
+  bool has_await_using_declaration_ : 1;
 };
 
 class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
@@ -866,7 +868,7 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
   FunctionKind function_kind() const { return function_kind_; }
 
   // Inform the scope that the corresponding code uses "super".
-  Scope* RecordSuperPropertyUsage() {
+  void RecordSuperPropertyUsage() {
     DCHECK(IsConciseMethod(function_kind()) ||
            IsAccessorFunction(function_kind()) ||
            IsClassConstructor(function_kind()));
@@ -874,7 +876,6 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
     Scope* home_object_scope = GetHomeObjectScope();
     DCHECK_NOT_NULL(home_object_scope);
     home_object_scope->set_needs_home_object();
-    return home_object_scope;
   }
 
   bool uses_super_property() const { return uses_super_property_; }

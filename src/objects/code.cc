@@ -9,6 +9,8 @@
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/flush-instruction-cache.h"
 #include "src/codegen/reloc-info-inl.h"
+#include "src/codegen/source-position-table.h"
+#include "src/codegen/source-position.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/objects/code-inl.h"
 
@@ -50,6 +52,41 @@ void Code::ClearEmbeddedObjects(Heap* heap) {
 
 void Code::FlushICache() const {
   FlushInstructionCache(instruction_start(), instruction_size());
+}
+
+int Code::SourcePosition(int offset) const {
+  CHECK_NE(kind(), CodeKind::BASELINE);
+
+  // Subtract one because the current PC is one instruction after the call site.
+  offset--;
+
+  int position = 0;
+  if (!has_source_position_table()) return position;
+  for (SourcePositionTableIterator it(
+           source_position_table(),
+           SourcePositionTableIterator::kJavaScriptOnly,
+           SourcePositionTableIterator::kDontSkipFunctionEntry);
+       !it.done() && it.code_offset() <= offset; it.Advance()) {
+    position = it.source_position().ScriptOffset();
+  }
+  return position;
+}
+
+int Code::SourceStatementPosition(int offset) const {
+  CHECK_NE(kind(), CodeKind::BASELINE);
+
+  // Subtract one because the current PC is one instruction after the call site.
+  offset--;
+
+  int position = 0;
+  if (!has_source_position_table()) return position;
+  for (SourcePositionTableIterator it(source_position_table());
+       !it.done() && it.code_offset() <= offset; it.Advance()) {
+    if (it.is_statement()) {
+      position = it.source_position().ScriptOffset();
+    }
+  }
+  return position;
 }
 
 SafepointEntry Code::GetSafepointEntry(Isolate* isolate, Address pc) {
@@ -122,13 +159,13 @@ bool Code::Inlines(Tagged<SharedFunctionInfo> sfi) {
   DCHECK(is_optimized_code());
   DisallowGarbageCollection no_gc;
   Tagged<DeoptimizationData> const data =
-      DeoptimizationData::cast(deoptimization_data());
+      Cast<DeoptimizationData>(deoptimization_data());
   if (data->length() == 0) return false;
   if (data->SharedFunctionInfo() == sfi) return true;
   Tagged<DeoptimizationLiteralArray> const literals = data->LiteralArray();
   int const inlined_count = data->InlinedFunctionCount().value();
   for (int i = 0; i < inlined_count; ++i) {
-    if (SharedFunctionInfo::cast(literals->get(i)) == sfi) return true;
+    if (Cast<SharedFunctionInfo>(literals->get(i)) == sfi) return true;
   }
   return false;
 }
@@ -234,7 +271,7 @@ void Disassemble(const char* name, std::ostream& os, Isolate* isolate,
 
   if (code->uses_deoptimization_data()) {
     Tagged<DeoptimizationData> data =
-        DeoptimizationData::cast(code->deoptimization_data());
+        Cast<DeoptimizationData>(code->deoptimization_data());
     data->PrintDeoptimizationData(os);
   }
   os << "\n";

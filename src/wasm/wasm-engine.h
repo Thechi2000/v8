@@ -49,6 +49,7 @@ class ErrorThrower;
 struct ModuleWireBytes;
 class StreamingDecoder;
 class WasmFeatures;
+class WasmOrphanedGlobalHandle;
 
 class V8_EXPORT_PRIVATE CompilationResultResolver {
  public:
@@ -167,10 +168,10 @@ class V8_EXPORT_PRIVATE WasmEngine {
       Isolate* isolate, ErrorThrower* thrower, ModuleWireBytes bytes,
       Handle<Script> script,
       base::Vector<const uint8_t> asm_js_offset_table_bytes,
-      Handle<HeapNumber> uses_bitset, LanguageMode language_mode);
+      DirectHandle<HeapNumber> uses_bitset, LanguageMode language_mode);
   Handle<WasmModuleObject> FinalizeTranslatedAsmJs(
-      Isolate* isolate, Handle<AsmWasmData> asm_wasm_data,
-      Handle<Script> script);
+      Isolate* isolate, DirectHandle<AsmWasmData> asm_wasm_data,
+      DirectHandle<Script> script);
 
   // Synchronously compiles the given bytes that represent an encoded Wasm
   // module.
@@ -220,11 +221,6 @@ class V8_EXPORT_PRIVATE WasmEngine {
 
   void LeaveDebuggingForIsolate(Isolate* isolate);
 
-  // Exports the sharable parts of the given module object so that they can be
-  // transferred to a different Context/Isolate using the same engine.
-  std::shared_ptr<NativeModule> ExportNativeModule(
-      Handle<WasmModuleObject> module_object);
-
   // Imports the shared part of a module from a different Context/Isolate using
   // the the same engine, recreating a full module object in the given Isolate.
   Handle<WasmModuleObject> ImportNativeModule(
@@ -232,6 +228,9 @@ class V8_EXPORT_PRIVATE WasmEngine {
       base::Vector<const char> source_url);
 
   void FlushCode();
+
+  // Returns the code size of all Liftoff compiled functions in all modules.
+  size_t GetLiftoffCodeSize();
 
   AccountingAllocator* allocator() { return &allocator_; }
 
@@ -385,19 +384,20 @@ class V8_EXPORT_PRIVATE WasmEngine {
     return &call_descriptors_;
   }
 
-  // Returns either the compressed tagged pointer representing a null value or
-  // 0 if pointer compression is not available.
-  Tagged_t compressed_wasm_null_value_or_zero() const {
-    return wasm_null_tagged_compressed_;
-  }
-
   // Returns an approximation of current off-heap memory used by this engine,
   // excluding code space.
   size_t EstimateCurrentMemoryConsumption() const;
 
+  int GetDeoptsExecutedCount() const;
+  int IncrementDeoptsExecutedCount();
+
   // Call on process start and exit.
   static void InitializeOncePerProcess();
   static void GlobalTearDown();
+
+  static WasmOrphanedGlobalHandle* NewOrphanedGlobalHandle(
+      WasmOrphanedGlobalHandle** pointer);
+  static void FreeAllOrphanedGlobalHandles(WasmOrphanedGlobalHandle* start);
 
  private:
   struct CurrentGCInfo;
@@ -407,7 +407,7 @@ class V8_EXPORT_PRIVATE WasmEngine {
   AsyncCompileJob* CreateAsyncCompileJob(
       Isolate* isolate, WasmFeatures enabled,
       CompileTimeImports compile_imports,
-      base::OwnedVector<const uint8_t> bytes, Handle<Context> context,
+      base::OwnedVector<const uint8_t> bytes, DirectHandle<Context> context,
       const char* api_method_name,
       std::shared_ptr<CompilationResultResolver> resolver, int compilation_id);
 
@@ -431,8 +431,8 @@ class V8_EXPORT_PRIVATE WasmEngine {
 
   std::atomic<int> next_compilation_id_{0};
 
-  // Compressed tagged pointer to null value.
-  std::atomic<Tagged_t> wasm_null_tagged_compressed_{0};
+  // Counter for number of times a deopt was executed.
+  std::atomic<int> deopts_executed_{0};
 
   TypeCanonicalizer type_canonicalizer_;
 

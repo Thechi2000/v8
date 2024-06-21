@@ -360,7 +360,8 @@ WASM_COMPILED_EXEC_TEST(TableCopyInboundsFrom6To6) {
 
 namespace {
 template <typename... Args>
-void CheckTable(Isolate* isolate, Handle<WasmTableObject> table, Args... args) {
+void CheckTable(Isolate* isolate, DirectHandle<WasmTableObject> table,
+                Args... args) {
   uint32_t args_length = static_cast<uint32_t>(sizeof...(args));
   CHECK_EQ(table->current_length(), args_length);
   Handle<Object> handles[] = {args...};
@@ -370,7 +371,7 @@ void CheckTable(Isolate* isolate, Handle<WasmTableObject> table, Args... args) {
 }
 
 template <typename WasmRunner, typename... Args>
-void CheckTableCall(Isolate* isolate, Handle<WasmTableObject> table,
+void CheckTableCall(Isolate* isolate, DirectHandle<WasmTableObject> table,
                     WasmRunner* r, uint32_t function_index, Args... args) {
   uint32_t args_length = static_cast<uint32_t>(sizeof...(args));
   CHECK_EQ(table->current_length(), args_length);
@@ -410,7 +411,7 @@ void TestTableCopyElems(TestExecutionTier execution_tier, int table_dst,
   r.builder().InitializeWrapperCache();
 
   auto table =
-      handle(WasmTableObject::cast(
+      handle(Cast<WasmTableObject>(
                  r.builder().trusted_instance_data()->tables()->get(table_dst)),
              isolate);
   r.CheckCallViaJS(0, 0, 0, kTableSize);
@@ -490,7 +491,7 @@ void TestTableCopyCalls(TestExecutionTier execution_tier, int table_dst,
            kExprI32Const, 0});
 
   auto table =
-      handle(WasmTableObject::cast(
+      handle(Cast<WasmTableObject>(
                  r.builder().trusted_instance_data()->tables()->get(table_dst)),
              isolate);
 
@@ -557,7 +558,7 @@ void TestTableCopyOobWrites(TestExecutionTier execution_tier, int table_dst,
   r.builder().InitializeWrapperCache();
 
   auto table =
-      handle(WasmTableObject::cast(
+      handle(Cast<WasmTableObject>(
                  r.builder().trusted_instance_data()->tables()->get(table_dst)),
              isolate);
   // Fill the dst table with values from the src table, to make checks easier.

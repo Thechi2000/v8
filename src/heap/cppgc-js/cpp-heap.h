@@ -16,6 +16,7 @@ static_assert(
 #include "src/base/flags.h"
 #include "src/base/macros.h"
 #include "src/base/optional.h"
+#include "src/base/utils/random-number-generator.h"
 #include "src/heap/cppgc-js/cross-heap-remembered-set.h"
 #include "src/heap/cppgc/heap-base.h"
 #include "src/heap/cppgc/marker.h"
@@ -116,8 +117,7 @@ class V8_EXPORT_PRIVATE CppHeap final
 
   CppHeap(v8::Platform*,
           const std::vector<std::unique_ptr<cppgc::CustomSpaceBase>>&,
-          const v8::WrapperDescriptor&, cppgc::Heap::MarkingType,
-          cppgc::Heap::SweepingType);
+          cppgc::Heap::MarkingType, cppgc::Heap::SweepingType);
   ~CppHeap() final;
 
   CppHeap(const CppHeap&) = delete;
@@ -148,7 +148,14 @@ class V8_EXPORT_PRIVATE CppHeap final
   void FinishMarkingAndStartSweeping();
   void EnterFinalPause(cppgc::EmbedderStackState stack_state);
   bool FinishConcurrentMarkingIfNeeded();
-  void WriteBarrier(Tagged<JSObject>);
+
+  // This method is used to re-enable concurrent marking when the isolate is
+  // moved into the foreground. This method expects that concurrent marking was
+  // not started initially because the isolate was in the background but is
+  // still generally supported.
+  void ReEnableConcurrentMarking();
+
+  void WriteBarrier(void*);
 
   bool ShouldFinalizeIncrementalMarking() const;
 
@@ -158,10 +165,6 @@ class V8_EXPORT_PRIVATE CppHeap final
   void ResetAllocatedObjectSize(size_t) final {}
 
   MetricRecorderAdapter* GetMetricRecorder() const;
-
-  v8::WrapperDescriptor wrapper_descriptor() const {
-    return wrapper_descriptor_;
-  }
 
   Isolate* isolate() const { return isolate_; }
 
@@ -185,6 +188,9 @@ class V8_EXPORT_PRIVATE CppHeap final
 
   void StartIncrementalGarbageCollection(cppgc::internal::GCConfig) override;
   size_t epoch() const override;
+#ifdef V8_ENABLE_ALLOCATION_TIMEOUT
+  v8::base::Optional<int> UpdateAllocationTimeout() final;
+#endif  // V8_ENABLE_ALLOCATION_TIMEOUT
 
   V8_INLINE void RememberCrossHeapReferenceIfNeeded(
       v8::internal::Tagged<v8::internal::JSObject> host_obj, void* value);
@@ -241,8 +247,6 @@ class V8_EXPORT_PRIVATE CppHeap final
   // prohibited.
   int64_t buffered_allocated_bytes_ = 0;
 
-  v8::WrapperDescriptor wrapper_descriptor_;
-
   bool in_detached_testing_mode_ = false;
   bool force_incremental_marking_for_testing_ = false;
   bool is_in_v8_marking_step_ = false;
@@ -259,6 +263,10 @@ class V8_EXPORT_PRIVATE CppHeap final
   std::optional<cppgc::EmbedderStackState> detached_override_stack_state_;
   std::unique_ptr<v8::internal::EmbedderStackStateScope>
       override_stack_state_scope_;
+#ifdef V8_ENABLE_ALLOCATION_TIMEOUT
+  // Use standalone RNG to avoid initialization order dependency.
+  base::Optional<v8::base::RandomNumberGenerator> allocation_timeout_rng_;
+#endif  // V8_ENABLE_ALLOCATION_TIMEOUT
 
   friend class MetricRecorderAdapter;
 };
