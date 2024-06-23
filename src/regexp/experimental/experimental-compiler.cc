@@ -4,13 +4,8 @@
 
 #include "src/regexp/experimental/experimental-compiler.h"
 
-#include <cstddef>
-
-#include "src/base/strings.h"
 #include "src/flags/flags.h"
 #include "src/regexp/experimental/experimental.h"
-#include "src/regexp/regexp-flags.h"
-#include "src/zone/zone-containers.h"
 #include "src/zone/zone-list-inl.h"
 
 namespace v8 {

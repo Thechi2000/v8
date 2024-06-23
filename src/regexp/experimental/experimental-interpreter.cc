@@ -4,21 +4,8 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
-#include "src/base/strings.h"
-#include "src/base/vector.h"
-#include "src/common/assert-scope.h"
-#include "src/flags/flags.h"
-#include "src/objects/fixed-array-inl.h"
-#include "src/objects/oddball.h"
 #include "src/objects/string-inl.h"
-#include "src/regexp/experimental/experimental-bytecode.h"
 #include "src/regexp/experimental/experimental.h"
-#include "src/regexp/regexp-ast.h"
-#include "src/strings/char-predicates-inl.h"
-#include "src/zone/zone-allocator.h"
-#include "src/zone/zone-containers.h"
-#include "src/zone/zone-list-inl.h"
-#include "src/zone/zone-list.h"
 
 namespace v8 {
 namespace internal {
