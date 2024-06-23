@@ -4,10 +4,6 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
-#include <cstdint>
-#include <optional>
-
-#include "src/base/optional.h"
 #include "src/base/strings.h"
 #include "src/base/vector.h"
 #include "src/common/assert-scope.h"
@@ -334,15 +330,15 @@ class NfaInterpreter {
         active_threads_(0, zone),
         blocked_threads_(0, zone),
         register_array_allocator_(zone),
-        lookaround_match_index_array_allocator_(zone),
-        lookaround_clock_array_allocator_(zone),
+        lookaround_match_index_array_allocator_(std::nullopt),
+        lookaround_clock_array_allocator_(std::nullopt),
         quantifier_array_allocator_(std::nullopt),
         capture_clock_array_allocator_(std::nullopt),
         best_match_thread_(std::nullopt),
-        lookarounds_(0, zone),
+        lookarounds_(std::nullopt),
         lookbehind_pc_(std::nullopt),
-        lookarounds_priority_(0, zone),
-        lookaround_table_(zone),
+        lookarounds_priority_(std::nullopt),
+        lookaround_table_(std::nullopt),
         reverse_(false),
         current_lookaround_(-1),
         filter_groups_pc_(std::nullopt),
@@ -365,6 +361,13 @@ class NfaInterpreter {
       auto& inst = bytecode_[i];
 
       if (inst.opcode == RegExpInstruction::START_LOOKAROUND) {
+        if (!lookaround_clock_array_allocator_.has_value()) {
+          DCHECK(!lookaround_match_index_array_allocator_.has_value());
+
+          lookaround_clock_array_allocator_.emplace(zone_);
+          lookaround_match_index_array_allocator_.emplace(zone_);
+        }
+
         lookaround_index = inst.payload.start_lookaround.lookaround_index();
         lookaround.match_pc_ = i;
         lookaround.is_ahead = inst.payload.start_lookaround.is_ahead();
@@ -373,13 +376,22 @@ class NfaInterpreter {
       if (inst.opcode == RegExpInstruction::WRITE_LOOKAROUND_TABLE) {
         lookaround.capture_pc_ = i + 1;
 
-        while (lookarounds_.length() <= lookaround_index) {
-          lookarounds_.Add({-1, -1, false}, zone_);
-        }
-        lookarounds_.Set(lookaround_index, lookaround);
+        if (!lookarounds_.has_value()) {
+          DCHECK(!lookarounds_priority_.has_value() &&
+                 !lookaround_table_.has_value());
 
-        lookarounds_priority_.Add(lookaround_index, zone_);
-        lookaround_table_.emplace_back(input_.length() + 1, zone_);
+          lookarounds_.emplace(0, zone_);
+          lookarounds_priority_.emplace(0, zone_);
+          lookaround_table_.emplace(zone_);
+        }
+
+        while (lookarounds_->length() <= lookaround_index) {
+          lookarounds_->Add({-1, -1, false}, zone_);
+        }
+        lookarounds_->Set(lookaround_index, lookaround);
+
+        lookarounds_priority_->Add(lookaround_index, zone_);
+        lookaround_table_->emplace_back(input_.length() + 1, zone_);
       }
 
       if (RegExpInstruction::IsFilter(inst) && !filter_groups_pc_.has_value()) {
@@ -442,7 +454,10 @@ class NfaInterpreter {
   // the number of matches found.
   int FindMatches(int32_t* output_registers, int output_register_count) {
     const int max_match_num = output_register_count / register_count_per_match_;
-    FillLookaroundTable();
+
+    if (lookarounds_.has_value()) {
+      FillLookaroundTable();
+    }
 
     int match_num = 0;
     while (match_num != max_match_num) {
@@ -533,12 +548,15 @@ class NfaInterpreter {
   };
 
   void FillLookaroundTable() {
+    DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
+    DCHECK(lookarounds_.has_value());
+
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
 
     int old_input_index = input_index_;
 
-    for (int i = lookarounds_priority_.length() - 1; i >= 0; --i) {
+    for (int i = lookarounds_priority_->length() - 1; i >= 0; --i) {
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
         DestroyThread(t);
@@ -550,22 +568,14 @@ class NfaInterpreter {
       }
       active_threads_.DropAndClear();
 
-      int idx = lookarounds_priority_[i];
+      int idx = lookarounds_priority_->at(i);
 
       current_lookaround_ = idx;
-      reverse_ = lookarounds_[idx].is_ahead;
+      reverse_ = lookarounds_->at(idx).is_ahead;
       input_index_ = reverse_ ? input_.length() : 0;
 
-      // TODO avoid unused allocation ?
-      active_threads_.Add(
-          InterpreterThread(
-              lookarounds_[idx].match_pc_,
-              NewRegisterArray(kUndefinedRegisterValue),
-              NewGetLookaroundMatchIndexArray(kUndefinedMatchIndexValue),
-              NewQuantifierClockArray(0), NewCaptureClockArray(0),
-              NewLookaroundClockArray(0),
-              InterpreterThread::ConsumedCharacter::DidConsume),
-          zone_);
+      active_threads_.Add(NewEmptyThread(lookarounds_->at(idx).match_pc_),
+                          zone_);
 
       RunActiveThreadsToEnd();
     }
@@ -578,19 +588,21 @@ class NfaInterpreter {
   // Capture the groups in matched lookarounds.
   void FillLookaroundCaptures() {
     DCHECK(best_match_thread_.has_value());
+    DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
+    DCHECK(lookarounds_.has_value());
 
     InterpreterThread base_thread = *best_match_thread_;
 
     // We need to capture the lookarounds from parents to childrens, since we
     // need the index on which the lookaround was matched, and those indexes are
     // computed when the parent expression is captured.
-    for (int lookaround_id : lookarounds_priority_) {
+    for (int lookaround_id : *lookarounds_priority_) {
       if (GetLookaroundMatchIndexArray(base_thread)[lookaround_id] ==
           kUndefinedMatchIndexValue) {
         continue;
       }
 
-      Lookaround& lookaround = lookarounds_[lookaround_id];
+      Lookaround& lookaround = (*lookarounds_)[lookaround_id];
 
       std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
                 LastInputIndex());
@@ -796,7 +808,9 @@ class NfaInterpreter {
     }
 
     if (best_match_thread_.has_value()) {
-      FillLookaroundCaptures();
+      if (lookarounds_.has_value()) {
+        FillLookaroundCaptures();
+      }
 
       DCHECK(best_match_thread_.has_value());
       best_match_registers_ = GetFilteredRegisters(*best_match_thread_);
@@ -982,7 +996,7 @@ class NfaInterpreter {
           // has found a match and needs to be destroyed. Since the lookaround
           // is verified at this position, we update the `lookaround_table_`.
           DCHECK_NE(current_lookaround_, -1);
-          lookaround_table_[current_lookaround_][input_index_] = true;
+          (*lookaround_table_)[current_lookaround_][input_index_] = true;
           DestroyThread(t);
           return RegExp::kInternalRegExpSuccess;
         case RegExpInstruction::READ_LOOKAROUND_TABLE:
@@ -990,8 +1004,8 @@ class NfaInterpreter {
           // complete a match at the current position (depending on whether or
           // not the lookaround is positive). The lookaround priority list
           // ensures that all the lookaround has already been run.
-          if (lookaround_table_[inst.payload.read_lookaround.lookaround_index()]
-                               [input_index_] !=
+          if ((*lookaround_table_)[inst.payload.read_lookaround
+                                       .lookaround_index()][input_index_] !=
               inst.payload.read_lookaround.is_positive()) {
             DestroyThread(t);
             return RegExp::kInternalRegExpSuccess;
@@ -1100,8 +1114,11 @@ class NfaInterpreter {
     return base::Vector<int>(t.register_array_begin, register_count_per_match_);
   }
   base::Vector<int> GetLookaroundMatchIndexArray(InterpreterThread t) {
+    DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
+    DCHECK_NOT_NULL(t.lookaround_match_index_array_begin);
+
     return base::Vector<int>(t.lookaround_match_index_array_begin,
-                             lookaround_table_.size());
+                             lookaround_table_->size());
   }
 
   base::Vector<uint64_t> GetQuantifierClockArray(InterpreterThread t) {
@@ -1119,8 +1136,11 @@ class NfaInterpreter {
                                   register_count_per_match_);
   }
   base::Vector<uint64_t> GetLookaroundClockArray(InterpreterThread t) {
+    DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
+    DCHECK_NOT_NULL(t.lookaround_clock_array_begin);
+
     return base::Vector<uint64_t>(t.lookaround_clock_array_begin,
-                                  lookaround_table_.size());
+                                  lookaround_table_->size());
   }
 
   int* NewRegisterArrayUninitialized() {
@@ -1140,8 +1160,9 @@ class NfaInterpreter {
   }
 
   int* NewGetLookaroundMatchIndexArrayUninitialized() {
-    return lookaround_match_index_array_allocator_.allocate(
-        lookaround_table_.size());
+    DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
+    return lookaround_match_index_array_allocator_->allocate(
+        lookaround_table_->size());
   }
 
   int* NewGetLookaroundMatchIndexArray(int fill_value) {
@@ -1153,7 +1174,8 @@ class NfaInterpreter {
 
   void FreeNewGetLookaroundMatchIndexArray(
       int* lookaround_match_index_array_begin) {
-    lookaround_match_index_array_allocator_.deallocate(
+    DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
+    lookaround_match_index_array_allocator_->deallocate(
         lookaround_match_index_array_begin, register_count_per_match_);
   }
   uint64_t* NewQuantifierClockArrayUninitialized() {
@@ -1197,21 +1219,22 @@ class NfaInterpreter {
 
   uint64_t* NewLookaroundClockArrayUninitialized() {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
-    return lookaround_clock_array_allocator_.allocate(lookaround_table_.size());
+    return lookaround_clock_array_allocator_->allocate(
+        lookaround_table_->size());
   }
 
   uint64_t* NewLookaroundClockArray(uint64_t fill_value) {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
     uint64_t* array_begin = NewLookaroundClockArrayUninitialized();
-    uint64_t* array_end = array_begin + lookaround_table_.size();
+    uint64_t* array_end = array_begin + lookaround_table_->size();
     std::fill(array_begin, array_end, fill_value);
     return array_begin;
   }
 
   void FreeLookaroundClockArray(uint64_t* lookaround_clock_array_begin) {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
-    lookaround_clock_array_allocator_.deallocate(lookaround_clock_array_begin,
-                                                 register_count_per_match_);
+    lookaround_clock_array_allocator_->deallocate(lookaround_clock_array_begin,
+                                                  register_count_per_match_);
   }
 
   // Creates an `InterpreterThread` at the given pc and allocates its
@@ -1221,13 +1244,14 @@ class NfaInterpreter {
   InterpreterThread NewEmptyThread(int pc) {
     if (v8_flags.experimental_regexp_engine_capture_group_opt) {
       return InterpreterThread(
-          pc, NewGetLookaroundMatchIndexArray(kUndefinedMatchIndexValue),
-          NewRegisterArray(kUndefinedRegisterValue), NewQuantifierClockArray(0),
-          NewCaptureClockArray(0), NewLookaroundClockArray(0),
+          pc, NewRegisterArray(kUndefinedRegisterValue),
+          NewGetLookaroundMatchIndexArray(kUndefinedMatchIndexValue),
+          NewQuantifierClockArray(0), NewCaptureClockArray(0),
+          NewLookaroundClockArray(0),
           InterpreterThread::ConsumedCharacter::DidConsume);
     } else {
       return InterpreterThread(
-          pc, nullptr, NewRegisterArray(kUndefinedRegisterValue), nullptr,
+          pc, NewRegisterArray(kUndefinedRegisterValue), nullptr, nullptr,
           nullptr, nullptr, InterpreterThread::ConsumedCharacter::DidConsume);
     }
   }
@@ -1238,15 +1262,15 @@ class NfaInterpreter {
   InterpreterThread NewUninitializedThread(int pc) {
     if (v8_flags.experimental_regexp_engine_capture_group_opt) {
       return InterpreterThread(
-          pc, NewGetLookaroundMatchIndexArrayUninitialized(),
-          NewRegisterArrayUninitialized(),
+          pc, NewRegisterArrayUninitialized(),
+          NewGetLookaroundMatchIndexArrayUninitialized(),
           NewQuantifierClockArrayUninitialized(),
           NewCaptureClockArrayUninitialized(),
           NewLookaroundClockArrayUninitialized(),
           InterpreterThread::ConsumedCharacter::DidConsume);
     } else {
       return InterpreterThread(
-          pc, nullptr, NewRegisterArrayUninitialized(), nullptr, nullptr,
+          pc, NewRegisterArrayUninitialized(), nullptr, nullptr, nullptr,
           nullptr, InterpreterThread::ConsumedCharacter::DidConsume);
     }
   }
@@ -1476,8 +1500,10 @@ class NfaInterpreter {
   // RecyclingZoneAllocator maintains a linked list through freed
   // allocations for reuse if possible.
   RecyclingZoneAllocator<int> register_array_allocator_;
-  RecyclingZoneAllocator<int> lookaround_match_index_array_allocator_;
-  RecyclingZoneAllocator<uint64_t> lookaround_clock_array_allocator_;
+  std::optional<RecyclingZoneAllocator<int>>
+      lookaround_match_index_array_allocator_;
+  std::optional<RecyclingZoneAllocator<uint64_t>>
+      lookaround_clock_array_allocator_;
   std::optional<RecyclingZoneAllocator<uint64_t>> quantifier_array_allocator_;
   std::optional<RecyclingZoneAllocator<uint64_t>>
       capture_clock_array_allocator_;
@@ -1498,17 +1524,17 @@ class NfaInterpreter {
   // Stores the match pc, capture pc and direction of each lookaround,
   // mapped by lookaround id. Computed during the NFA instantiation (see the
   // constructor).
-  ZoneList<Lookaround> lookarounds_;
+  std::optional<ZoneList<Lookaround>> lookarounds_;
   std::optional<ZoneList<int>> lookbehind_pc_;
 
   // Stores the id of the lookarounds, ordered such that a lookaround can
   // only depend on lookarounds appearing after its position in this list.
-  ZoneList<int> lookarounds_priority_;
+  std::optional<ZoneList<int>> lookarounds_priority_;
 
   // Truth table for the lookarounds. lookaround_table_[l][r] indicates
   // whether the lookaround of index l did complete a match on the position
   // r.
-  ZoneVector<ZoneVector<bool>> lookaround_table_;
+  std::optional<ZoneVector<ZoneVector<bool>>> lookaround_table_;
 
   // Whether we are traversing the input from end to start.
   bool reverse_;
