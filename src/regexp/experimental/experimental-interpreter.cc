@@ -4,6 +4,8 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
+#include <cstdint>
+
 #include "src/objects/string-inl.h"
 #include "src/regexp/experimental/experimental.h"
 
@@ -336,6 +338,11 @@ class NfaInterpreter {
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
+    int l = 0;
+    for (auto i : bytecode_) {
+      std::cout << l++ << ": " << i << std::endl;
+    }
+
     // Iterate over the bytecode to find the PC of the filtering
     // instructions and lookarounds, and the number of quantifiers. It also
     // builds a lookaround priority list: the compilation ensures that a
@@ -351,6 +358,8 @@ class NfaInterpreter {
       if (inst.opcode == RegExpInstruction::START_LOOKAROUND) {
         DCHECK(!lookaround.has_value());
 
+        // Stores the partial information for a lookaround. The rest will be
+        // determined upon reaching a `WRITE_LOOKAROUND_TABLE` instruction.
         lookaround_index = inst.payload.start_lookaround.lookaround_index();
         lookaround =
             Lookaround{.match_pc = i,
@@ -369,8 +378,12 @@ class NfaInterpreter {
 
       if (inst.opcode == RegExpInstruction::WRITE_LOOKAROUND_TABLE) {
         DCHECK(lookaround.has_value());
+
+        // Fills the current lookaround data.
         lookaround->capture_pc = i + 1;
 
+        // Since the lookarounds are not in order in the `lookarounds_` array,
+        // we first fill it until it has the correct size.
         while (lookarounds_.length() <= lookaround_index) {
           lookarounds_.Add({-1, -1, false}, zone_);
         }
@@ -394,6 +407,7 @@ class NfaInterpreter {
       }
     }
 
+    // Iniitializes the lookaround truth table and required allocators.
     if (only_captureless_lookbehinds_) {
       lookbehind_table_.emplace(lookarounds_.length(), zone_);
       lookbehind_table_->AddBlock(false, lookarounds_.length(), zone_);
@@ -419,6 +433,8 @@ class NfaInterpreter {
           register_count_per_match_ * sizeof(int) +  // RegisterArray
           quantifier_count_ * sizeof(uint64_t) +     // QuantifierClockArray
           register_count_per_match_ * sizeof(uint64_t) +  // CaptureClockArray
+          lookarounds_.length() * sizeof(uint64_t) +  // LookaroundClockArray
+          lookarounds_.length() * sizeof(int) +  // LookaroundMatchIndexArray
           sizeof(InterpreterThread);
     }
 
@@ -1179,14 +1195,14 @@ class NfaInterpreter {
                                          register_count_per_match_);
   }
 
-  int* NewGetLookaroundMatchIndexArrayUninitialized() {
+  int* NewLookaroundMatchIndexArrayUninitialized() {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
     return lookaround_match_index_array_allocator_->allocate(
         lookaround_table_->size());
   }
 
-  int* NewGetLookaroundMatchIndexArray(int fill_value) {
-    int* array_begin = NewGetLookaroundMatchIndexArrayUninitialized();
+  int* NewLookaroundMatchIndexArray(int fill_value) {
+    int* array_begin = NewLookaroundMatchIndexArrayUninitialized();
     int* array_end = array_begin + register_count_per_match_;
     std::fill(array_begin, array_end, fill_value);
     return array_begin;
@@ -1267,7 +1283,7 @@ class NfaInterpreter {
           pc, NewRegisterArray(kUndefinedRegisterValue),
           only_captureless_lookbehinds_
               ? nullptr
-              : NewGetLookaroundMatchIndexArray(kUndefinedMatchIndexValue),
+              : NewLookaroundMatchIndexArray(kUndefinedMatchIndexValue),
           NewQuantifierClockArray(0), NewCaptureClockArray(0),
           only_captureless_lookbehinds_ ? nullptr : NewLookaroundClockArray(0),
           InterpreterThread::ConsumedCharacter::DidConsume);
@@ -1287,7 +1303,7 @@ class NfaInterpreter {
           pc, NewRegisterArrayUninitialized(),
           only_captureless_lookbehinds_
               ? nullptr
-              : NewGetLookaroundMatchIndexArrayUninitialized(),
+              : NewLookaroundMatchIndexArrayUninitialized(),
           NewQuantifierClockArrayUninitialized(),
           NewCaptureClockArrayUninitialized(),
           only_captureless_lookbehinds_
@@ -1569,12 +1585,17 @@ class NfaInterpreter {
   // Truth table for the lookarounds. lookaround_table_[l][r] indicates
   // whether the lookaround of index l did complete a match on the position
   // r.
+  // Only used when `only_captureless_lookbehinds_` is false.
   std::optional<ZoneVector<ZoneVector<bool>>> lookaround_table_;
 
   // Truth table for the lookbehinds. lookbehind_table_[k] indicates whether
   // the lookbehind of index k did complete a match on the current position.
+  // Only used when `only_captureless_lookbehinds_` is true.
   std::optional<ZoneList<bool>> lookbehind_table_;
 
+  // This indicates whether the regexp only contains captureless lookbehinds. In
+  // that case, it can benefit from a huge optimization, and is available
+  // without the `--experimental_regexp_engine_capture_group_opt` flag.
   bool only_captureless_lookbehinds_;
 
   // Whether we are traversing the input from end to start.
