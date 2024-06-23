@@ -9,6 +9,7 @@
 #include "src/common/assert-scope.h"
 #include "src/flags/flags.h"
 #include "src/objects/fixed-array-inl.h"
+#include "src/objects/oddball.h"
 #include "src/objects/string-inl.h"
 #include "src/regexp/experimental/experimental-bytecode.h"
 #include "src/regexp/experimental/experimental.h"
@@ -335,18 +336,22 @@ class NfaInterpreter {
         quantifier_array_allocator_(std::nullopt),
         capture_clock_array_allocator_(std::nullopt),
         best_match_thread_(std::nullopt),
-        lookarounds_(std::nullopt),
-        lookbehind_pc_(std::nullopt),
-        lookarounds_priority_(std::nullopt),
+        lookarounds_(0, zone),
+        lookarounds_priority_(0, zone),
         lookaround_table_(std::nullopt),
+        lookbehind_table_(std::nullopt),
+        only_captureless_lookbehinds_(true),
         reverse_(false),
         current_lookaround_(-1),
         filter_groups_pc_(std::nullopt),
-        lookbehind_table_(std::nullopt),
         zone_(zone) {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
+
+    for (auto i : bytecode_) {
+      std::cout << i << std::endl;
+    }
 
     // Iterate over the bytecode to find the PC of the filtering
     // instructions and lookarounds, and the number of quantifiers. It also
@@ -355,47 +360,37 @@ class NfaInterpreter {
     // it contains. Thus lookarounds must be run from the last to the first
     // (regarding their appearance order) to never execute a lookaround before
     // one of its child.
-    struct Lookaround lookaround;
+    std::optional<struct Lookaround> lookaround;
     int lookaround_index;
     for (int i = 0; i < bytecode_.length() - 1; ++i) {
       auto& inst = bytecode_[i];
 
       if (inst.opcode == RegExpInstruction::START_LOOKAROUND) {
-        if (!lookaround_clock_array_allocator_.has_value()) {
-          DCHECK(!lookaround_match_index_array_allocator_.has_value());
-
-          lookaround_clock_array_allocator_.emplace(zone_);
-          lookaround_match_index_array_allocator_.emplace(zone_);
-        }
+        DCHECK(!lookaround.has_value());
 
         lookaround_index = inst.payload.start_lookaround.lookaround_index();
-        lookaround.match_pc_ = i;
-        lookaround.is_ahead = inst.payload.start_lookaround.is_ahead();
+        lookaround =
+            Lookaround{.match_pc = i,
+                       .capture_pc = -1,
+                       .is_ahead = inst.payload.start_lookaround.is_ahead()};
+      }
+
+      if (inst.opcode == RegExpInstruction::SET_REGISTER_TO_CP &&
+          lookaround.has_value()) {
+        only_captureless_lookbehinds_ = false;
       }
 
       if (inst.opcode == RegExpInstruction::WRITE_LOOKAROUND_TABLE) {
-        lookaround.capture_pc_ = i + 1;
+        DCHECK(lookaround.has_value());
+        lookaround->capture_pc = i + 1;
 
-        if (!lookarounds_.has_value()) {
-          DCHECK(!lookarounds_priority_.has_value() &&
-                 !lookaround_table_.has_value());
-
-          lookarounds_.emplace(0, zone_);
-          lookarounds_priority_.emplace(0, zone_);
-          lookaround_table_.emplace(zone_);
+        while (lookarounds_.length() <= lookaround_index) {
+          lookarounds_.Add({-1, -1, false}, zone_);
         }
+        lookarounds_.Set(lookaround_index, *lookaround);
+        lookaround = {};
 
-        while (lookarounds_->length() <= lookaround_index) {
-          lookarounds_->Add({-1, -1, false}, zone_);
-        }
-        lookarounds_->Set(lookaround_index, lookaround);
-
-        lookarounds_priority_->Add(lookaround_index, zone_);
-        lookaround_table_->emplace_back(input_.length() + 1, zone_);
-      }
-
-      if (RegExpInstruction::IsFilter(inst) && !filter_groups_pc_.has_value()) {
-        filter_groups_pc_ = i;
+        lookarounds_priority_.Add(lookaround_index, zone_);
       }
 
       // The first `FILTER_*` instruction encountered is the start of the
@@ -405,28 +400,23 @@ class NfaInterpreter {
         filter_groups_pc_ = i;
       }
 
-      // The first instruction to follow the `FILTER_*` section or the `ACCEPT`
-      // instruction is the start of the lookbehind of index 0.
-      if ((RegExpInstruction::IsFilter(inst) ||
-           inst.opcode == RegExpInstruction::ACCEPT) &&
-          !RegExpInstruction::IsFilter(bytecode_[i + 1]) &&
-          bytecode_[i + 1].opcode != RegExpInstruction::START_LOOKAROUND) {
-        lookbehind_pc_.emplace(0, zone_);
-        lookbehind_table_.emplace(0, zone_);
-
-        lookbehind_pc_->Add(i + 1, zone_);
-        lookbehind_table_->Add(false, zone_);
-      }
-
-      if (inst.opcode == RegExpInstruction::Opcode::WRITE_LOOKBEHIND_TABLE) {
-        lookbehind_pc_->Add(i + 1, zone_);
-        lookbehind_table_->Add(false, zone_);
-      }
-
       if (inst.opcode == RegExpInstruction::SET_QUANTIFIER_TO_CLOCK) {
         DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
         quantifier_count_ =
             std::max(quantifier_count_, inst.payload.quantifier_id + 1);
+      }
+    }
+
+    if (only_captureless_lookbehinds_) {
+      lookbehind_table_.emplace(lookarounds_.length(), zone_);
+      lookbehind_table_->AddBlock(false, lookarounds_.length(), zone_);
+    } else {
+      lookaround_clock_array_allocator_.emplace(zone_);
+      lookaround_match_index_array_allocator_.emplace(zone_);
+
+      lookaround_table_.emplace(zone_);
+      for (int i = 0; i < lookarounds_.length(); ++i) {
+        lookaround_table_->emplace_back(input_.length() + 1, zone_);
       }
     }
 
@@ -455,7 +445,7 @@ class NfaInterpreter {
   int FindMatches(int32_t* output_registers, int output_register_count) {
     const int max_match_num = output_register_count / register_count_per_match_;
 
-    if (lookarounds_.has_value()) {
+    if (!only_captureless_lookbehinds_) {
       FillLookaroundTable();
     }
 
@@ -549,14 +539,14 @@ class NfaInterpreter {
 
   void FillLookaroundTable() {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
-    DCHECK(lookarounds_.has_value());
+    DCHECK(only_captureless_lookbehinds_);
 
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
 
     int old_input_index = input_index_;
 
-    for (int i = lookarounds_priority_->length() - 1; i >= 0; --i) {
+    for (int i = lookarounds_priority_.length() - 1; i >= 0; --i) {
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
         DestroyThread(t);
@@ -568,14 +558,13 @@ class NfaInterpreter {
       }
       active_threads_.DropAndClear();
 
-      int idx = lookarounds_priority_->at(i);
+      int idx = lookarounds_priority_.at(i);
 
       current_lookaround_ = idx;
-      reverse_ = lookarounds_->at(idx).is_ahead;
+      reverse_ = lookarounds_.at(idx).is_ahead;
       input_index_ = reverse_ ? input_.length() : 0;
 
-      active_threads_.Add(NewEmptyThread(lookarounds_->at(idx).match_pc_),
-                          zone_);
+      active_threads_.Add(NewEmptyThread(lookarounds_.at(idx).match_pc), zone_);
 
       RunActiveThreadsToEnd();
     }
@@ -589,20 +578,20 @@ class NfaInterpreter {
   void FillLookaroundCaptures() {
     DCHECK(best_match_thread_.has_value());
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
-    DCHECK(lookarounds_.has_value());
+    DCHECK(only_captureless_lookbehinds_);
 
     InterpreterThread base_thread = *best_match_thread_;
 
     // We need to capture the lookarounds from parents to childrens, since we
     // need the index on which the lookaround was matched, and those indexes are
     // computed when the parent expression is captured.
-    for (int lookaround_id : *lookarounds_priority_) {
+    for (int lookaround_id : lookarounds_priority_) {
       if (GetLookaroundMatchIndexArray(base_thread)[lookaround_id] ==
           kUndefinedMatchIndexValue) {
         continue;
       }
 
-      Lookaround& lookaround = (*lookarounds_)[lookaround_id];
+      Lookaround& lookaround = lookarounds_[lookaround_id];
 
       std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
                 LastInputIndex());
@@ -625,7 +614,7 @@ class NfaInterpreter {
 
       // We reuse the same thread as initial thread, to avoid having to merge
       // the new `best_match_thread_` with the previous results.
-      base_thread.pc = lookaround.capture_pc_;
+      base_thread.pc = lookaround.capture_pc;
       base_thread.consumed_since_last_quantifier =
           InterpreterThread::ConsumedCharacter::DidConsume;
       active_threads_.Add(base_thread, zone_);
@@ -796,9 +785,9 @@ class NfaInterpreter {
 
     active_threads_.Add(NewEmptyThread(0), zone_);
 
-    if (lookbehind_pc_.has_value()) {
-      for (int i : *lookbehind_pc_) {
-        active_threads_.Add(NewEmptyThread(i), zone_);
+    if (only_captureless_lookbehinds_) {
+      for (int i : lookarounds_priority_) {
+        active_threads_.Add(NewEmptyThread(lookarounds_.at(i).match_pc), zone_);
       }
     }
 
@@ -808,7 +797,7 @@ class NfaInterpreter {
     }
 
     if (best_match_thread_.has_value()) {
-      if (lookarounds_.has_value()) {
+      if (!only_captureless_lookbehinds_) {
         FillLookaroundCaptures();
       }
 
@@ -995,8 +984,17 @@ class NfaInterpreter {
           // Reaching this instruction means that the current lookaround thread
           // has found a match and needs to be destroyed. Since the lookaround
           // is verified at this position, we update the `lookaround_table_`.
-          DCHECK_NE(current_lookaround_, -1);
-          (*lookaround_table_)[current_lookaround_][input_index_] = true;
+
+          if (!only_captureless_lookbehinds_) {
+            DCHECK_NE(current_lookaround_, -1);
+            (*lookaround_table_)[current_lookaround_][input_index_] = true;
+          } else {
+            SBXCHECK_GE(inst.payload.lookaround_id, 0);
+            SBXCHECK_LT(inst.payload.lookaround_id,
+                        lookbehind_table_->length());
+            lookbehind_table_->Set(inst.payload.lookaround_id, true);
+          }
+
           DestroyThread(t);
           return RegExp::kInternalRegExpSuccess;
         case RegExpInstruction::READ_LOOKAROUND_TABLE:
@@ -1004,23 +1002,45 @@ class NfaInterpreter {
           // complete a match at the current position (depending on whether or
           // not the lookaround is positive). The lookaround priority list
           // ensures that all the lookaround has already been run.
-          if ((*lookaround_table_)[inst.payload.read_lookaround
-                                       .lookaround_index()][input_index_] !=
-              inst.payload.read_lookaround.is_positive()) {
-            DestroyThread(t);
-            return RegExp::kInternalRegExpSuccess;
-          }
 
-          if (inst.payload.read_lookaround.is_positive()) {
-            GetLookaroundClockArray(
-                t)[inst.payload.read_lookaround.lookaround_index()] = clock;
-            GetLookaroundMatchIndexArray(
-                t)[inst.payload.read_lookaround.lookaround_index()] =
-                input_index_;
-          }
+          if (!only_captureless_lookbehinds_) {
+            if ((*lookaround_table_)[inst.payload.read_lookaround
+                                         .lookaround_index()][input_index_] !=
+                inst.payload.read_lookaround.is_positive()) {
+              DestroyThread(t);
+              return RegExp::kInternalRegExpSuccess;
+            }
 
-          ++t.pc;
-          break;
+            if (inst.payload.read_lookaround.is_positive()) {
+              GetLookaroundClockArray(
+                  t)[inst.payload.read_lookaround.lookaround_index()] = clock;
+              GetLookaroundMatchIndexArray(
+                  t)[inst.payload.read_lookaround.lookaround_index()] =
+                  input_index_;
+            }
+
+            ++t.pc;
+            break;
+          } else {
+            // Destroy the thread if the corresponding lookbehind did or did not
+            // complete a match at the current position (depending on whether or
+            // not the lookbehind is positive). The thread's priority ensures
+            // that all the threads of the lookbehind have already been run at
+            // this position.
+            const int32_t lookbehind_index =
+                inst.payload.read_lookaround.lookaround_index();
+            SBXCHECK_GE(lookbehind_index, 0);
+            SBXCHECK_LT(lookbehind_index, lookbehind_table_->length());
+
+            if (lookbehind_table_->at(lookbehind_index) !=
+                inst.payload.read_lookaround.is_positive()) {
+              DestroyThread(t);
+              return RegExp::kInternalRegExpSuccess;
+            }
+
+            ++t.pc;
+            break;
+          }
         case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
           // Reaching this instruction means that the current lookbehind thread
           // has found a match and needs to be destroyed. Since the lookbehind
@@ -1245,9 +1265,11 @@ class NfaInterpreter {
     if (v8_flags.experimental_regexp_engine_capture_group_opt) {
       return InterpreterThread(
           pc, NewRegisterArray(kUndefinedRegisterValue),
-          NewGetLookaroundMatchIndexArray(kUndefinedMatchIndexValue),
+          only_captureless_lookbehinds_
+              ? nullptr
+              : NewGetLookaroundMatchIndexArray(kUndefinedMatchIndexValue),
           NewQuantifierClockArray(0), NewCaptureClockArray(0),
-          NewLookaroundClockArray(0),
+          only_captureless_lookbehinds_ ? nullptr : NewLookaroundClockArray(0),
           InterpreterThread::ConsumedCharacter::DidConsume);
     } else {
       return InterpreterThread(
@@ -1263,10 +1285,14 @@ class NfaInterpreter {
     if (v8_flags.experimental_regexp_engine_capture_group_opt) {
       return InterpreterThread(
           pc, NewRegisterArrayUninitialized(),
-          NewGetLookaroundMatchIndexArrayUninitialized(),
+          only_captureless_lookbehinds_
+              ? nullptr
+              : NewGetLookaroundMatchIndexArrayUninitialized(),
           NewQuantifierClockArrayUninitialized(),
           NewCaptureClockArrayUninitialized(),
-          NewLookaroundClockArrayUninitialized(),
+          only_captureless_lookbehinds_
+              ? nullptr
+              : NewLookaroundClockArrayUninitialized(),
           InterpreterThread::ConsumedCharacter::DidConsume);
     } else {
       return InterpreterThread(
@@ -1516,25 +1542,30 @@ class NfaInterpreter {
   std::optional<InterpreterThread> best_match_thread_;
 
   struct Lookaround {
-    int match_pc_;
-    int capture_pc_;
+    int match_pc;
+    int capture_pc;
     bool is_ahead;
   };
 
   // Stores the match pc, capture pc and direction of each lookaround,
   // mapped by lookaround id. Computed during the NFA instantiation (see the
   // constructor).
-  std::optional<ZoneList<Lookaround>> lookarounds_;
-  std::optional<ZoneList<int>> lookbehind_pc_;
+  ZoneList<Lookaround> lookarounds_;
 
   // Stores the id of the lookarounds, ordered such that a lookaround can
   // only depend on lookarounds appearing after its position in this list.
-  std::optional<ZoneList<int>> lookarounds_priority_;
+  ZoneList<int> lookarounds_priority_;
 
   // Truth table for the lookarounds. lookaround_table_[l][r] indicates
   // whether the lookaround of index l did complete a match on the position
   // r.
   std::optional<ZoneVector<ZoneVector<bool>>> lookaround_table_;
+
+  // Truth table for the lookbehinds. lookbehind_table_[k] indicates whether
+  // the lookbehind of index k did complete a match on the current position.
+  std::optional<ZoneList<bool>> lookbehind_table_;
+
+  bool only_captureless_lookbehinds_;
 
   // Whether we are traversing the input from end to start.
   bool reverse_;
@@ -1548,10 +1579,6 @@ class NfaInterpreter {
   // instructions (in the case where there are no capture groups or
   // quantifiers).
   std::optional<int> filter_groups_pc_;
-
-  // Truth table for the lookbehinds. lookbehind_table_[k] indicates whether
-  // the lookbehind of index k did complete a match on the current position.
-  std::optional<ZoneList<bool>> lookbehind_table_;
 
   uint64_t memory_consumption_per_thread_;
 
