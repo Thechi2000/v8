@@ -1057,30 +1057,6 @@ class NfaInterpreter {
             ++t.pc;
             break;
           }
-        case RegExpInstruction::WRITE_LOOKBEHIND_TABLE:
-          // Reaching this instruction means that the current lookbehind thread
-          // has found a match and needs to be destroyed. Since the lookbehind
-          // is verified at this position, we update the `lookbehind_table_`.
-          SBXCHECK_GE(inst.payload.lookaround_id, 0);
-          SBXCHECK_LT(inst.payload.lookaround_id, lookbehind_table_->length());
-          lookbehind_table_->Set(inst.payload.lookaround_id, true);
-          DestroyThread(t);
-          return RegExp::kInternalRegExpSuccess;
-        case RegExpInstruction::READ_LOOKBEHIND_TABLE:
-          // Destroy the thread if the corresponding lookbehind did or did not
-          // complete a match at the current position (depending on whether or
-          // not the lookbehind is positive). The thread's priority ensures that
-          // all the threads of the lookbehind have already been run at this
-          // position.
-          const int32_t lookbehind_index =
-              inst.payload.read_lookaround.lookaround_index();
-          SBXCHECK_GE(lookbehind_index, 0);
-          SBXCHECK_LT(lookbehind_index, lookbehind_table_->length());
-          if (lookbehind_table_->at(lookbehind_index) !=
-              inst.payload.read_lookaround.is_positive()) {
-            DestroyThread(t);
-            return RegExp::kInternalRegExpSuccess;
-          }
       }
     }
   }

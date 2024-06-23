@@ -113,8 +113,6 @@ struct RegExpInstruction {
     END_LOOKAROUND,
     WRITE_LOOKAROUND_TABLE,
     READ_LOOKAROUND_TABLE,
-    WRITE_LOOKBEHIND_TABLE,
-    READ_LOOKBEHIND_TABLE,
   };
 
   struct Uc16Range {
