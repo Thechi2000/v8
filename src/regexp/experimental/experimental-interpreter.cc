@@ -336,10 +336,6 @@ class NfaInterpreter {
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    for (auto i : bytecode_) {
-      std::cout << i << std::endl;
-    }
-
     // Iterate over the bytecode to find the PC of the filtering
     // instructions and lookarounds, and the number of quantifiers. It also
     // builds a lookaround priority list: the compilation ensures that a
@@ -402,6 +398,8 @@ class NfaInterpreter {
       lookbehind_table_.emplace(lookarounds_.length(), zone_);
       lookbehind_table_->AddBlock(false, lookarounds_.length(), zone_);
     } else {
+      DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
+
       lookaround_clock_array_allocator_.emplace(zone_);
       lookaround_match_index_array_allocator_.emplace(zone_);
 
@@ -877,25 +875,27 @@ class NfaInterpreter {
             std::copy(t_fork_capture_clocks.begin(),
                       t_fork_capture_clocks.end(), fork_capture_clocks.begin());
 
-            base::Vector<int> fork_lookaround_match_index =
-                GetLookaroundMatchIndexArray(fork);
-            base::Vector<int> t_fork_lookaround_match_index =
-                GetLookaroundMatchIndexArray(t);
-            DCHECK_EQ(fork_lookaround_match_index.length(),
-                      t_fork_lookaround_match_index.length());
-            std::copy(t_fork_lookaround_match_index.begin(),
-                      t_fork_lookaround_match_index.end(),
-                      fork_lookaround_match_index.begin());
+            if (!only_captureless_lookbehinds_) {
+              base::Vector<int> fork_lookaround_match_index =
+                  GetLookaroundMatchIndexArray(fork);
+              base::Vector<int> t_fork_lookaround_match_index =
+                  GetLookaroundMatchIndexArray(t);
+              DCHECK_EQ(fork_lookaround_match_index.length(),
+                        t_fork_lookaround_match_index.length());
+              std::copy(t_fork_lookaround_match_index.begin(),
+                        t_fork_lookaround_match_index.end(),
+                        fork_lookaround_match_index.begin());
 
-            base::Vector<uint64_t> fork_lookaround_clocks =
-                GetLookaroundClockArray(fork);
-            base::Vector<uint64_t> t_fork_lookaround_clocks =
-                GetLookaroundClockArray(t);
-            DCHECK_EQ(fork_lookaround_clocks.length(),
-                      t_fork_lookaround_clocks.length());
-            std::copy(t_fork_lookaround_clocks.begin(),
-                      t_fork_lookaround_clocks.end(),
-                      fork_lookaround_clocks.begin());
+              base::Vector<uint64_t> fork_lookaround_clocks =
+                  GetLookaroundClockArray(fork);
+              base::Vector<uint64_t> t_fork_lookaround_clocks =
+                  GetLookaroundClockArray(t);
+              DCHECK_EQ(fork_lookaround_clocks.length(),
+                        t_fork_lookaround_clocks.length());
+              std::copy(t_fork_lookaround_clocks.begin(),
+                        t_fork_lookaround_clocks.end(),
+                        fork_lookaround_clocks.begin());
+            }
           }
 
           active_threads_.Add(fork, zone_);
@@ -1010,7 +1010,8 @@ class NfaInterpreter {
               return RegExp::kInternalRegExpSuccess;
             }
 
-            if (inst.payload.read_lookaround.is_positive()) {
+            if (inst.payload.read_lookaround.is_positive() &&
+                !only_captureless_lookbehinds_) {
               GetLookaroundClockArray(
                   t)[inst.payload.read_lookaround.lookaround_index()] = clock;
               GetLookaroundMatchIndexArray(
@@ -1334,10 +1335,15 @@ class NfaInterpreter {
     ZoneStack<NodeStatus> status_stack_(zone_);
     status_stack_.push(status_);
 
-    auto registers = GetRegisterArray(main_thread);
-    auto capture_clocks = GetCaptureClockArray(main_thread);
-    auto quantifier_clocks = GetQuantifierClockArray(main_thread);
-    auto lookaround_clocks = GetLookaroundClockArray(main_thread);
+    base::Vector<int> registers = GetRegisterArray(main_thread);
+    base::Vector<uint64_t> capture_clocks = GetCaptureClockArray(main_thread);
+    base::Vector<uint64_t> quantifier_clocks =
+        GetQuantifierClockArray(main_thread);
+
+    std::optional<base::Vector<uint64_t>> lookaround_clocks = std::nullopt;
+    if (!only_captureless_lookbehinds_) {
+      lookaround_clocks = GetLookaroundClockArray(main_thread);
+    }
 
     auto up = [&]() {
       if (status_stack_.size() > 0) {
@@ -1400,8 +1406,9 @@ class NfaInterpreter {
 
         case RegExpInstruction::FILTER_LOOKAROUND: {
           // Checks whether the lookaround should be saved or discarded.
-          if (lookaround_clocks[instr.payload.lookaround_id] >=
-              status_.max_clock) {
+          if (!lookaround_clocks.has_value() ||
+              lookaround_clocks->at(instr.payload.lookaround_id) >=
+                  status_.max_clock) {
             incr();
           } else {
             // If the node should be discarded, all its children should be
@@ -1426,8 +1433,12 @@ class NfaInterpreter {
     if (v8_flags.experimental_regexp_engine_capture_group_opt) {
       FreeQuantifierClockArray(t.quantifier_clock_array_begin);
       FreeCaptureClockArray(t.captures_clock_array_begin);
-      FreeLookaroundClockArray(t.lookaround_clock_array_begin);
-      FreeNewGetLookaroundMatchIndexArray(t.lookaround_match_index_array_begin);
+
+      if (!only_captureless_lookbehinds_) {
+        FreeLookaroundClockArray(t.lookaround_clock_array_begin);
+        FreeNewGetLookaroundMatchIndexArray(
+            t.lookaround_match_index_array_begin);
+      }
     }
   }
 

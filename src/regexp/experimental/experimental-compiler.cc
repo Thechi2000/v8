@@ -6,6 +6,7 @@
 
 #include "src/flags/flags.h"
 #include "src/regexp/experimental/experimental.h"
+#include "src/regexp/regexp-ast.h"
 #include "src/zone/zone-containers.h"
 #include "src/zone/zone-list-inl.h"
 
@@ -184,7 +185,15 @@ class CanBeHandledVisitor final : private RegExpVisitor {
       return nullptr;
     }
 
-    node->body()->Accept(this, nullptr);
+    if (node->type() == RegExpLookaround::LOOKAHEAD ||
+        node->capture_count() > 0) {
+      if (!v8_flags.experimental_regexp_engine_capture_group_opt) {
+        result_ = false;
+        return nullptr;
+      }
+
+      node->body()->Accept(this, nullptr);
+    }
     return nullptr;
   }
 
