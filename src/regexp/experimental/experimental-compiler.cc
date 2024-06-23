@@ -495,6 +495,10 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
       can_compile_node_ = false;
       node->body()->Accept(this, nullptr);
     } else {
+      if (node->CaptureRegisters().is_empty()) {
+        return nullptr;
+      }
+
       nodes_.emplace_back(node);
       assembler_.FilterChild(nodes_.back().label);
     }
@@ -570,7 +574,9 @@ class CompileVisitor : private RegExpVisitor {
     // lookaround body is compiled into two sections:
     //
     // 1. A non-capturing automaton, which is reversed if it is a lookahead.
-    // 2. A capturing automaton, reversed if it is a lookbehind.
+    // 2. A capturing automaton, reversed if it is a lookbehind. Since it is
+    //    only used for capturing, it can be empty if the lookaround does not
+    //    contain any captures.
     //
     // See {TODO} in experimental-interpreter.cc for detailed explanation
     // on the reversal's reasons. The sections are delimited by the
@@ -609,8 +615,6 @@ class CompileVisitor : private RegExpVisitor {
 
   // Generate all the instructions to match and capture a lookaround.
   void CompileLookaround(RegExpLookaround* lookaround) {
-    Label reversed;
-
     // Generate the first section, reversed in the case of a lookahead.
     // {TODO disable capture groups}
     assembler_.StartLookaround(
@@ -631,12 +635,13 @@ class CompileVisitor : private RegExpVisitor {
     assembler_.WriteLookaroundTable(lookaround->index());
 
     // Generate the second sections, reversed in the case of a lookbehind.
-    assembler_.Bind(reversed);
-    reverse_ = lookaround->type() == RegExpLookaround::LOOKBEHIND;
+    if (lookaround->capture_count() > 0) {
+      reverse_ = lookaround->type() == RegExpLookaround::LOOKBEHIND;
 
-    ignore_lookarounds_ = true;
-    lookaround->body()->Accept(this, nullptr);
-    ignore_lookarounds_ = false;
+      ignore_lookarounds_ = true;
+      lookaround->body()->Accept(this, nullptr);
+      ignore_lookarounds_ = false;
+    }
 
     assembler_.EndLookaround();
   }
