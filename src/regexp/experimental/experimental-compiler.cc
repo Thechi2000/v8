@@ -6,6 +6,7 @@
 
 #include "src/flags/flags.h"
 #include "src/regexp/experimental/experimental.h"
+#include "src/zone/zone-containers.h"
 #include "src/zone/zone-list-inl.h"
 
 namespace v8 {

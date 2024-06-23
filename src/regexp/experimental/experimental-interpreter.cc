@@ -360,6 +360,10 @@ class NfaInterpreter {
             Lookaround{.match_pc = i,
                        .capture_pc = -1,
                        .is_ahead = inst.payload.start_lookaround.is_ahead()};
+
+        if (inst.payload.start_lookaround.is_ahead()) {
+          only_captureless_lookbehinds_ = false;
+        }
       }
 
       if (inst.opcode == RegExpInstruction::SET_REGISTER_TO_CP &&
@@ -526,7 +530,11 @@ class NfaInterpreter {
 
   void FillLookaroundTable() {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
-    DCHECK(only_captureless_lookbehinds_);
+    DCHECK(!only_captureless_lookbehinds_);
+
+    if (lookarounds_.is_empty()) {
+      return;
+    }
 
     std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
               LastInputIndex());
@@ -565,7 +573,11 @@ class NfaInterpreter {
   void FillLookaroundCaptures() {
     DCHECK(best_match_thread_.has_value());
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
-    DCHECK(only_captureless_lookbehinds_);
+    DCHECK(!only_captureless_lookbehinds_);
+
+    if (lookarounds_.is_empty()) {
+      return;
+    }
 
     InterpreterThread base_thread = *best_match_thread_;
 
@@ -1183,7 +1195,7 @@ class NfaInterpreter {
       int* lookaround_match_index_array_begin) {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
     lookaround_match_index_array_allocator_->deallocate(
-        lookaround_match_index_array_begin, register_count_per_match_);
+        lookaround_match_index_array_begin, lookaround_table_->size());
   }
   uint64_t* NewQuantifierClockArrayUninitialized() {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
@@ -1241,7 +1253,7 @@ class NfaInterpreter {
   void FreeLookaroundClockArray(uint64_t* lookaround_clock_array_begin) {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
     lookaround_clock_array_allocator_->deallocate(lookaround_clock_array_begin,
-                                                  register_count_per_match_);
+                                                  lookaround_table_->size());
   }
 
   // Creates an `InterpreterThread` at the given pc and allocates its
