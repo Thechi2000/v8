@@ -338,11 +338,6 @@ class NfaInterpreter {
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    int l = 0;
-    for (auto i : bytecode_) {
-      std::cout << l++ << ": " << i << std::endl;
-    }
-
     // Iterate over the bytecode to find the PC of the filtering
     // instructions and lookarounds, and the number of quantifiers. It also
     // builds a lookaround priority list: the compilation ensures that a
