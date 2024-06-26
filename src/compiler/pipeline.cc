@@ -1272,7 +1272,7 @@ struct WasmInliningPhase {
   void Run(TFPipelineData* data, Zone* temp_zone, wasm::CompilationEnv* env,
            WasmCompilationData& compilation_data,
            ZoneVector<WasmInliningPosition>* inlining_positions,
-           wasm::WasmFeatures* detected) {
+           wasm::WasmDetectedFeatures* detected) {
     if (!WasmInliner::graph_size_allows_inlining(
             env->module, data->graph()->NodeCount(),
             v8_flags.wasm_inlining_budget)) {
@@ -1630,7 +1630,7 @@ struct WasmOptimizationPhase {
   void Run(TFPipelineData* data, Zone* temp_zone,
            MachineOperatorReducer::SignallingNanPropagation
                signalling_nan_propagation,
-           wasm::WasmFeatures detected_features) {
+           wasm::WasmDetectedFeatures detected_features) {
     // Run optimizations in two rounds: First one around load elimination and
     // then one around branch elimination. This is because those two
     // optimizations sometimes display quadratic complexity when run together.
@@ -2314,6 +2314,14 @@ CompilationJob::Status FinalizeWrapperCompilation(
                                        Cast<AbstractCode>(code),
                                        info->GetDebugName().get()));
     }
+    // Set the wasm-to-js specific code fields needed to scan the incoming stack
+    // parameters.
+    if (code->kind() == CodeKind::WASM_TO_JS_FUNCTION) {
+      code->set_wasm_js_tagged_parameter_count(
+          call_descriptor->GetTaggedParameterSlots() & 0xffff);
+      code->set_wasm_js_first_tagged_parameter(
+          call_descriptor->GetTaggedParameterSlots() >> 16);
+    }
     return CompilationJob::SUCCEEDED;
 }
 
@@ -2340,6 +2348,12 @@ CompilationJob::Status FinalizeWrapperCompilation(
     PROFILE(isolate, CodeCreateEvent(LogEventListener::CodeTag::kStub,
                                      Cast<AbstractCode>(code),
                                      info->GetDebugName().get()));
+  }
+  if (code->kind() == CodeKind::WASM_TO_JS_FUNCTION) {
+    code->set_wasm_js_tagged_parameter_count(
+        call_descriptor->GetTaggedParameterSlots() & 0xffff);
+    code->set_wasm_js_first_tagged_parameter(
+        call_descriptor->GetTaggedParameterSlots() >> 16);
   }
   return CompilationJob::SUCCEEDED;
 }
@@ -3217,10 +3231,10 @@ void Pipeline::GenerateCodeForWasmFunction(
     WasmCompilationData& compilation_data, MachineGraph* mcgraph,
     CallDescriptor* call_descriptor,
     ZoneVector<WasmInliningPosition>* inlining_positions,
-    wasm::WasmFeatures* detected) {
+    wasm::WasmDetectedFeatures* detected) {
   auto* wasm_engine = wasm::GetWasmEngine();
   const wasm::WasmModule* module = env->module;
-  wasm::WasmFeatures enabled = env->enabled_features;
+  wasm::WasmEnabledFeatures enabled = env->enabled_features;
   base::TimeTicks start_time;
   if (V8_UNLIKELY(v8_flags.trace_wasm_compilation_times)) {
     start_time = base::TimeTicks::Now();
@@ -3416,7 +3430,7 @@ void Pipeline::GenerateCodeForWasmFunction(
 bool Pipeline::GenerateWasmCodeFromTurboshaftGraph(
     OptimizedCompilationInfo* info, wasm::CompilationEnv* env,
     WasmCompilationData& compilation_data, MachineGraph* mcgraph,
-    wasm::WasmFeatures* detected, CallDescriptor* call_descriptor) {
+    wasm::WasmDetectedFeatures* detected, CallDescriptor* call_descriptor) {
   auto* wasm_engine = wasm::GetWasmEngine();
   const wasm::WasmModule* module = env->module;
   base::TimeTicks start_time;

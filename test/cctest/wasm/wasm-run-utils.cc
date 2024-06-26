@@ -51,7 +51,7 @@ TestingModuleBuilder::TestingModuleBuilder(
     TestExecutionTier tier, Isolate* isolate)
     : test_module_(std::make_shared<WasmModule>(origin)),
       isolate_(isolate ? isolate : CcTest::InitIsolateOnce()),
-      enabled_features_(WasmFeatures::FromIsolate(isolate_)),
+      enabled_features_(WasmEnabledFeatures::FromIsolate(isolate_)),
       execution_tier_(tier) {
   WasmJs::Install(isolate_, true);
   test_module_->untagged_globals_buffer_size = kMaxGlobalsSize;
@@ -276,8 +276,9 @@ void TestingModuleBuilder::AddIndirectFunctionTable(
   WasmTrustedInstanceData::EnsureMinimumDispatchTableSize(
       isolate_, trusted_instance_data_, table_index, table_size);
   DirectHandle<WasmTableObject> table_obj = WasmTableObject::New(
-      isolate_, instance_object_, table.type, table.initial_size,
-      table.has_maximum_size, table.maximum_size,
+      isolate_, handle(instance_object_->trusted_data(isolate_), isolate_),
+      table.type, table.initial_size, table.has_maximum_size,
+      table.maximum_size,
       IsSubtypeOf(table.type, kWasmExternRef, test_module_.get())
           ? Handle<HeapObject>{isolate_->factory()->null_value()}
           : Handle<HeapObject>{isolate_->factory()->wasm_null()});
@@ -449,11 +450,11 @@ Handle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
 void TestBuildingGraphWithBuilder(compiler::WasmGraphBuilder* builder,
                                   Zone* zone, const FunctionSig* sig,
                                   const uint8_t* start, const uint8_t* end) {
-  WasmFeatures unused_detected_features;
+  WasmDetectedFeatures unused_detected_features;
   constexpr bool kIsShared = false;  // TODO(14616): Extend this.
   FunctionBody body(sig, 0, start, end, kIsShared);
   std::vector<compiler::WasmLoopInfo> loops;
-  BuildTFGraph(zone->allocator(), WasmFeatures::All(), nullptr, builder,
+  BuildTFGraph(zone->allocator(), WasmEnabledFeatures::All(), nullptr, builder,
                &unused_detected_features, body, &loops, nullptr, nullptr, 0,
                nullptr, kRegularFunction);
   builder->LowerInt64(kCalledFromWasm);
@@ -506,7 +507,7 @@ void WasmFunctionCompiler::Build(base::Vector<const uint8_t> bytes) {
   ForDebugging for_debugging =
       native_module->IsInDebugState() ? kForDebugging : kNotForDebugging;
 
-  WasmFeatures unused_detected_features;
+  WasmDetectedFeatures unused_detected_features;
   // Validate Wasm modules; asm.js is assumed to be always valid.
   if (env.module->origin == kWasmOrigin) {
     DecodeResult validation_result =

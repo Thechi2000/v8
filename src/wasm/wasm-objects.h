@@ -59,6 +59,8 @@ class WasmModuleObject;
 
 enum class SharedFlag : uint8_t;
 
+enum class WasmTableFlag : uint8_t { kTable32, kTable64 };
+
 template <class CppType>
 class Managed;
 
@@ -183,7 +185,11 @@ class WasmModuleObject
 class WasmTableObject
     : public TorqueGeneratedWasmTableObject<WasmTableObject, JSObject> {
  public:
+  class BodyDescriptor;
+
   inline wasm::ValueType type();
+
+  DECL_TRUSTED_POINTER_ACCESSORS(trusted_data, WasmTrustedInstanceData)
 
   V8_EXPORT_PRIVATE static int Grow(Isolate* isolate,
                                     Handle<WasmTableObject> table,
@@ -191,9 +197,10 @@ class WasmTableObject
                                     DirectHandle<Object> init_value);
 
   V8_EXPORT_PRIVATE static Handle<WasmTableObject> New(
-      Isolate* isolate, Handle<WasmInstanceObject> instance_object,
+      Isolate* isolate, Handle<WasmTrustedInstanceData> trusted_data,
       wasm::ValueType type, uint32_t initial, bool has_maximum,
-      uint32_t maximum, DirectHandle<Object> initial_value);
+      uint32_t maximum, DirectHandle<Object> initial_value,
+      WasmTableFlag table_type = WasmTableFlag::kTable32);
 
   // Store that a specific instance uses this table, in order to update the
   // instance's dispatch table when this table grows (and hence needs to
@@ -203,6 +210,9 @@ class WasmTableObject
       Handle<WasmTrustedInstanceData> instance_object, int table_index);
 
   bool is_in_bounds(uint32_t entry_index);
+
+  // Overwrite the Torque-generated method that returns an int.
+  inline bool is_table64() const;
 
   // Thin wrapper around {JsToWasmObject}.
   static MaybeHandle<Object> JSToWasmElement(

@@ -40,51 +40,6 @@ inline bool ContainsReadOnlyMap(PtrComprCageBase, Tagged<HeapObject>) {
   return false;
 }
 
-// List of visitor ids that can only appear in read-only maps. Unfortunately,
-// these are generally contained in all other lists. Adding an instance type
-// here optimizes handling in visitors that do not need to Map objects with such
-// visitor ids.
-#define READ_ONLY_MAPS_VISITOR_ID_LIST(V) \
-  V(AccessorInfo)                         \
-  V(AllocationSite)                       \
-  V(BigInt)                               \
-  V(BytecodeArray)                        \
-  V(BytecodeWrapper)                      \
-  V(ByteArray)                            \
-  V(Cell)                                 \
-  V(Code)                                 \
-  V(CodeWrapper)                          \
-  V(DataHandler)                          \
-  V(DataObject)                           \
-  V(DescriptorArray)                      \
-  V(EmbedderDataArray)                    \
-  V(ExternalString)                       \
-  V(FeedbackCell)                         \
-  V(FeedbackMetadata)                     \
-  V(FeedbackVector)                       \
-  V(FixedArray)                           \
-  V(FixedDoubleArray)                     \
-  V(FunctionTemplateInfo)                 \
-  V(InstructionStream)                    \
-  V(PreparseData)                         \
-  V(PropertyArray)                        \
-  V(PropertyCell)                         \
-  V(PrototypeInfo)                        \
-  V(ScopeInfo)                            \
-  V(SeqOneByteString)                     \
-  V(SeqTwoByteString)                     \
-  V(SharedFunctionInfo)                   \
-  V(ShortcutCandidate)                    \
-  V(SlicedString)                         \
-  V(SloppyArgumentsElements)              \
-  V(Symbol)                               \
-  V(ThinString)                           \
-  V(TransitionArray)                      \
-  V(UncompiledDataWithoutPreparseData)    \
-  V(UncompiledDataWithPreparseData)       \
-  V(WeakArrayList)                        \
-  V(WeakFixedArray)
-
 #define DEFINE_READ_ONLY_MAP_SPECIALIZATION(VisitorIdType)                    \
   template <>                                                                 \
   inline bool ContainsReadOnlyMap<VisitorId::kVisit##VisitorIdType>(          \
@@ -94,9 +49,8 @@ inline bool ContainsReadOnlyMap(PtrComprCageBase, Tagged<HeapObject>) {
     DCHECK(InReadOnlySpace(object->map(cage_base)));                          \
     return true;                                                              \
   }
-READ_ONLY_MAPS_VISITOR_ID_LIST(DEFINE_READ_ONLY_MAP_SPECIALIZATION)
+VISITOR_IDS_WITH_READ_ONLY_MAPS_LIST(DEFINE_READ_ONLY_MAP_SPECIALIZATION)
 #undef DEFINE_READ_ONLY_MAP_SPECIALIZATION
-#undef READ_ONLY_MAPS_VISITOR_ID_LIST
 
 template <typename ResultType, typename ConcreteVisitor>
 HeapVisitor<ResultType, ConcreteVisitor>::HeapVisitor(
@@ -162,8 +116,6 @@ ResultType HeapVisitor<ResultType, ConcreteVisitor>::Visit(
     case kVisitShortcutCandidate:
       return visitor->VisitShortcutCandidate(
           map, ConcreteVisitor::template Cast<ConsString>(object));
-    case kVisitDataObject:
-      return visitor->VisitDataObject(map, object);
     case kVisitJSObjectFast:
       return visitor->VisitJSObjectFast(
           map, ConcreteVisitor::template Cast<JSObject>(object));
@@ -172,6 +124,8 @@ ResultType HeapVisitor<ResultType, ConcreteVisitor>::Visit(
           map, ConcreteVisitor::template Cast<JSObject>(object));
     case kVisitStruct:
       return visitor->VisitStruct(map, object);
+    case kVisitFiller:
+      return visitor->VisitFiller(map, object);
     case kVisitFreeSpace:
       return visitor->VisitFreeSpace(map, Cast<FreeSpace>(object));
     case kDataOnlyVisitorIdCount:
@@ -242,12 +196,25 @@ ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitShortcutCandidate(
 }
 
 template <typename ResultType, typename ConcreteVisitor>
-ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitDataObject(
+ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitFiller(
     Tagged<Map> map, Tagged<HeapObject> object) {
+  if constexpr (!ConcreteVisitor::CanEncounterFillerOrFreeSpace()) {
+    UNREACHABLE();
+  }
   ConcreteVisitor* visitor = static_cast<ConcreteVisitor*>(this);
-  visitor->template VisitMapPointerIfNeeded<VisitorId::kVisitDataObject>(
-      object);
+  visitor->template VisitMapPointerIfNeeded<VisitorId::kVisitFiller>(object);
   return static_cast<ResultType>(map->instance_size());
+}
+
+template <typename ResultType, typename ConcreteVisitor>
+ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitFreeSpace(
+    Tagged<Map> map, Tagged<FreeSpace> object) {
+  if constexpr (!ConcreteVisitor::CanEncounterFillerOrFreeSpace()) {
+    UNREACHABLE();
+  }
+  ConcreteVisitor* visitor = static_cast<ConcreteVisitor*>(this);
+  visitor->template VisitMapPointerIfNeeded<VisitorId::kVisitFreeSpace>(object);
+  return static_cast<ResultType>(object->size(kRelaxedLoad));
 }
 
 template <typename ResultType, typename ConcreteVisitor>
@@ -277,33 +244,25 @@ ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitStruct(
 }
 
 template <typename ResultType, typename ConcreteVisitor>
-ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitFreeSpace(
-    Tagged<Map> map, Tagged<FreeSpace> object) {
-  ConcreteVisitor* visitor = static_cast<ConcreteVisitor*>(this);
-  visitor->template VisitMapPointerIfNeeded<VisitorId::kVisitFreeSpace>(object);
-  return static_cast<ResultType>(object->size(kRelaxedLoad));
-}
-
-template <typename ResultType, typename ConcreteVisitor>
 template <typename T, typename TBodyDescriptor>
 ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitJSObjectSubclass(
     Tagged<Map> map, Tagged<T> object) {
-  // If you see the following DCHECK fail, then the size computation of
-  // BodyDescriptor doesn't match the size return via obj.Size(). This is
-  // problematic as the GC requires those sizes to match for accounting reasons.
-  // The fix likely involves adding a padding field in the object defintions.
-  DCHECK_EQ(object->SizeFromMap(map), TBodyDescriptor::SizeOf(map, object));
+  // JSObject types are subject to slack tracking. At the end of slack tracking
+  // a Map's instance size is adjusted properly. Since this changes the instance
+  // size, we cannot DCHECK that `SizeFromMap()` is consistent with
+  // `TBodyDescriptor::SizeOf()` as that would require taking a snapshot of the
+  // Map.
 
   ConcreteVisitor* visitor = static_cast<ConcreteVisitor*>(this);
   visitor->template VisitMapPointerIfNeeded<VisitorId::kVisitJSObject>(object);
-  const int size = TBodyDescriptor::SizeOf(map, object);
   const int used_size = map->UsedInstanceSize();
-  DCHECK_LE(used_size, size);
-  DCHECK_GE(used_size, JSObject::GetHeaderSize(map));
   // It is important to visit only the used field and ignore the slack fields
   // because the slack fields may be trimmed concurrently and we don't want to
   // find fillers (slack) during pointer visitation.
   TBodyDescriptor::IterateBody(map, object, used_size, visitor);
+  const int size = TBodyDescriptor::SizeOf(map, object);
+  DCHECK_LE(used_size, size);
+  DCHECK_GE(used_size, JSObject::GetHeaderSize(map));
   return size;
 }
 

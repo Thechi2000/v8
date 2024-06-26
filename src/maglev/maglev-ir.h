@@ -3515,9 +3515,9 @@ class Float64ToHeapNumberForField
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kHoleyFloat64};
 
-  static constexpr OpProperties kProperties =
-      OpProperties::NotIdempotent() | OpProperties::CanAllocate() |
-      OpProperties::DeferredCall() | OpProperties::ConversionNode();
+  static constexpr OpProperties kProperties = OpProperties::NotIdempotent() |
+                                              OpProperties::CanAllocate() |
+                                              OpProperties::DeferredCall();
 
   Input& input() { return Node::input(0); }
 
@@ -4918,6 +4918,8 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
   using Base = FixedInputValueNodeT<0, VirtualObject>;
 
  public:
+  class List;
+
   enum Type {
     kDefault,
     kHeapNumber,
@@ -4991,19 +4993,26 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
     return slots_.data[offset / kTaggedSize];
   }
 
-  ValueNode* get_by_index(uint32_t i) {
+  ValueNode* get_by_index(uint32_t i) const {
     DCHECK_EQ(type_, kDefault);
     return slots_.data[i];
   }
 
   void set_by_index(uint32_t i, ValueNode* value) {
     DCHECK_EQ(type_, kDefault);
+    // Values set here can leak to the interpreter. Conversions should be stored
+    // in known_node_aspects/NodeInfo.
+    DCHECK(!value->properties().is_conversion());
     slots_.data[i] = value;
   }
 
   void set(uint32_t offset, ValueNode* value) {
     DCHECK_NE(offset, 0);  // Don't try to set the map through this setter.
     DCHECK_EQ(type_, kDefault);
+    DCHECK(!IsSnapshot());
+    // Values set here can leak to the interpreter. Conversions should be stored
+    // in known_node_aspects/NodeInfo.
+    DCHECK(!value->properties().is_conversion());
     offset -= kTaggedSize;
     SBXCHECK_LT(offset / kTaggedSize, slot_count());
     slots_.data[offset / kTaggedSize] = value;
@@ -5016,6 +5025,18 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
       slots_.data[i] = clear_value;
     }
   }
+
+  InlinedAllocation* allocation() const { return allocation_; }
+  void set_allocation(InlinedAllocation* allocation) {
+    allocation_ = allocation;
+  }
+
+  // VOs are snapshotted at branch points and when they are leaked to
+  // DeoptInfos. This is because the snapshots need to preserve the original
+  // values at the time of branching or deoptimization. While a VO is not yet
+  // snapshotted, it can be modified freely.
+  bool IsSnapshot() const { return snapshotted_; }
+  void Snapshot() { snapshotted_ = true; }
 
  private:
   struct DoubleArray {
@@ -5031,11 +5052,64 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
   Type type_;  // We need to cache the type. We cannot do map comparison in some
                // parts of the pipeline, because we would need to derefernece a
                // handle.
+  bool snapshotted_ = false;  // Object should not be modified anymore.
   union {
     Float64 number_;
     DoubleArray double_array_;
     ObjectFields slots_;
   };
+  mutable InlinedAllocation* allocation_ = nullptr;
+
+  VirtualObject* next_ = nullptr;
+  friend List;
+};
+
+class VirtualObject::List {
+ public:
+  List() : head_(nullptr) {}
+
+  class Iterator final {
+   public:
+    explicit Iterator(VirtualObject* entry) : entry_(entry) {}
+
+    Iterator& operator++() {
+      entry_ = entry_->next_;
+      return *this;
+    }
+    bool operator==(const Iterator& other) const {
+      return entry_ == other.entry_;
+    }
+    bool operator!=(const Iterator& other) const {
+      return entry_ != other.entry_;
+    }
+    VirtualObject*& operator*() { return entry_; }
+    VirtualObject* operator->() { return entry_; }
+
+   private:
+    VirtualObject* entry_;
+  };
+
+  void Add(VirtualObject* object) {
+    DCHECK_NOT_NULL(object);
+    DCHECK_NULL(object->next_);
+    object->next_ = head_;
+    head_ = object;
+  }
+
+  VirtualObject* FindAllocatedWith(InlinedAllocation* allocation) const {
+    for (VirtualObject* vo : *this) {
+      if (vo->allocation() == allocation) {
+        return vo;
+      }
+    }
+    UNREACHABLE();
+  }
+
+  Iterator begin() const { return Iterator(head_); }
+  Iterator end() const { return Iterator(nullptr); }
+
+ private:
+  VirtualObject* head_;
 };
 
 enum class EscapeAnalysisResult {
@@ -7106,18 +7180,25 @@ class StoreFloat64 : public FixedInputNodeT<2, StoreFloat64> {
   const int offset_;
 };
 
-enum class InitializingOrTransitioning : bool { kNo, kYes };
+enum class StoreTaggedMode : uint8_t {
+  kDefault,
+  kInitializing,
+  kTransitioning
+};
+inline bool IsInitializingOrTransitioning(StoreTaggedMode mode) {
+  return mode == StoreTaggedMode::kInitializing ||
+         mode == StoreTaggedMode::kTransitioning;
+}
 
 class StoreTaggedFieldNoWriteBarrier
     : public FixedInputNodeT<2, StoreTaggedFieldNoWriteBarrier> {
   using Base = FixedInputNodeT<2, StoreTaggedFieldNoWriteBarrier>;
 
  public:
-  explicit StoreTaggedFieldNoWriteBarrier(
-      uint64_t bitfield, int offset,
-      InitializingOrTransitioning initializing_or_transitioning)
+  explicit StoreTaggedFieldNoWriteBarrier(uint64_t bitfield, int offset,
+                                          StoreTaggedMode store_mode)
       : Base(bitfield | InitializingOrTransitioningField::encode(
-                            initializing_or_transitioning)),
+                            IsInitializingOrTransitioning(store_mode))),
         offset_(offset) {}
 
   // StoreTaggedFieldNoWriteBarrier never does a Deferred Call. However,
@@ -7132,7 +7213,7 @@ class StoreTaggedFieldNoWriteBarrier
       ValueRepresentation::kTagged, ValueRepresentation::kTagged};
 
   int offset() const { return offset_; }
-  InitializingOrTransitioning initializing_or_transitioning() const {
+  bool initializing_or_transitioning() const {
     return InitializingOrTransitioningField::decode(bitfield());
   }
 
@@ -7157,8 +7238,7 @@ class StoreTaggedFieldNoWriteBarrier
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
  private:
-  using InitializingOrTransitioningField =
-      NextBitField<InitializingOrTransitioning, 1>;
+  using InitializingOrTransitioningField = NextBitField<bool, 1>;
 
   const int offset_;
 };
@@ -7208,11 +7288,10 @@ class StoreTaggedFieldWithWriteBarrier
   using Base = FixedInputNodeT<2, StoreTaggedFieldWithWriteBarrier>;
 
  public:
-  explicit StoreTaggedFieldWithWriteBarrier(
-      uint64_t bitfield, int offset,
-      InitializingOrTransitioning initializing_or_transitioning)
+  explicit StoreTaggedFieldWithWriteBarrier(uint64_t bitfield, int offset,
+                                            StoreTaggedMode store_mode)
       : Base(bitfield | InitializingOrTransitioningField::encode(
-                            initializing_or_transitioning)),
+                            IsInitializingOrTransitioning(store_mode))),
         offset_(offset) {}
 
   static constexpr OpProperties kProperties =
@@ -7221,7 +7300,7 @@ class StoreTaggedFieldWithWriteBarrier
       ValueRepresentation::kTagged, ValueRepresentation::kTagged};
 
   int offset() const { return offset_; }
-  InitializingOrTransitioning initializing_or_transitioning() const {
+  bool initializing_or_transitioning() const {
     return InitializingOrTransitioningField::decode(bitfield());
   }
 
@@ -7243,8 +7322,7 @@ class StoreTaggedFieldWithWriteBarrier
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
  private:
-  using InitializingOrTransitioningField =
-      NextBitField<InitializingOrTransitioning, 1>;
+  using InitializingOrTransitioningField = NextBitField<bool, 1>;
 
   const int offset_;
 };

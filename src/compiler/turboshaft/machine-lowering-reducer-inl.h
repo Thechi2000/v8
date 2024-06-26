@@ -2445,9 +2445,22 @@ class MachineLoweringReducer : public Next {
   }
 
   V<Object> REDUCE(LoadStackArgument)(V<WordPtr> base, V<WordPtr> index) {
-    V<WordPtr> argument = __ template LoadNonArrayBufferElement<WordPtr>(
-        base, AccessBuilder::ForStackArgument(), index);
-    return __ BitcastWordPtrToTagged(argument);
+    // Note that this is a load of a Tagged value
+    // (MemoryRepresentation::TaggedPointer()), but since it's on the stack
+    // where stack slots are all kSystemPointerSize, we use kSystemPointerSize
+    // for element_size_log2. On 64-bit plateforms with pointer compression,
+    // this means that we're kinda loading a 32-bit value from an array of
+    // 64-bit values.
+#if V8_COMPRESS_POINTERS && V8_TARGET_BIG_ENDIAN
+    constexpr int offset =
+        CommonFrameConstants::kFixedFrameSizeAboveFp - kSystemPointerSize + 4;
+#else
+    constexpr int offset =
+        CommonFrameConstants::kFixedFrameSizeAboveFp - kSystemPointerSize;
+#endif
+    return __ Load(base, index, LoadOp::Kind::RawAligned(),
+                   MemoryRepresentation::TaggedPointer(), offset,
+                   kSystemPointerSizeLog2);
   }
 
   OpIndex REDUCE(StoreTypedElement)(OpIndex buffer, V<Object> base,

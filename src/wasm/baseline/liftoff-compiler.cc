@@ -345,8 +345,8 @@ void CheckBailoutAllowed(LiftoffBailoutReason reason, const char* detail,
   }
 #endif
 
-#define LIST_FEATURE(name, ...) kFeature_##name,
-  constexpr WasmFeatures kExperimentalFeatures{
+#define LIST_FEATURE(name, ...) WasmEnabledFeature::name,
+  constexpr WasmEnabledFeatures kExperimentalFeatures{
       FOREACH_WASM_EXPERIMENTAL_FEATURE_FLAG(LIST_FEATURE)};
 #undef LIST_FEATURE
 
@@ -5773,6 +5773,13 @@ class LiftoffCompiler {
       return slot;
     }
 
+    // {kI64} constants will be stored as 32-bit integers in the {VarState} and
+    // will be sign-extended later. Hence we can return constants if they are
+    // positive (such that sign-extension and zero-extension are identical).
+    if (slot.is_const() && (kIntPtrKind == kI32 || slot.i32_const() >= 0)) {
+      return {kIntPtrKind, slot.i32_const(), 0};
+    }
+
     // For memory32 on 64-bit hosts, zero-extend.
     if constexpr (Is64()) {
       DCHECK(!is_64bit_value);  // Handled above.
@@ -5832,13 +5839,12 @@ class LiftoffCompiler {
     pinned->clear(high_word);
   }
 
-  // Same, but can take a VarState in the middle of the stack without
-  // popping it.
-  // For 64-bit memories on 32-bit systems, the resulting VarState will
-  // contain a single register whose value will be kMaxUint32 if the
-  // high word had any bits set.
-  VarState MemTypeToVarStateSaturating(int stack_index,
-                                       LiftoffRegList* pinned) {
+  // Same as {PopIndexToVarState}, but can take a VarState in the middle of the
+  // stack without popping it.
+  // For 64-bit values on 32-bit systems, the resulting VarState will contain a
+  // single register whose value will be kMaxUint32 if the high word had any
+  // bits set.
+  VarState IndexToVarStateSaturating(int stack_index, LiftoffRegList* pinned) {
     DCHECK_LE(0, stack_index);
     DCHECK_LT(stack_index, __ cache_state()->stack_height());
     VarState& slot = __ cache_state()->stack_state.end()[-1 - stack_index];
@@ -5848,6 +5854,13 @@ class LiftoffCompiler {
     if ((kSystemPointerSize == kInt64Size) == is_mem64) {
       if (slot.is_reg()) pinned->set(slot.reg());
       return slot;
+    }
+
+    // {kI64} constants will be stored as 32-bit integers in the {VarState} and
+    // will be sign-extended later. Hence we can return constants if they are
+    // positive (such that sign-extension and zero-extension are identical).
+    if (slot.is_const() && (kIntPtrKind == kI32 || slot.i32_const() >= 0)) {
+      return {kIntPtrKind, slot.i32_const(), 0};
     }
 
     LiftoffRegister reg = __ LoadToModifiableRegister(slot, *pinned);
@@ -5870,6 +5883,14 @@ class LiftoffCompiler {
     __ emit_jump(&ok);
     __ bind(&ok);
     return {kIntPtrKind, reg.low(), 0};
+  }
+
+  // Same as {PopIndexToVarState}, but saturates 64-bit values on 32-bit
+  // platforms like {IndexToVarStateSaturating}.
+  VarState PopIndexToVarStateSaturating(LiftoffRegList* pinned) {
+    VarState result = IndexToVarStateSaturating(0, pinned);
+    __ DropValues(1);
+    return result;
   }
 
   // The following functions are to be used inside a DCHECK. They always return
@@ -6161,8 +6182,7 @@ class LiftoffCompiler {
     LoadSmi(table_index_reg, imm.index);
     VarState table_index(kSmiKind, table_index_reg, 0);
     // If `delta` is, OOB table.grow should return -1.
-    VarState delta = MemTypeToVarStateSaturating(0, &pinned);
-    __ DropValues(1);
+    VarState delta = PopIndexToVarStateSaturating(&pinned);
     VarState value = __ PopVarState();
     VarState extract_shared_data(kI32, 0, 0);
 
@@ -7256,7 +7276,7 @@ class LiftoffCompiler {
     VarState& size_var = __ cache_state()->stack_state.end()[-1];
 
     DCHECK(MatchingMemType(imm.memory, 1));
-    VarState address = MemTypeToVarStateSaturating(1, &pinned);
+    VarState address = IndexToVarStateSaturating(1, &pinned);
 
     CallBuiltin(
         Builtin::kWasmStringNewWtf8,
@@ -7311,7 +7331,7 @@ class LiftoffCompiler {
 
     LiftoffRegList pinned;
     DCHECK(MatchingMemType(imm.memory, 1));
-    VarState address = MemTypeToVarStateSaturating(1, &pinned);
+    VarState address = IndexToVarStateSaturating(1, &pinned);
 
     CallBuiltin(Builtin::kWasmStringNewWtf16,
                 MakeSig::Returns(kRef).Params(kI32, kIntPtrKind, kI32),
@@ -7415,7 +7435,7 @@ class LiftoffCompiler {
     LiftoffRegList pinned;
 
     DCHECK(MatchingMemType(imm.memory, 0));
-    VarState offset_var = MemTypeToVarStateSaturating(0, &pinned);
+    VarState offset_var = IndexToVarStateSaturating(0, &pinned);
 
     LiftoffRegister string_reg = pinned.set(
         __ LoadToRegister(__ cache_state()->stack_state.end()[-2], pinned));
@@ -7482,7 +7502,7 @@ class LiftoffCompiler {
     LiftoffRegList pinned;
 
     DCHECK(MatchingMemType(imm.memory, 0));
-    VarState offset_var = MemTypeToVarStateSaturating(0, &pinned);
+    VarState offset_var = IndexToVarStateSaturating(0, &pinned);
 
     LiftoffRegister string_reg = pinned.set(
         __ LoadToRegister(__ cache_state()->stack_state.end()[-2], pinned));
@@ -7704,7 +7724,7 @@ class LiftoffCompiler {
     VarState& pos_var = __ cache_state()->stack_state.end()[-2];
 
     DCHECK(MatchingMemType(imm.memory, 2));
-    VarState addr_var = MemTypeToVarStateSaturating(2, &pinned);
+    VarState addr_var = IndexToVarStateSaturating(2, &pinned);
 
     LiftoffRegister view_reg = pinned.set(
         __ LoadToRegister(__ cache_state()->stack_state.end()[-4], pinned));
@@ -7815,7 +7835,7 @@ class LiftoffCompiler {
     VarState& pos_var = __ cache_state()->stack_state.end()[-2];
 
     DCHECK(MatchingMemType(imm.memory, 2));
-    VarState offset_var = MemTypeToVarStateSaturating(2, &pinned);
+    VarState offset_var = IndexToVarStateSaturating(2, &pinned);
 
     LiftoffRegister view_reg = pinned.set(
         __ LoadToRegister(__ cache_state()->stack_state.end()[-4], pinned));
@@ -8139,16 +8159,16 @@ class LiftoffCompiler {
     for (ValueKind ret : sig.returns()) {
       if (!CheckSupportedType(decoder, ret, "return")) return;
     }
-    const WasmTable& table = decoder->module_->tables[imm.table_imm.index];
+    const WasmTable* table = imm.table_imm.table;
 
     if (v8_flags.wasm_deopt &&
         env_->deopt_info_bytecode_offset == decoder->pc_offset() &&
         env_->deopt_location_kind == LocationKindForDeopt::kEagerDeopt) {
-      StoreFrameDescriptionForDeopt(decoder);
+      EmitDeoptPoint(decoder);
     }
 
     LiftoffRegList pinned;
-    VarState index_slot = MemTypeToVarStateSaturating(0, &pinned);
+    VarState index_slot = IndexToVarStateSaturating(0, &pinned);
 
     const bool is_static_index = index_slot.is_const();
     Register index_reg =
@@ -8157,8 +8177,8 @@ class LiftoffCompiler {
             : pinned.set(__ LoadToRegister(index_slot, pinned).gp());
 
     const uint32_t max_table_size =
-        table.has_maximum_size
-            ? std::min(table.maximum_size, uint32_t{kV8MaxWasmTableSize})
+        table->has_maximum_size
+            ? std::min(table->maximum_size, uint32_t{kV8MaxWasmTableSize})
             : uint32_t{kV8MaxWasmTableSize};
     const bool statically_oob =
         is_static_index &&
@@ -8188,7 +8208,8 @@ class LiftoffCompiler {
       // Bounds check against the table size: Compare against the dispatch table
       // size, or a constant if the size is statically known.
       const bool needs_dynamic_size =
-          !table.has_maximum_size || table.maximum_size != table.initial_size;
+          !table->has_maximum_size ||
+          table->maximum_size != table->initial_size;
 
       Label* out_of_bounds_label =
           AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapTableOutOfBounds);
@@ -8211,7 +8232,7 @@ class LiftoffCompiler {
                                  trapping);
         } else {
           ValueKind comparison_type = kI32;
-          if (Is64() && table.is_table64) {
+          if (Is64() && table->is_table64) {
             // {index_reg} is a uintptr, so do a ptrsize comparison.
             __ emit_u32_to_uintptr(table_size.gp_reg(), table_size.gp_reg());
             comparison_type = kIntPtrKind;
@@ -8221,10 +8242,10 @@ class LiftoffCompiler {
                             trapping);
         }
       } else {
-        DCHECK_EQ(max_table_size, table.initial_size);
+        DCHECK_EQ(max_table_size, table->initial_size);
         if (is_static_index) {
           DCHECK_LT(index_slot.i32_const(), max_table_size);
-        } else if (Is64() && table.is_table64) {
+        } else if (Is64() && table->is_table64) {
           // On 32-bit, this is the same as below, so include the `Is64()` test
           // to statically tell the compiler to skip this branch.
           // Note: {max_table_size} will be sign-extended, which is fine because
@@ -8277,9 +8298,9 @@ class LiftoffCompiler {
     }
 
     bool needs_type_check = !EquivalentTypes(
-        table.type.AsNonNull(), ValueType::Ref(imm.sig_imm.index),
+        table->type.AsNonNull(), ValueType::Ref(imm.sig_imm.index),
         decoder->module_, decoder->module_);
-    bool needs_null_check = table.type.is_nullable();
+    bool needs_null_check = table->type.is_nullable();
 
     // We do both the type check and the null check by checking the signature,
     // so this shares most code. For the null check we then only check if the
@@ -8361,8 +8382,11 @@ class LiftoffCompiler {
             ObjectAccess::ToTagged(WasmTypeInfo::kSupertypesOffset +
                                    rtt_depth * kTaggedSize));
         ScopedTempRegister formal_rtt{temps, kGpReg};
+        // Instead of {pinned}, we use {kGpCacheRegList} as the list of pinned
+        // registers, to prevent any attempt to cache the instance, which would
+        // be incompatible with the {FREEZE_STATE} that is in effect here.
         LOAD_TAGGED_PTR_INSTANCE_FIELD(formal_rtt.gp_reg(), ManagedObjectMaps,
-                                       pinned);
+                                       kGpCacheRegList);
         __ LoadTaggedPointer(
             formal_rtt.gp_reg(), formal_rtt.gp_reg(), no_reg,
             wasm::ObjectAccess::ElementOffsetInTaggedFixedArray(
@@ -8486,6 +8510,22 @@ class LiftoffCompiler {
             __ cache_state()->cached_instance_data});
   }
 
+  void EmitDeoptPoint(FullDecoder* decoder) {
+    LiftoffAssembler::CacheState initial_state(zone_);
+    initial_state.Split(*__ cache_state());
+    // TODO(mliedtke): The deopt point should be in out-of-line-code.
+    Label deopt_point;
+    Label callref;
+    __ emit_jump(&callref);
+    __ bind(&deopt_point);
+    StoreFrameDescriptionForDeopt(decoder);
+    CallBuiltin(Builtin::kWasmLiftoffDeoptFinish, MakeSig(), {},
+                kNoSourcePosition);
+    __ MergeStackWith(initial_state, 0, LiftoffAssembler::kForwardJump);
+    __ cache_state() -> Steal(initial_state);
+    __ bind(&callref);
+  }
+
   void CallRefImpl(FullDecoder* decoder, ValueType func_ref_type,
                    const FunctionSig* type_sig, TailCall tail_call) {
     MostlySmallValueKindSig sig(zone_, type_sig);
@@ -8503,7 +8543,7 @@ class LiftoffCompiler {
       if (v8_flags.wasm_deopt &&
           env_->deopt_info_bytecode_offset == decoder->pc_offset() &&
           env_->deopt_location_kind == LocationKindForDeopt::kEagerDeopt) {
-        StoreFrameDescriptionForDeopt(decoder);
+        EmitDeoptPoint(decoder);
       }
       LiftoffRegList pinned;
       LiftoffRegister func_ref = pinned.set(__ PopToRegister(pinned));
@@ -9027,7 +9067,7 @@ WasmCompilationResult ExecuteLiftoffCompilation(
   }
   DCHECK_IMPLIES(compiler_options.max_steps,
                  compiler_options.for_debugging == kForDebugging);
-  WasmFeatures unused_detected_features;
+  WasmDetectedFeatures unused_detected_features;
 
   WasmFullDecoder<Decoder::NoValidationTag, LiftoffCompiler> decoder(
       &zone, env->module, env->enabled_features,
@@ -9105,7 +9145,7 @@ std::unique_ptr<DebugSideTable> GenerateLiftoffDebugSideTable(
   Zone zone(GetWasmEngine()->allocator(), "LiftoffDebugSideTableZone");
   auto call_descriptor = compiler::GetWasmCallDescriptor(&zone, function->sig);
   DebugSideTableBuilder debug_sidetable_builder;
-  WasmFeatures detected;
+  WasmDetectedFeatures detected;
   constexpr int kSteppingBreakpoints[] = {0};
   DCHECK(code->for_debugging() == kForDebugging ||
          code->for_debugging() == kForStepping);

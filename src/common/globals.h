@@ -1585,8 +1585,16 @@ enum WhereToStart { kStartAtReceiver, kStartAtPrototype };
 enum ResultSentinel { kNotFound = -1, kUnsupported = -2 };
 
 enum ShouldThrow {
+  kDontThrow = Internals::kDontThrow,
   kThrowOnError = Internals::kThrowOnError,
-  kDontThrow = Internals::kDontThrow
+};
+
+// The result that might be returned by Setter/Definer/Deleter interceptor
+// callback when it doesn't throw an exception.
+enum class InterceptorResult {
+  kFalse = 0,
+  kTrue = 1,
+  kNotIntercepted = 2,
 };
 
 enum class ThreadKind { kMain, kBackground };

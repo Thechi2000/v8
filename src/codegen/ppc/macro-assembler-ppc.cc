@@ -1632,7 +1632,6 @@ void MacroAssembler::EnterExitFrame(Register scratch, int stack_space,
   DCHECK_EQ(2 * kSystemPointerSize, ExitFrameConstants::kCallerSPDisplacement);
   DCHECK_EQ(1 * kSystemPointerSize, ExitFrameConstants::kCallerPCOffset);
   DCHECK_EQ(0 * kSystemPointerSize, ExitFrameConstants::kCallerFPOffset);
-  DCHECK_GT(stack_space, 0);
 
   // This is an opportunity to build a frame to wrap
   // all of the pushes that have happened inside of V8
@@ -5874,15 +5873,6 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                              ER::exception_address(isolate), no_reg));
     __ CmpS64(scratch, scratch2);
     __ bne(&propagate_exception);
-  }
-
-  {
-    ASM_CODE_COMMENT_STRING(masm, "Convert return value");
-    Label finish_return;
-    __ CompareRoot(return_value, RootIndex::kTheHoleValue);
-    __ bne(&finish_return);
-    __ LoadRoot(return_value, RootIndex::kUndefinedValue);
-    __ bind(&finish_return);
   }
 
   __ AssertJSAny(return_value, scratch, scratch2,

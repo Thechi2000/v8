@@ -1160,7 +1160,8 @@ auto Module::validate(Store* store_abs, const vec<byte_t>& binary) -> bool {
   i::Isolate* isolate = impl(store_abs)->i_isolate();
   PtrComprCageAccessScope ptr_compr_cage_access_scope(isolate);
   i::HandleScope scope(isolate);
-  i::wasm::WasmFeatures features = i::wasm::WasmFeatures::FromIsolate(isolate);
+  i::wasm::WasmEnabledFeatures features =
+      i::wasm::WasmEnabledFeatures::FromIsolate(isolate);
   i::wasm::CompileTimeImports imports;
   return i::wasm::GetWasmEngine()->SyncValidate(isolate, features, imports,
                                                 bytes);
@@ -1174,7 +1175,8 @@ auto Module::make(Store* store_abs, const vec<byte_t>& binary) -> own<Module> {
   CheckAndHandleInterrupts(isolate);
   i::wasm::ModuleWireBytes bytes(
       {reinterpret_cast<const uint8_t*>(binary.get()), binary.size()});
-  i::wasm::WasmFeatures features = i::wasm::WasmFeatures::FromIsolate(isolate);
+  i::wasm::WasmEnabledFeatures features =
+      i::wasm::WasmEnabledFeatures::FromIsolate(isolate);
   i::wasm::CompileTimeImports imports;
   i::wasm::ErrorThrower thrower(isolate, "ignored");
   i::Handle<i::WasmModuleObject> module;
@@ -2057,8 +2059,8 @@ auto Table::make(Store* store_abs, const TableType* type, const Ref* ref)
   }
 
   i::Handle<i::WasmTableObject> table_obj = i::WasmTableObject::New(
-      isolate, i::Handle<i::WasmInstanceObject>(), i_type, minimum, has_maximum,
-      maximum, isolate->factory()->null_value());
+      isolate, i::Handle<i::WasmTrustedInstanceData>(), i_type, minimum,
+      has_maximum, maximum, isolate->factory()->null_value());
 
   if (ref) {
     i::DirectHandle<i::FixedArray> entries{table_obj->entries(), isolate};

@@ -474,6 +474,10 @@ EXTERNAL_POINTER_ACCESSORS(WasmTypeInfo, native_type, Address,
 #undef WRITE_PRIMITIVE_FIELD
 #undef PRIMITIVE_ACCESSORS
 
+TRUSTED_POINTER_ACCESSORS(WasmTableObject, trusted_data,
+                          WasmTrustedInstanceData, kTrustedDataOffset,
+                          kWasmTrustedInstanceDataIndirectPointerTag)
+
 wasm::ValueType WasmTableObject::type() {
   // Various consumers of ValueKind (e.g. ValueKind::name()) use the raw enum
   // value as index into a global array. As such, if the index is corrupted
@@ -484,6 +488,14 @@ wasm::ValueType WasmTableObject::type() {
   wasm::ValueType type = wasm::ValueType::FromRawBitField(raw_type());
   SBXCHECK(is_valid(type.kind()));
   return type;
+}
+
+bool WasmTableObject::is_table64() const {
+  int table64_smi_value =
+      TorqueGeneratedWasmTableObject<WasmTableObject, JSObject>::is_table64();
+  DCHECK_LE(0, table64_smi_value);
+  DCHECK_GE(1, table64_smi_value);
+  return table64_smi_value != 0;
 }
 
 bool WasmMemoryObject::has_maximum_pages() { return maximum_pages() >= 0; }

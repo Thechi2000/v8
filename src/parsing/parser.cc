@@ -451,8 +451,7 @@ Expression* Parser::NewV8RuntimeFunctionForFuzzing(
   return factory()->NewCallRuntime(function, permissive_args, pos);
 }
 
-Parser::Parser(LocalIsolate* local_isolate, ParseInfo* info,
-               Handle<Script> script)
+Parser::Parser(LocalIsolate* local_isolate, ParseInfo* info)
     : ParserBase<Parser>(info->zone(), &scanner_, info->stack_limit(),
                          info->ast_value_factory(),
                          info->pending_error_handler(),
@@ -460,7 +459,6 @@ Parser::Parser(LocalIsolate* local_isolate, ParseInfo* info,
                          info->flags(), true),
       local_isolate_(local_isolate),
       info_(info),
-      script_(script),
       scanner_(info->character_stream(), flags()),
       preparser_zone_(info->zone()->allocator(), "pre-parser-zone"),
       reusable_preparser_(nullptr),
@@ -540,7 +538,7 @@ namespace {
 
 void MaybeProcessSourceRanges(ParseInfo* parse_info, Expression* root,
                               uintptr_t stack_limit_) {
-  if (root != nullptr && parse_info->source_range_map() != nullptr) {
+  if (parse_info->source_range_map() != nullptr) {
     SourceRangeAstVisitor visitor(stack_limit_, root,
                                   parse_info->source_range_map());
     visitor.Run();
@@ -575,12 +573,12 @@ void Parser::ParseProgram(Isolate* isolate, DirectHandle<Script> script,
 
   scanner_.Initialize();
   FunctionLiteral* result = DoParseProgram(isolate, info);
+  HandleSourceURLComments(isolate, script);
+  if (result == nullptr) return;
   MaybeProcessSourceRanges(info, result, stack_limit_);
   PostProcessParseResult(isolate, info, result);
 
-  HandleSourceURLComments(isolate, script);
-
-  if (V8_UNLIKELY(v8_flags.log_function_events && result != nullptr)) {
+  if (V8_UNLIKELY(v8_flags.log_function_events)) {
     double ms = timer.Elapsed().InMillisecondsF();
     const char* event_name = "parse-eval";
     int start = -1;
@@ -640,16 +638,16 @@ FunctionLiteral* Parser::DoParseProgram(Isolate* isolate, ParseInfo* info) {
         StatementListT statements(pointer_buffer());
         ParseModuleItemList(&statements);
         // Modules will always have an initial yield. If there are any
-        // additional suspends, i.e. awaits, then we treat the module as an
-        // AsyncModule.
+        // additional suspends, they are awaits, and we treat the module as a
+        // ModuleWithTopLevelAwait.
         if (function_state.suspend_count() > 1) {
-          scope->set_is_async_module();
+          scope->set_module_has_toplevel_await();
           block = factory()->NewBlock(true, statements);
         } else {
           statements.MergeInto(&body);
         }
       }
-      if (IsAsyncModule(scope->function_kind())) {
+      if (IsModuleWithTopLevelAwait(scope->function_kind())) {
         impl()->RewriteAsyncFunctionBody(
             &body, block, factory()->NewUndefinedLiteral(kNoSourcePosition));
       }
@@ -721,7 +719,7 @@ FunctionLiteral* Parser::DoParseProgram(Isolate* isolate, ParseInfo* info) {
 template <typename IsolateT>
 void Parser::PostProcessParseResult(IsolateT* isolate, ParseInfo* info,
                                     FunctionLiteral* literal) {
-  if (literal == nullptr) return;
+  DCHECK_NOT_NULL(literal);
 
   info->set_literal(literal);
   info->set_language_mode(literal->language_mode());
@@ -939,20 +937,15 @@ void Parser::ParseFunction(Isolate* isolate, ParseInfo* info,
     result = DoParseFunction(isolate, info, start_position, end_position,
                              function_literal_id, info->function_name());
   }
+  if (result == nullptr) return;
   MaybeProcessSourceRanges(info, result, stack_limit_);
-  if (result != nullptr) {
-    Handle<String> inferred_name(shared_info->inferred_name(), isolate);
-    result->set_inferred_name(inferred_name);
-    // Fix the function_literal_id in case we changed it earlier.
-    result->set_function_literal_id(shared_info->function_literal_id());
-  }
   PostProcessParseResult(isolate, info, result);
-  if (V8_UNLIKELY(v8_flags.log_function_events && result != nullptr)) {
+  if (V8_UNLIKELY(v8_flags.log_function_events)) {
     double ms = timer.Elapsed().InMillisecondsF();
     // We should already be internalized by now, so the debug name will be
     // available.
     DeclarationScope* function_scope = result->scope();
-    std::unique_ptr<char[]> function_name = result->GetDebugName();
+    std::unique_ptr<char[]> function_name = shared_info->DebugNameCStr();
     LOG(isolate,
         FunctionEvent("parse-function", flags().script_id(), ms,
                       function_scope->start_position(),
@@ -3471,8 +3464,8 @@ void Parser::UpdateStatistics(
 }
 
 void Parser::ParseOnBackground(LocalIsolate* isolate, ParseInfo* info,
-                               int start_position, int end_position,
-                               int function_literal_id) {
+                               Handle<Script> script, int start_position,
+                               int end_position, int function_literal_id) {
   RCS_SCOPE(isolate, RuntimeCallCounterId::kParseProgram,
             RuntimeCallStats::CounterMode::kThreadSpecific);
   parsing_on_main_thread_ = false;
@@ -3513,13 +3506,15 @@ void Parser::ParseOnBackground(LocalIsolate* isolate, ParseInfo* info,
                                end_position, function_literal_id,
                                info->function_name());
     }
+    if (result == nullptr) return;
     MaybeProcessSourceRanges(info, result, stack_limit_);
   });
   // We need to unpark by now though, to be able to internalize.
-  PostProcessParseResult(isolate, info, result);
   if (flags().is_toplevel()) {
-    HandleSourceURLComments(isolate, script_);
+    HandleSourceURLComments(isolate, script);
   }
+  if (result == nullptr) return;
+  PostProcessParseResult(isolate, info, result);
 }
 
 Parser::TemplateLiteralState Parser::OpenTemplateLiteral(int pos) {

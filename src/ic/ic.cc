@@ -3335,6 +3335,7 @@ bool CanFastCloneObjectWithDifferentMaps(DirectHandle<Map> source_map,
                                          bool null_proto_literal,
                                          Isolate* isolate) {
   DisallowGarbageCollection no_gc;
+  DCHECK(!target_map->is_deprecated());
   DCHECK(source_map->OnlyHasSimpleProperties());
   // Ensure source and target have identical binary represenation of properties
   // and elements as the IC relies on copying the raw bytes. This also excludes
@@ -3409,12 +3410,16 @@ bool CanFastCloneObjectWithDifferentMaps(DirectHandle<Map> source_map,
     PropertyDetails target_details = target_descriptors->GetDetails(i);
     DCHECK_EQ(details.kind(), PropertyKind::kData);
     DCHECK_EQ(target_details.kind(), PropertyKind::kData);
-    // In the case the clone also involves a proto transition, we do not cache
-    // the target and thus cannot keep track of representation dependencies. We
-    // can only allow the most generic target representation.
-    // The same goes for field types.
     Tagged<FieldType> type = descriptors->GetFieldType(i);
     Tagged<FieldType> target_type = target_descriptors->GetFieldType(i);
+    // This DCHECK rests on the fact that we only clear field types when there
+    // are no instances of the host map left. Thus, to enter the clone IC at
+    // least one object of the source map needs to be created, which in turn
+    // will re-initialize the source maps field type. This is guaranteed to also
+    // update the target map through the sidestep transition, unless the target
+    // map is deprecated.
+    DCHECK(!IsNone(type));
+    DCHECK(!IsNone(target_type));
     if (CanCacheCloneTargetMapTransition(source_map, target_map,
                                          null_proto_literal, isolate)) {
       if (!details.representation().fits_into(
@@ -3423,13 +3428,14 @@ bool CanFastCloneObjectWithDifferentMaps(DirectHandle<Map> source_map,
            details.representation().IsSmi())) {
         return false;
       }
-      if (IsNone(target_type) ||
-          (IsClass(type) && IsClass(target_type) &&
-           !FieldType::Equals(type, target_type)) ||
-          (IsAny(type) && IsClass(target_type))) {
+      if (!FieldType::NowIs(type, target_type)) {
         return false;
       }
     } else {
+      // In the case we cannot connect the maps in the transition tree (e.g.,
+      // the clone also involves a proto transition) we cannot keep track of
+      // representation dependencies. We can only allow the most generic target
+      // representation. The same goes for field types.
       if (!details.representation().MostGenericInPlaceChange().Equals(
               target_details.representation()) ||
           !IsAny(target_type)) {
@@ -3773,14 +3779,31 @@ RUNTIME_FUNCTION(Runtime_StorePropertyWithInterceptor) {
         interceptor_holder->GetNamedInterceptor(), isolate);
 
     DCHECK(!interceptor->non_masking());
-    PropertyCallbackArguments arguments(isolate, interceptor->data(), *receiver,
-                                        *receiver, Just(kDontThrow));
+    // TODO(ishell, 348688196): why is it known that it shouldn't throw?
+    Maybe<ShouldThrow> should_throw = Just(kDontThrow);
+    PropertyCallbackArguments args(isolate, interceptor->data(), *receiver,
+                                   *receiver, should_throw);
 
-    Handle<Object> result = arguments.CallNamedSetter(interceptor, name, value);
-    RETURN_FAILURE_IF_EXCEPTION_DETECTOR(isolate, arguments);
-    if (!result.is_null()) return *value;
-    // If the interceptor didn't handle the request, then there must be no
-    // side effects.
+    v8::Intercepted intercepted =
+        args.CallNamedSetter(interceptor, name, value);
+    // Stores initiated by StoreICs don't care about the exact result of
+    // the store operation returned by the callback as long as it doesn't
+    // throw an exception.
+    constexpr bool ignore_return_value = true;
+    InterceptorResult result;
+    MAYBE_ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+        isolate, result,
+        args.GetBooleanReturnValue(intercepted, "Setter", ignore_return_value));
+
+    switch (result) {
+      case InterceptorResult::kFalse:
+      case InterceptorResult::kTrue:
+        return *value;
+
+      case InterceptorResult::kNotIntercepted:
+        // Proceed storing past the interceptor.
+        break;
+    }
   }
 
   LookupIterator it(isolate, receiver, name, receiver);

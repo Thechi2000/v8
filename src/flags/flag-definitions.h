@@ -281,15 +281,14 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
   V(js_decorators, "decorators")
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_INPROGRESS(V)                                           \
-  HARMONY_INPROGRESS_BASE(V)                                            \
-  V(harmony_intl_best_fit_matcher, "Intl BestFitMatcher")               \
-  /* Following two flags should ship the same time but may stage */     \
-  /* differently . */                                                   \
-  V(harmony_remove_intl_locale_info_getters,                            \
-    "Remove Obsoleted Intl Locale Info getters")                        \
-  V(harmony_intl_locale_info_func, "Intl Locale Info API as functions") \
-  V(harmony_intl_duration_format, "Intl DurationFormat API")
+#define HARMONY_INPROGRESS(V)                                       \
+  HARMONY_INPROGRESS_BASE(V)                                        \
+  V(harmony_intl_best_fit_matcher, "Intl BestFitMatcher")           \
+  /* Following two flags should ship the same time but may stage */ \
+  /* differently . */                                               \
+  V(harmony_remove_intl_locale_info_getters,                        \
+    "Remove Obsoleted Intl Locale Info getters")                    \
+  V(harmony_intl_locale_info_func, "Intl Locale Info API as functions")
 
 #define JAVASCRIPT_INPROGRESS_FEATURES(V) JAVASCRIPT_INPROGRESS_FEATURES_BASE(V)
 #else
@@ -299,11 +298,12 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
 
 // Features that are complete (but still behind the --harmony flag).
 #define HARMONY_STAGED_BASE(V)
-
 #define JAVASCRIPT_STAGED_FEATURES_BASE(V) V(js_promise_try, "Promise.try")
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
+#define HARMONY_STAGED(V) \
+  HARMONY_STAGED_BASE(V)  \
+  V(harmony_intl_duration_format, "Intl DurationFormat API")
 #define JAVASCRIPT_STAGED_FEATURES(V) JAVASCRIPT_STAGED_FEATURES_BASE(V)
 #else
 #define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
@@ -1407,7 +1407,7 @@ DEFINE_EXPERIMENTAL_FEATURE(turboshaft_from_maglev,
 // inline_api_calls are not supported by the Turboshaft->Maglev translation.
 DEFINE_NEG_IMPLICATION(turboshaft_from_maglev, maglev_inline_api_calls)
 
-DEFINE_BOOL(turboshaft_csa, false, "run the CSA pipeline with turboshaft")
+DEFINE_BOOL(turboshaft_csa, true, "run the CSA pipeline with turboshaft")
 DEFINE_IMPLICATION(turboshaft_csa, turboshaft_load_elimination)
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft_frontend,
                             "run (parts of) the frontend in Turboshaft")
@@ -1640,8 +1640,8 @@ DEFINE_EXPERIMENTAL_FEATURE(wasm_deopt,
 DEFINE_IMPLICATION(wasm_deopt, turboshaft_wasm)
 
 // Declare command-line flags for Wasm features. Warning: avoid using these
-// flags directly in the implementation. Instead accept wasm::WasmFeatures
-// for configurability.
+// flags directly in the implementation. Instead accept
+// wasm::WasmEnabledFeatures for configurability.
 #include "src/wasm/wasm-feature-flags.h"
 
 #define DECL_WASM_FLAG(feat, desc, val) \
@@ -2230,6 +2230,9 @@ DEFINE_BOOL(enable_vtunejit, true, "enable vtune jit interface")
 DEFINE_NEG_IMPLICATION(enable_vtunejit, compact_code_space)
 #endif  // ENABLE_VTUNE_JIT_INTERFACE
 
+DEFINE_BOOL(experimental_report_exceptions_from_callbacks, false,
+            "Notify Api callback about exceptions thrown in Api callbacks")
+
 // builtins.cc
 DEFINE_BOOL(allow_unsafe_function_constructor, false,
             "allow invoking the function constructor without security checks")
@@ -2393,7 +2396,7 @@ DEFINE_INT(max_valid_polymorphic_map_count, 4,
 DEFINE_BOOL(
     clone_object_sidestep_transitions, false,
     "support sidestep transitions for dependency tracking object clone maps")
-DEFINE_WEAK_IMPLICATION(future, move_prototype_transitions_first)
+DEFINE_WEAK_IMPLICATION(future, clone_object_sidestep_transitions)
 
 // map-inl.h
 DEFINE_INT(fast_properties_soft_limit, 12,
@@ -2587,7 +2590,7 @@ DEFINE_BOOL(experimental_regexp_engine_capture_group_opt, false,
 DEFINE_IMPLICATION(experimental_regexp_engine_capture_group_opt,
                    enable_experimental_regexp_engine)
 DEFINE_UINT64(experimental_regexp_engine_capture_group_opt_max_memory_usage,
-              1 << 30,
+              1024,
               "maximum memory usage in MB allowed for experimental engine")
 DEFINE_BOOL(trace_experimental_regexp_engine, false,
             "trace execution of experimental regexp engine")

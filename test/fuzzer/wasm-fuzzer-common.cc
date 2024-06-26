@@ -33,41 +33,20 @@
 
 namespace v8::internal::wasm::fuzzing {
 
+namespace {
 constexpr CompileTimeImports CompileTimeImportsForFuzzing() {
   return CompileTimeImports({CompileTimeImport::kJsString,
                              CompileTimeImport::kTextEncoder,
                              CompileTimeImport::kTextDecoder});
 }
 
-// Compile a baseline module. We pass a pointer to a max step counter and a
-// nondeterminsm flag that are updated during execution by Liftoff.
-Handle<WasmModuleObject> CompileReferenceModule(
-    Isolate* isolate, base::Vector<const uint8_t> wire_bytes,
-    int32_t* max_steps, int32_t* nondeterminism) {
-  // Create the native module.
-  std::shared_ptr<NativeModule> native_module;
-  constexpr bool kNoVerifyFunctions = false;
-  auto enabled_features = WasmFeatures::FromIsolate(isolate);
-  ModuleResult module_res =
-      DecodeWasmModule(enabled_features, wire_bytes, kNoVerifyFunctions,
-                       ModuleOrigin::kWasmOrigin);
-  CHECK(module_res.ok());
-  std::shared_ptr<WasmModule> module = module_res.value();
-  CHECK_NOT_NULL(module);
-  WasmError imports_error = ValidateAndSetBuiltinImports(
-      module.get(), wire_bytes, CompileTimeImportsForFuzzing());
-  CHECK(!imports_error.has_error());  // The module was compiled before.
-  native_module = GetWasmEngine()->NewNativeModule(
-      isolate, enabled_features, CompileTimeImportsForFuzzing(), module, 0);
-  native_module->SetWireBytes(base::OwnedVector<uint8_t>::Of(wire_bytes));
-  // The module is known to be valid as this point (it was compiled by the
-  // caller before).
-  module->set_all_functions_validated();
-
-  // Compile all functions with Liftoff.
+void CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
+                                              int32_t* max_steps,
+                                              int32_t* nondeterminism) {
+  const WasmModule* module = native_module->module();
   WasmCodeRefScope code_ref_scope;
-  CompilationEnv env = CompilationEnv::ForModule(native_module.get());
-  ModuleWireBytes wire_bytes_accessor{wire_bytes};
+  CompilationEnv env = CompilationEnv::ForModule(native_module);
+  ModuleWireBytes wire_bytes_accessor{native_module->wire_bytes()};
   for (size_t i = module->num_imported_functions; i < module->functions.size();
        ++i) {
     auto& func = module->functions[i];
@@ -90,6 +69,38 @@ Handle<WasmModuleObject> CompileReferenceModule(
     }
     native_module->PublishCode(native_module->AddCompiledCode(result));
   }
+}
+
+}  // namespace
+
+// Compile a baseline module. We pass a pointer to a max step counter and a
+// nondeterminsm flag that are updated during execution by Liftoff.
+Handle<WasmModuleObject> CompileReferenceModule(
+    Isolate* isolate, base::Vector<const uint8_t> wire_bytes,
+    int32_t* max_steps, int32_t* nondeterminism) {
+  // Create the native module.
+  std::shared_ptr<NativeModule> native_module;
+  constexpr bool kNoVerifyFunctions = false;
+  auto enabled_features = WasmEnabledFeatures::FromIsolate(isolate);
+  ModuleResult module_res =
+      DecodeWasmModule(enabled_features, wire_bytes, kNoVerifyFunctions,
+                       ModuleOrigin::kWasmOrigin);
+  CHECK(module_res.ok());
+  std::shared_ptr<WasmModule> module = module_res.value();
+  CHECK_NOT_NULL(module);
+  WasmError imports_error = ValidateAndSetBuiltinImports(
+      module.get(), wire_bytes, CompileTimeImportsForFuzzing());
+  CHECK(!imports_error.has_error());  // The module was compiled before.
+  native_module = GetWasmEngine()->NewNativeModule(
+      isolate, enabled_features, CompileTimeImportsForFuzzing(), module, 0);
+  native_module->SetWireBytes(base::OwnedVector<uint8_t>::Of(wire_bytes));
+  // The module is known to be valid as this point (it was compiled by the
+  // caller before).
+  module->set_all_functions_validated();
+
+  // Compile all functions with Liftoff.
+  CompileAllFunctionsForReferenceExecution(native_module.get(), max_steps,
+                                           nondeterminism);
 
   // Create the module object.
   constexpr base::Vector<const char> kNoSourceUrl;
@@ -239,7 +250,7 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
   if (did_output_before.exchange(true)) return;
 
   constexpr bool kVerifyFunctions = false;
-  auto enabled_features = WasmFeatures::FromIsolate(isolate);
+  auto enabled_features = WasmEnabledFeatures::FromIsolate(isolate);
   ModuleResult module_res =
       DecodeWasmModule(enabled_features, wire_bytes.module_bytes(),
                        kVerifyFunctions, ModuleOrigin::kWasmOrigin);
@@ -361,7 +372,7 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
 
   ModuleWireBytes wire_bytes(buffer.begin(), buffer.end());
 
-  auto enabled_features = WasmFeatures::FromIsolate(i_isolate);
+  auto enabled_features = WasmEnabledFeatures::FromIsolate(i_isolate);
   CompileTimeImports compile_imports = CompileTimeImportsForFuzzing();
 
   bool valid = GetWasmEngine()->SyncValidate(i_isolate, enabled_features,

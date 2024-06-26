@@ -2963,6 +2963,8 @@ void BytecodeGenerator::VisitDebuggerStatement(DebuggerStatement* stmt) {
 }
 
 void BytecodeGenerator::VisitFunctionLiteral(FunctionLiteral* expr) {
+  CHECK_LT(info_->literal()->function_literal_id(),
+           expr->function_literal_id());
   DCHECK_EQ(expr->scope()->outer_scope(), current_scope());
   uint8_t flags = CreateClosureFlags::Encode(
       expr->pretenure(), closure_scope()->is_function_scope(),
@@ -2992,11 +2994,9 @@ void BytecodeGenerator::AddToEagerLiteralsIfEager(FunctionLiteral* literal) {
     // then create one and enqueue it. Otherwise, we're reparsing (e.g. for the
     // debugger, source position collection, call printing, recompile after
     // flushing, etc.) and don't want to over-compile.
-    Handle<SharedFunctionInfo> shared_info;
-    if (!Script::FindSharedFunctionInfo(script_, local_isolate_, literal)
-             .ToHandle(&shared_info)) {
-      shared_info =
-          Compiler::GetSharedFunctionInfo(literal, script_, local_isolate_);
+    Handle<SharedFunctionInfo> shared_info =
+        Compiler::GetSharedFunctionInfo(literal, script_, local_isolate_);
+    if (!shared_info->is_compiled()) {
       info()->dispatcher()->Enqueue(local_isolate_, shared_info,
                                     info()->character_stream()->Clone());
     }
@@ -4227,7 +4227,7 @@ void BytecodeGenerator::BuildAsyncReturn(int source_position) {
         .CallRuntime(Runtime::kInlineAsyncGeneratorResolve, args);
   } else {
     DCHECK(IsAsyncFunction(info()->literal()->kind()) ||
-           IsAsyncModule(info()->literal()->kind()));
+           IsModuleWithTopLevelAwait(info()->literal()->kind()));
     RegisterList args = register_allocator()->NewRegisterList(2);
     builder()
         ->MoveRegister(generator_object(), args[0])  // generator
@@ -7896,7 +7896,7 @@ void BytecodeGenerator::BuildGeneratorObjectVariableInitialization() {
   Runtime::FunctionId function_id =
       ((IsAsyncFunction(info()->literal()->kind()) &&
         !IsAsyncGeneratorFunction(info()->literal()->kind())) ||
-       IsAsyncModule(info()->literal()->kind()))
+       IsModuleWithTopLevelAwait(info()->literal()->kind()))
           ? Runtime::kInlineAsyncFunctionEnter
           : Runtime::kInlineCreateJSGeneratorObject;
   builder()

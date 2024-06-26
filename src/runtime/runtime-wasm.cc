@@ -8,6 +8,7 @@
 #include "src/common/message-template.h"
 #include "src/compiler/wasm-compiler.h"
 #include "src/debug/debug.h"
+#include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/arguments-inl.h"
 #include "src/execution/frames.h"
 #include "src/heap/factory.h"
@@ -420,6 +421,27 @@ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
       wasm::JumpTableOffset(trusted_instance_data->module(), func_index));
 }
 
+namespace {
+Tagged<FixedArray> AllocateFeedbackVector(
+    Isolate* isolate,
+    DirectHandle<WasmTrustedInstanceData> trusted_instance_data,
+    int declared_func_index) {
+  DCHECK(isolate->context().is_null());
+  isolate->set_context(trusted_instance_data->native_context());
+  const wasm::WasmModule* module =
+      trusted_instance_data->native_module()->module();
+
+  int func_index = declared_func_index + module->num_imported_functions;
+  int num_slots = NumFeedbackSlots(module, func_index);
+  DirectHandle<FixedArray> vector =
+      isolate->factory()->NewFixedArrayWithZeroes(num_slots);
+  DCHECK_EQ(trusted_instance_data->feedback_vectors()->get(declared_func_index),
+            Smi::zero());
+  trusted_instance_data->feedback_vectors()->set(declared_func_index, *vector);
+  return *vector;
+}
+}  // namespace
+
 RUNTIME_FUNCTION(Runtime_WasmAllocateFeedbackVector) {
   ClearThreadInWasmScope wasm_flag(isolate);
   HandleScope scope(isolate);
@@ -430,24 +452,32 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateFeedbackVector) {
   wasm::NativeModule** native_module_stack_slot =
       reinterpret_cast<wasm::NativeModule**>(args.address_of_arg_at(2));
   wasm::NativeModule* native_module = trusted_instance_data->native_module();
-  const wasm::WasmModule* module = native_module->module();
   DCHECK(native_module->enabled_features().has_inlining() ||
-         module->is_wasm_gc);
+         native_module->module()->is_wasm_gc);
   // We have to save the native_module on the stack, in case the allocation
   // triggers a GC and we need the module to scan LiftoffSetupFrame stack frame.
   *native_module_stack_slot = native_module;
+  return AllocateFeedbackVector(isolate, trusted_instance_data,
+                                declared_func_index);
+}
 
-  DCHECK(isolate->context().is_null());
-  isolate->set_context(trusted_instance_data->native_context());
+RUNTIME_FUNCTION(Runtime_WasmAllocateFeedbackVectorAtDeopt) {
+  // TODO(mliedtke): Instead of doing this for the frame on top of the stack,
+  // this needs to be done for all deopted frames.
+  ClearThreadInWasmScope wasm_flag(isolate);
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  DirectHandle<WasmTrustedInstanceData> trusted_instance_data(
+      Cast<WasmTrustedInstanceData>(args[0]), isolate);
+  int declared_func_index = args.smi_value_at(1);
+  return AllocateFeedbackVector(isolate, trusted_instance_data,
+                                declared_func_index);
+}
 
-  int func_index = declared_func_index + module->num_imported_functions;
-  int num_slots = NumFeedbackSlots(module, func_index);
-  DirectHandle<FixedArray> vector =
-      isolate->factory()->NewFixedArrayWithZeroes(num_slots);
-  DCHECK_EQ(trusted_instance_data->feedback_vectors()->get(declared_func_index),
-            Smi::zero());
-  trusted_instance_data->feedback_vectors()->set(declared_func_index, *vector);
-  return *vector;
+RUNTIME_FUNCTION(Runtime_WasmDeleteDeoptimizer) {
+  ClearThreadInWasmScope wasm_flag(isolate);
+  Deoptimizer::DeleteForWasm(isolate);
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 namespace {
@@ -837,15 +867,14 @@ RUNTIME_FUNCTION(Runtime_WasmFunctionTableGet) {
       Cast<WasmTableObject>(trusted_instance_data->tables()->get(table_index)),
       isolate);
   // We only use the runtime call for lazily initialized function references.
-  DCHECK(IsUndefined(table->instance())
-             ? table->type() == wasm::kWasmFuncRef
-             : (IsSubtypeOf(
-                    table->type(), wasm::kWasmFuncRef,
-                    Cast<WasmInstanceObject>(table->instance())->module()) ||
-                IsSubtypeOf(
-                    table->type(),
-                    wasm::ValueType::RefNull(wasm::HeapType::kFuncShared),
-                    Cast<WasmInstanceObject>(table->instance())->module())));
+  DCHECK(
+      !table->has_trusted_data()
+          ? table->type() == wasm::kWasmFuncRef
+          : (IsSubtypeOf(table->type(), wasm::kWasmFuncRef,
+                         table->trusted_data(isolate)->module()) ||
+             IsSubtypeOf(table->type(),
+                         wasm::ValueType::RefNull(wasm::HeapType::kFuncShared),
+                         table->trusted_data(isolate)->module())));
 
   if (!table->is_in_bounds(entry_index)) {
     return ThrowWasmError(isolate, MessageTemplate::kWasmTrapTableOutOfBounds);
@@ -868,15 +897,14 @@ RUNTIME_FUNCTION(Runtime_WasmFunctionTableSet) {
       Cast<WasmTableObject>(trusted_instance_data->tables()->get(table_index)),
       isolate);
   // We only use the runtime call for lazily initialized function references.
-  DCHECK(IsUndefined(table->instance())
-             ? table->type() == wasm::kWasmFuncRef
-             : (IsSubtypeOf(
-                    table->type(), wasm::kWasmFuncRef,
-                    Cast<WasmInstanceObject>(table->instance())->module()) ||
-                IsSubtypeOf(
-                    table->type(),
-                    wasm::ValueType::RefNull(wasm::HeapType::kFuncShared),
-                    Cast<WasmInstanceObject>(table->instance())->module())));
+  DCHECK(
+      !table->has_trusted_data()
+          ? table->type() == wasm::kWasmFuncRef
+          : (IsSubtypeOf(table->type(), wasm::kWasmFuncRef,
+                         table->trusted_data(isolate)->module()) ||
+             IsSubtypeOf(table->type(),
+                         wasm::ValueType::RefNull(wasm::HeapType::kFuncShared),
+                         table->trusted_data(isolate)->module())));
 
   if (!table->is_in_bounds(entry_index)) {
     return ThrowWasmError(isolate, MessageTemplate::kWasmTrapTableOutOfBounds);
@@ -1304,7 +1332,11 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
       WasmContinuationObject::New(isolate, wasm::JumpBuffer::Inactive, parent);
   auto target_stack =
       Cast<Managed<wasm::StackMemory>>(target->stack())->get().get();
-  isolate->wasm_stacks()->Add(target_stack);
+  isolate->wasm_stacks().push_back(target_stack);
+  target_stack->set_index(isolate->wasm_stacks().size() - 1);
+  for (size_t i = 0; i < isolate->wasm_stacks().size(); ++i) {
+    SLOW_DCHECK(isolate->wasm_stacks()[i]->index() == i);
+  }
   isolate->roots_table().slot(RootIndex::kActiveContinuation).store(*target);
 
   // Update the suspender state.

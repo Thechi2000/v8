@@ -816,6 +816,14 @@ bool CppHeap::ShouldFinalizeIncrementalMarking() const {
   return !incremental_marking_supported() || IsTracingDone();
 }
 
+void CppHeap::EnterProcessGlobalAtomicPause() {
+  if (!TracingInitialized()) {
+    return;
+  }
+  DCHECK(in_atomic_pause_);
+  marker_->To<UnifiedHeapMarker>().EnterProcessGlobalAtomicPause();
+}
+
 void CppHeap::EnterFinalPause(cppgc::EmbedderStackState stack_state) {
   CHECK(!IsGCForbidden());
   // Enter atomic pause even if tracing is not initialized. This is needed to
@@ -867,7 +875,7 @@ void RecordEmbedderSpeed(GCTracer* tracer, base::TimeDelta marking_time,
 
 }  // namespace
 
-void CppHeap::FinishMarkingAndStartSweeping() {
+void CppHeap::FinishMarkingAndProcessWeakness() {
   CHECK(in_atomic_pause_);
   CHECK(marking_done_);
 
@@ -890,6 +898,14 @@ void CppHeap::FinishMarkingAndStartSweeping() {
     marker_->LeaveAtomicPause();
   }
   marker_.reset();
+}
+
+void CppHeap::CompactAndSweep() {
+  if (!TracingInitialized()) {
+    return;
+  }
+  // TODO(336734387): This should be moved at the end of marking. Currently
+  // global limit computation considers live+dead memory.
   if (isolate_) {
     used_size_ = stats_collector_->marked_bytes();
     // Force a check next time increased memory is reported. This allows for
@@ -944,11 +960,7 @@ void CppHeap::FinishMarkingAndStartSweeping() {
             : cppgc::internal::SweepingStrategy::kMinimizeMemory};
     DCHECK_IMPLIES(!isolate_,
                    SweepingType::kAtomic == sweeping_config.sweeping_type);
-    // For detached GCs we set the initial heap limit to 100%, which avoids
-    // relying on idle tasks.
-    const double initial_heap_limit_percent =
-        heap_ ? heap_->PercentToGlobalMemoryLimit() : 100;
-    sweeper().Start(sweeping_config, initial_heap_limit_percent);
+    sweeper().Start(sweeping_config);
   }
 
   in_atomic_pause_ = false;
@@ -988,11 +1000,6 @@ void CppHeap::ReportBufferedAllocationSizeIfPossible() {
     used_size_.fetch_add(static_cast<size_t>(bytes_to_report),
                          std::memory_order_relaxed);
     allocated_size_ += bytes_to_report;
-
-    // Potentially update the sweeper with the latest limit to adjust its
-    // sweeping strategy.
-    sweeper_.UpdateHeapLimitPercentageIfRunning(
-        [this]() { return heap_->PercentToGlobalMemoryLimit(); });
 
     if (v8_flags.incremental_marking) {
       if (allocated_size_ > allocated_size_limit_for_check_) {
@@ -1037,11 +1044,13 @@ void CppHeap::CollectGarbageForTesting(CollectionType collection_type,
       StartMarking();
     }
     EnterFinalPause(stack_state);
+    EnterProcessGlobalAtomicPause();
     CHECK(AdvanceTracing(v8::base::TimeDelta::Max()));
     if (FinishConcurrentMarkingIfNeeded()) {
       CHECK(AdvanceTracing(v8::base::TimeDelta::Max()));
     }
-    FinishMarkingAndStartSweeping();
+    FinishMarkingAndProcessWeakness();
+    CompactAndSweep();
     FinishAtomicSweepingIfRunning();
   });
 }

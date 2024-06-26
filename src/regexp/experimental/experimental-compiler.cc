@@ -476,9 +476,7 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
       assembler_.FilterGroup(node->index());
       can_compile_node_ = false;
       node->body()->Accept(this, nullptr);
-    } else {
-      nodes_.emplace_back(node);
-      assembler_.FilterChild(nodes_.back().label);
+      return nullptr;
     }
 
     return nullptr;
@@ -494,13 +492,14 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
       assembler_.FilterLookaround(node->index());
       can_compile_node_ = false;
       node->body()->Accept(this, nullptr);
-    } else {
       if (node->CaptureRegisters().is_empty()) {
         return nullptr;
       }
 
       nodes_.emplace_back(node);
       assembler_.FilterChild(nodes_.back().label);
+
+      return nullptr;
     }
 
     return nullptr;
@@ -513,8 +512,6 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
   void* VisitEmpty(RegExpEmpty* node, void*) override { return nullptr; }
 
  private:
-  // Entry in the nodes queue. Contains the node to compile and a label to bind
-  // at the start of its bytecode.
   class BFEntry {
    public:
     explicit BFEntry(RegExpTree* node) : label(), node(node) {}
@@ -528,9 +525,9 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
   BytecodeAssembler& assembler_;
   ZoneLinkedList<BFEntry> nodes_;
 
-  // Whether we can compile a node or we should add it to `nodes_`. This is set
-  // to true after popping an element from the queue, and false after having
-  // compiled one.
+  // Whether we can compile a node or we should add it to `nodes_`. This is
+  // set to true after popping an element from the queue, and false after
+  // having compiled one.
   bool can_compile_node_;
 
   const ZoneMap<int, int>& quantifier_id_remapping_;
@@ -543,8 +540,8 @@ class CompileVisitor : private RegExpVisitor {
     CompileVisitor compiler(zone);
 
     if (!IsSticky(flags) && !tree->IsAnchoredAtStart()) {
-      // The match is not anchored, i.e. may start at any input position, so we
-      // emit a preamble corresponding to /.*?/.  This skips an arbitrary
+      // The match is not anchored, i.e. may start at any input position, so
+      // we emit a preamble corresponding to /.*?/.  This skips an arbitrary
       // prefix in the input non-greedily.
       compiler.CompileNonGreedyStar(
           [&]() { compiler.assembler_.ConsumeAnyChar(); });
@@ -562,36 +559,36 @@ class CompileVisitor : private RegExpVisitor {
     }
 
     // Each lookaround is compiled as two different bytecode sections: a
-    // reverse, captureless automaton and a capturing one. They are then added
-    // at the end of the bytecode, respecting the order in which they were
-    // encountered. This ordering ensures that a lookaround can only use others
-    // whose bytecode were already issued, and is used by the interpreter to
-    // build a lookaround priority list.
+    // reverse, captureless automaton and a capturing one. They are then
+    // added at the end of the bytecode, respecting the order in which they
+    // were encountered. This ordering ensures that a lookaround can only
+    // use others whose bytecode were already issued, and is used by the
+    // interpreter to build a lookaround priority list.
     //
     // During the compilation of the main expression, lookarounds are not
     // immediately compiled, and are instead pushed at the back of a queue.
-    // After compiling the filtering instructions, the queue is emptied and each
-    // lookaround body is compiled into two sections:
+    // After compiling the filtering instructions, the queue is emptied and
+    // each lookaround body is compiled into two sections:
     //
     // 1. A non-capturing automaton, which is reversed if it is a lookahead.
     // 2. A capturing automaton, reversed if it is a lookbehind. Since it is
-    //    only used for capturing, it can be empty if the lookaround does not
-    //    contain any captures.
+    //    only used for capturing, it can be empty if the lookaround does
+    //    not contain any captures.
     //
     // See {TODO} in experimental-interpreter.cc for detailed explanation
     // on the reversal's reasons. The sections are delimited by the
-    // `START_LOOKAROUND` and `END_LOOKAROUND`, and the separation occurs right
-    // after the `WRITE_LOOKAROUND_TABLE`.
+    // `START_LOOKAROUND` and `END_LOOKAROUND`, and the separation occurs
+    // right after the `WRITE_LOOKAROUND_TABLE`.
     //
-    // If another lookaround is encountered during this phase, it is added at
-    // the back of the queue.
+    // If another lookaround is encountered during this phase, it is added
+    // at the back of the queue.
     //
     // {TODO still holds ?} This approach prevents the use of the sticky or
-    // global flags. In both cases, when resuming the search, it starts at a non
-    // null index, while the lookbehinds always need to start at the beginning
-    // of the string. A future implementation for the global flag may store the
-    // active lookbehind threads in the regexp to resume the execution of the
-    // lookbehinds automata.
+    // global flags. In both cases, when resuming the search, it starts at a
+    // non null index, while the lookbehinds always need to start at the
+    // beginning of the string. A future implementation for the global flag
+    // may store the active lookbehind threads in the regexp to resume the
+    // execution of the lookbehinds automata.
     while (!compiler.lookarounds_.empty()) {
       auto node = compiler.lookarounds_.front();
       compiler.CompileLookaround(node);
@@ -620,8 +617,8 @@ class CompileVisitor : private RegExpVisitor {
     assembler_.StartLookaround(
         lookaround->index(), lookaround->type() == RegExpLookaround::LOOKAHEAD);
 
-    // If the lookaround is not anchored, we add a /.*/ at its start, such that
-    // the resulting automaton will run over the whole input.
+    // If the lookaround is not anchored, we add a /.*/ at its start, such
+    // that the resulting automaton will run over the whole input.
     if ((lookaround->type() == RegExpLookaround::LOOKAHEAD &&
          !lookaround->body()->IsAnchoredAtEnd()) ||
         (lookaround->type() == RegExpLookaround::LOOKBEHIND &&
@@ -646,9 +643,10 @@ class CompileVisitor : private RegExpVisitor {
     assembler_.EndLookaround();
   }
 
-  // Generate a disjunction of code fragments compiled by a function `alt_gen`.
-  // `alt_gen` is called repeatedly with argument `int i = 0, 1, ..., alt_num -
-  // 1` and should build code corresponding to the ith alternative.
+  // Generate a disjunction of code fragments compiled by a function
+  // `alt_gen`. `alt_gen` is called repeatedly with argument `int i = 0, 1,
+  // ..., alt_num - 1` and should build code corresponding to the ith
+  // alternative.
   template <class F>
   void CompileDisjunction(int alt_num, F&& gen_alt) {
     // An alternative a1 | ... | an is compiled into
@@ -670,8 +668,8 @@ class CompileVisitor : private RegExpVisitor {
     // By the semantics of the FORK instruction (see above at definition and
     // semantics), a forked thread has lower priority than the thread that
     // spawned it.  This means that with the code we're generating here, the
-    // thread matching the alternative a1 has indeed highest priority, followed
-    // by the thread for a2 and so on.
+    // thread matching the alternative a1 has indeed highest priority,
+    // followed by the thread for a2 and so on.
 
     if (alt_num == 0) {
       // The empty disjunction.  This can never match.
@@ -720,7 +718,8 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   void CompileCharacterRanges(ZoneList<CharacterRange>* ranges, bool negated) {
-    // A character class is compiled as Disjunction over its `CharacterRange`s.
+    // A character class is compiled as Disjunction over its
+    // `CharacterRange`s.
     CharacterRange::Canonicalize(ranges);
     if (negated) {
       // The complement of a disjoint, non-adjacent (i.e. `Canonicalize`d)
@@ -733,8 +732,8 @@ class CompileVisitor : private RegExpVisitor {
     }
 
     CompileDisjunction(ranges->length(), [&](int i) {
-      // We don't support utf16 for now, so only ranges that can be specified
-      // by (complements of) ranges with base::uc16 bounds.
+      // We don't support utf16 for now, so only ranges that can be
+      // specified by (complements of) ranges with base::uc16 bounds.
       static_assert(kMaxSupportedCodepoint <=
                     std::numeric_limits<base::uc16>::max());
 
@@ -787,9 +786,9 @@ class CompileVisitor : private RegExpVisitor {
     DCHECK_EQ(indices.from() % 2, 0);
     DCHECK_EQ(indices.to() % 2, 1);
     for (int i = indices.from(); i <= indices.to(); i += 2) {
-      // It suffices to clear the register containing the `begin` of a capture
-      // because this indicates that the capture is undefined, regardless of
-      // the value in the `end` register.
+      // It suffices to clear the register containing the `begin` of a
+      // capture because this indicates that the capture is undefined,
+      // regardless of the value in the `end` register.
       assembler_.ClearRegister(i);
     }
   }
@@ -873,8 +872,8 @@ class CompileVisitor : private RegExpVisitor {
     //   end:
     //     ...
     //
-    // We add `BEGIN_LOOP` and `END_LOOP` instructions because these optional
-    // repetitions of the body cannot match the empty string.
+    // We add `BEGIN_LOOP` and `END_LOOP` instructions because these
+    // optional repetitions of the body cannot match the empty string.
 
     Label end;
     for (int i = 0; i != max_repetition_num; ++i) {
@@ -913,8 +912,8 @@ class CompileVisitor : private RegExpVisitor {
     //   end:
     //     ...
     //
-    // We add `BEGIN_LOOP` and `END_LOOP` instructions because these optional
-    // repetitions of the body cannot match the empty string.
+    // We add `BEGIN_LOOP` and `END_LOOP` instructions because these
+    // optional repetitions of the body cannot match the empty string.
 
     Label end;
     for (int i = 0; i != max_repetition_num; ++i) {
@@ -931,17 +930,18 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   // In the general case, the first repetition of <body>+ is different
-  // from the following ones as it is allowed to match the empty string. This is
-  // compiled by repeating <body>, but it can result in a bytecode that grows
-  // quadratically with the size of the regex when nesting pluses or repetition
-  // upper-bounded with infinity.
+  // from the following ones as it is allowed to match the empty string.
+  // This is compiled by repeating <body>, but it can result in a bytecode
+  // that grows quadratically with the size of the regex when nesting pluses
+  // or repetition upper-bounded with infinity.
   //
   // In the particular case where <body> cannot match the empty string, the
-  // plus can be compiled without duplicating the bytecode of <body>, resulting
-  // in a bytecode linear in the size of the regex in case of nested
-  // non-nullable pluses.
+  // plus can be compiled without duplicating the bytecode of <body>,
+  // resulting in a bytecode linear in the size of the regex in case of
+  // nested non-nullable pluses.
   //
-  // E.g. `/.+/` will compile `/./` once, while `/(?:.?)+/` will be compiled as
+  // E.g. `/.+/` will compile `/./` once, while `/(?:.?)+/` will be compiled
+  // as
   // `/(?:.?)(?:.?)*/`, resulting in two repetitions of the body.
 
   // Emit bytecode corresponding to /<emit_body>+/, with <emit_body> not
@@ -1001,12 +1001,12 @@ class CompileVisitor : private RegExpVisitor {
 
     // Emit the body, but clear registers occurring in body first.
     //
-    // TODO(mbid,v8:10765): It's not always necessary to a) capture registers
-    // and b) clear them. For example, we don't have to capture anything for
-    // the first 4 repetitions if node->min() >= 5, and then we don't have to
-    // clear registers in the first node->min() repetitions.
-    // Later, and if node->min() == 0, we don't have to clear registers before
-    // the first optional repetition.
+    // TODO(mbid,v8:10765): It's not always necessary to a) capture
+    // registers and b) clear them. For example, we don't have to capture
+    // anything for the first 4 repetitions if node->min() >= 5, and then we
+    // don't have to clear registers in the first node->min() repetitions.
+    // Later, and if node->min() == 0, we don't have to clear registers
+    // before the first optional repetition.
     Interval body_registers = node->body()->CaptureRegisters();
     auto emit_body = [&]() {
       if (v8_flags.experimental_regexp_engine_capture_group_opt) {
@@ -1023,13 +1023,14 @@ class CompileVisitor : private RegExpVisitor {
         node->min_match() > 0;
 
     if (can_be_reduced_to_non_nullable_plus) {
-      // Compile <body>+ with an optimization allowing linear sized bytecode in
-      // the case of nested pluses. Repetitions with infinite upperbound like
-      // <body>{n,}, with n != 0, are compiled into <body>{n-1}<body+>, avoiding
-      // one repetition, compared to <body>{n}<body>*.
+      // Compile <body>+ with an optimization allowing linear sized bytecode
+      // in the case of nested pluses. Repetitions with infinite upperbound
+      // like <body>{n,}, with n != 0, are compiled into <body>{n-1}<body+>,
+      // avoiding one repetition, compared to <body>{n}<body>*.
 
-      // Compile the mandatory repetitions. We repeat `min() - 1` times, such
-      // that the last repetition, compiled later, can be reused in a loop.
+      // Compile the mandatory repetitions. We repeat `min() - 1` times,
+      // such that the last repetition, compiled later, can be reused in a
+      // loop.
       for (int i = 0; i < node->min() - 1; ++i) {
         emit_body();
       }
@@ -1051,8 +1052,8 @@ class CompileVisitor : private RegExpVisitor {
         }
       }
     } else {
-      // Compile <body>+ into <body><body>*, and <body>{n,}, with n != 0, into
-      // <body>{n}<body>*.
+      // Compile <body>+ into <body><body>*, and <body>{n,}, with n != 0,
+      // into <body>{n}<body>*.
 
       // Compile the first `min()` repetitions.
       for (int i = 0; i < node->min(); ++i) {
@@ -1151,8 +1152,8 @@ class CompileVisitor : private RegExpVisitor {
  private:
   Zone* zone_;
 
-  // Stores the AST of the lookbehinds encountered in a queue. They are compiled
-  // after the main expression, in breadth-first order.
+  // Stores the AST of the lookbehinds encountered in a queue. They are
+  // compiled after the main expression, in breadth-first order.
   ZoneLinkedList<RegExpLookaround*> lookarounds_;
 
   std::optional<ZoneMap<int, int>> quantifier_id_remapping_;

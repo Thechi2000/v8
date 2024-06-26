@@ -2274,8 +2274,9 @@ Module::Status Module::GetStatus() const {
     case i::Module::kLinked:
       return kInstantiated;
     case i::Module::kEvaluating:
-    case i::Module::kEvaluatingAsync:
       return kEvaluating;
+    case i::Module::kEvaluatingAsync:
+      // TODO(syg): Expose kEvaluatingAsync in API as well.
     case i::Module::kEvaluated:
       return kEvaluated;
     case i::Module::kErrored:
@@ -6031,6 +6032,13 @@ bool v8::String::IsExternalOneByte() const {
   return false;
 }
 
+Local<v8::String> v8::String::InternalizeString(Isolate* v8_isolate) {
+  auto* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  auto str = Utils::OpenDirectHandle(this);
+  return Utils::ToLocal(isolate->factory()->InternalizeString(str),
+                        isolate);
+}
+
 void v8::String::VerifyExternalStringResource(
     v8::String::ExternalStringResource* value) const {
   i::DisallowGarbageCollection no_gc;
@@ -8827,7 +8835,8 @@ MaybeLocal<WasmModuleObject> WasmModuleObject::Compile(
   i::MaybeHandle<i::WasmModuleObject> maybe_compiled;
   {
     i::wasm::ErrorThrower thrower(i_isolate, "WasmModuleObject::Compile()");
-    auto enabled_features = i::wasm::WasmFeatures::FromIsolate(i_isolate);
+    auto enabled_features =
+        i::wasm::WasmEnabledFeatures::FromIsolate(i_isolate);
     // TODO(14179): Provide an API method that supports compile options.
     maybe_compiled = i::wasm::GetWasmEngine()->SyncCompile(
         i_isolate, enabled_features, i::wasm::CompileTimeImports{}, &thrower,
@@ -10218,6 +10227,13 @@ void Isolate::SetPromiseRejectCallback(PromiseRejectCallback callback) {
   if (callback == nullptr) return;
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   i_isolate->SetPromiseRejectCallback(callback);
+}
+
+void Isolate::SetExceptionPropagationCallback(
+    ExceptionPropagationCallback callback) {
+  if (callback == nullptr) return;
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  i_isolate->SetExceptionPropagationCallback(callback);
 }
 
 void Isolate::PerformMicrotaskCheckpoint() {
@@ -11763,7 +11779,8 @@ void InvokeAccessorGetterCallback(
       }
     }
   }
-  ExternalCallbackScope call_scope(i_isolate, FUNCTION_ADDR(getter));
+  ExternalCallbackScope call_scope(i_isolate, FUNCTION_ADDR(getter),
+                                   v8::ExceptionContext::kAttributeGet, &info);
   getter(property, info);
 }
 
@@ -11811,7 +11828,11 @@ inline void InvokeFunctionCallback(
       UNREACHABLE();
   }
 
-  ExternalCallbackScope call_scope(i_isolate, FUNCTION_ADDR(callback));
+  ExternalCallbackScope call_scope(i_isolate, FUNCTION_ADDR(callback),
+                                   info.IsConstructCall()
+                                       ? v8::ExceptionContext::kConstructor
+                                       : v8::ExceptionContext::kOperation,
+                                   &info);
   callback(info);
 }
 }  // namespace
@@ -11929,7 +11950,8 @@ bool ValidatePropertyCallbackInfo(const PropertyCallbackInfo<T>& info) {
   CHECK_IMPLIES(info.Holder() != info.HolderV2(),
                 i::IsJSGlobalObject(*Utils::OpenDirectHandle(*info.Holder())));
   END_ALLOW_USE_DEPRECATED()
-
+  i::Tagged<i::Object> key = i::PropertyCallbackArguments::GetPropertyKey(info);
+  CHECK(i::IsSmi(key) || i::IsName(key));
   CHECK(info.Data()->IsValue());
   USE(info.ShouldThrowOnError());
   if (!std::is_same<T, void>::value) {

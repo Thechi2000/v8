@@ -68,7 +68,7 @@ V8_INLINE bool ValidateAssumeTrue(bool condition, const char* message) {
         opcode);                                                             \
     return 0;                                                                \
   }                                                                          \
-  this->detected_->Add(kFeature_##feat)
+  this->detected_->add_##feat()
 
 static constexpr LoadType GetLoadType(WasmOpcode opcode) {
   // Hard-code the list of load types. The opcodes are highly unlikely to
@@ -216,7 +216,7 @@ namespace value_type_reader {
 template <typename ValidationTag>
 std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
                                              const uint8_t* pc,
-                                             WasmFeatures enabled) {
+                                             WasmEnabledFeatures enabled) {
   auto [heap_index, length] =
       decoder->read_i33v<ValidationTag>(pc, "heap type");
   if (heap_index < 0) {
@@ -299,7 +299,7 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
 template <typename ValidationTag>
 std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
                                                const uint8_t* pc,
-                                               WasmFeatures enabled) {
+                                               WasmEnabledFeatures enabled) {
   uint8_t val = decoder->read_u8<ValidationTag>(pc, "value type opcode");
   if (!VALIDATE(decoder->ok())) {
     return {kWasmBottom, 0};
@@ -597,8 +597,8 @@ struct SelectTypeImmediate {
   ValueType type;
 
   template <typename ValidationTag>
-  SelectTypeImmediate(WasmFeatures enabled, Decoder* decoder, const uint8_t* pc,
-                      ValidationTag = {}) {
+  SelectTypeImmediate(WasmEnabledFeatures enabled, Decoder* decoder,
+                      const uint8_t* pc, ValidationTag = {}) {
     uint8_t num_types;
     std::tie(num_types, length) =
         decoder->read_u32v<ValidationTag>(pc, "number of select types");
@@ -633,8 +633,8 @@ struct BlockTypeImmediate {
   BlockTypeImmediate& operator=(BlockTypeImmediate&&) = delete;
 
   template <typename ValidationTag>
-  BlockTypeImmediate(WasmFeatures enabled, Decoder* decoder, const uint8_t* pc,
-                     ValidationTag = {}) {
+  BlockTypeImmediate(WasmEnabledFeatures enabled, Decoder* decoder,
+                     const uint8_t* pc, ValidationTag = {}) {
     int64_t block_type;
     std::tie(block_type, length) =
         decoder->read_i33v<ValidationTag>(pc, "block type");
@@ -834,7 +834,6 @@ struct MemoryAccessImmediate {
   template <typename ValidationTag>
   V8_INLINE MemoryAccessImmediate(Decoder* decoder, const uint8_t* pc,
                                   uint32_t max_alignment, bool memory64_enabled,
-                                  bool multi_memory_enabled,
                                   ValidationTag = {}) {
     // Check for the fast path (two single-byte LEBs, mem index 0).
     const bool two_bytes = !ValidationTag::validate || decoder->end() - pc >= 2;
@@ -845,8 +844,8 @@ struct MemoryAccessImmediate {
       offset = pc[1];
       length = 2;
     } else {
-      ConstructSlow<ValidationTag>(decoder, pc, max_alignment, memory64_enabled,
-                                   multi_memory_enabled);
+      ConstructSlow<ValidationTag>(decoder, pc, max_alignment,
+                                   memory64_enabled);
     }
     if (!VALIDATE(alignment <= max_alignment)) {
       DecodeError<ValidationTag>(
@@ -862,13 +861,12 @@ struct MemoryAccessImmediate {
   V8_NOINLINE V8_PRESERVE_MOST void ConstructSlow(Decoder* decoder,
                                                   const uint8_t* pc,
                                                   uint32_t max_alignment,
-                                                  bool memory64_enabled,
-                                                  bool multi_memory_enabled) {
+                                                  bool memory64_enabled) {
     uint32_t alignment_length;
     std::tie(alignment, alignment_length) =
         decoder->read_u32v<ValidationTag>(pc, "alignment");
     length = alignment_length;
-    if (multi_memory_enabled && (alignment & 0x40)) {
+    if (alignment & 0x40) {
       alignment &= ~0x40;
       uint32_t mem_index_length;
       std::tie(mem_index, mem_index_length) =
@@ -969,8 +967,8 @@ struct HeapTypeImmediate {
   HeapType type{kBottom};
 
   template <typename ValidationTag>
-  HeapTypeImmediate(WasmFeatures enabled, Decoder* decoder, const uint8_t* pc,
-                    ValidationTag = {}) {
+  HeapTypeImmediate(WasmEnabledFeatures enabled, Decoder* decoder,
+                    const uint8_t* pc, ValidationTag = {}) {
     std::tie(type, length) =
         value_type_reader::read_heap_type<ValidationTag>(decoder, pc, enabled);
   }
@@ -1466,9 +1464,9 @@ class WasmDecoder : public Decoder {
   static_assert(!ValidationTag::full_validation || ValidationTag::validate);
 
  public:
-  WasmDecoder(Zone* zone, const WasmModule* module, WasmFeatures enabled,
-              WasmFeatures* detected, const FunctionSig* sig, bool is_shared,
-              const uint8_t* start, const uint8_t* end,
+  WasmDecoder(Zone* zone, const WasmModule* module, WasmEnabledFeatures enabled,
+              WasmDetectedFeatures* detected, const FunctionSig* sig,
+              bool is_shared, const uint8_t* start, const uint8_t* end,
               uint32_t buffer_offset = 0)
       : Decoder(start, end, buffer_offset),
         zone_(zone),
@@ -1765,7 +1763,7 @@ class WasmDecoder : public Decoder {
   bool Validate(const uint8_t* pc, CallIndirectImmediate& imm) {
     if (!ValidateSignature(pc, imm.sig_imm)) return false;
     if (!Validate(pc + imm.sig_imm.length, imm.table_imm)) return false;
-    ValueType table_type = module_->tables[imm.table_imm.index].type;
+    ValueType table_type = imm.table_imm.table->type;
     if (!VALIDATE(IsSubtypeOf(table_type, kWasmFuncRef, module_) ||
                   IsSubtypeOf(table_type,
                               ValueType::RefNull(HeapType::kFuncShared),
@@ -1881,14 +1879,8 @@ class WasmDecoder : public Decoder {
 
   bool Validate(const uint8_t* pc, MemoryIndexImmediate& imm) {
     size_t num_memories = module_->memories.size();
-    if (!VALIDATE(this->enabled_.has_multi_memory() ||
-                  (imm.index == 0 && imm.length == 1))) {
-      DecodeError(pc,
-                  "expected a single 0 byte for the memory index, found %u "
-                  "encoded in %u bytes; pass --experimental-wasm-multi-memory "
-                  "to enable multi-memory support",
-                  imm.index, imm.length);
-      return false;
+    if (imm.index > 0 || imm.length > 1) {
+      this->detected_->add_multi_memory();
     }
 
     if (!VALIDATE(imm.index < num_memories)) {
@@ -1897,9 +1889,10 @@ class WasmDecoder : public Decoder {
                   imm.index, num_memories);
       return false;
     }
-    V8_ASSUME(imm.index < num_memories);
 
+    V8_ASSUME(imm.index < num_memories);
     imm.memory = this->module_->memories.data() + imm.index;
+
     return true;
   }
 
@@ -1941,8 +1934,7 @@ class WasmDecoder : public Decoder {
     }
     ValueType elem_type =
         module_->elem_segments[imm.element_segment.index].type;
-    if (!VALIDATE(IsSubtypeOf(elem_type, module_->tables[imm.table.index].type,
-                              module_))) {
+    if (!VALIDATE(IsSubtypeOf(elem_type, imm.table.table->type, module_))) {
       DecodeError(pc, "table %u is not a super-type of %s", imm.table.index,
                   elem_type.name().c_str());
       return false;
@@ -1953,12 +1945,8 @@ class WasmDecoder : public Decoder {
   bool Validate(const uint8_t* pc, TableCopyImmediate& imm) {
     if (!Validate(pc, imm.table_src)) return false;
     if (!Validate(pc + imm.table_src.length, imm.table_dst)) return false;
-    size_t num_tables = module_->tables.size();
-    V8_ASSUME(imm.table_src.index < num_tables);
-    V8_ASSUME(imm.table_dst.index < num_tables);
-    ValueType src_type = module_->tables[imm.table_src.index].type;
-    if (!VALIDATE(IsSubtypeOf(
-            src_type, module_->tables[imm.table_dst.index].type, module_))) {
+    ValueType src_type = imm.table_src.table->type;
+    if (!VALIDATE(IsSubtypeOf(src_type, imm.table_dst.table->type, module_))) {
       DecodeError(pc, "table %u is not a super-type of %s", imm.table_dst.index,
                   src_type.name().c_str());
       return false;
@@ -1976,7 +1964,7 @@ class WasmDecoder : public Decoder {
 
   bool Validate(const uint8_t* pc, TableIndexImmediate& imm) {
     if (imm.index > 0 || imm.length > 1) {
-      this->detected_->Add(kFeature_reftypes);
+      this->detected_->add_reftypes();
     }
     size_t num_tables = module_->tables.size();
     if (!VALIDATE(imm.index < num_tables)) {
@@ -1984,15 +1972,14 @@ class WasmDecoder : public Decoder {
                   imm.index, num_tables);
       return false;
     }
-    if (!VALIDATE(!is_shared_ || module_->tables[imm.index].shared)) {
+    imm.table = this->module_->tables.data() + imm.index;
+
+    if (!VALIDATE(!is_shared_ || imm.table->shared)) {
       DecodeError(pc,
                   "cannot reference non-shared table %u from shared function",
                   imm.index);
       return false;
     }
-
-    V8_ASSUME(imm.index < num_tables);
-    imm.table = this->module_->tables.data() + imm.index;
 
     return true;
   }
@@ -2097,7 +2084,6 @@ class WasmDecoder : public Decoder {
     // immediates. This is backwards-compatible; decode errors will be detected
     // at another time when actually decoding that opcode.
     constexpr bool kConservativelyAssumeMemory64 = true;
-    constexpr bool kConservativelyAssumeMultiMemory = true;
     switch (opcode) {
       /********** Control opcodes **********/
       case kExprUnreachable:
@@ -2111,7 +2097,8 @@ class WasmDecoder : public Decoder {
       case kExprIf:
       case kExprLoop:
       case kExprBlock: {
-        BlockTypeImmediate imm(WasmFeatures::All(), decoder, pc + 1, validate);
+        BlockTypeImmediate imm(WasmEnabledFeatures::All(), decoder, pc + 1,
+                               validate);
         (ios.BlockType(imm), ...);
         return 1 + imm.length;
       }
@@ -2132,8 +2119,8 @@ class WasmDecoder : public Decoder {
         return 1 + iterator.length();
       }
       case kExprTryTable: {
-        BlockTypeImmediate block_type_imm(WasmFeatures::All(), decoder, pc + 1,
-                                          validate);
+        BlockTypeImmediate block_type_imm(WasmEnabledFeatures::All(), decoder,
+                                          pc + 1, validate);
         (ios.BlockType(block_type_imm), ...);
         TryTableImmediate try_table_imm(decoder, pc + 1 + block_type_imm.length,
                                         validate);
@@ -2175,7 +2162,8 @@ class WasmDecoder : public Decoder {
       case kExprRefEq:
         return 1;
       case kExprSelectWithType: {
-        SelectTypeImmediate imm(WasmFeatures::All(), decoder, pc + 1, validate);
+        SelectTypeImmediate imm(WasmEnabledFeatures::All(), decoder, pc + 1,
+                                validate);
         (ios.SelectType(imm), ...);
         return 1 + imm.length;
       }
@@ -2222,7 +2210,8 @@ class WasmDecoder : public Decoder {
         }
         return 9;
       case kExprRefNull: {
-        HeapTypeImmediate imm(WasmFeatures::All(), decoder, pc + 1, validate);
+        HeapTypeImmediate imm(WasmEnabledFeatures::All(), decoder, pc + 1,
+                              validate);
         (ios.HeapType(imm), ...);
         return 1 + imm.length;
       }
@@ -2245,7 +2234,7 @@ class WasmDecoder : public Decoder {
       FOREACH_STORE_MEM_OPCODE(DECLARE_OPCODE_CASE) {
         MemoryAccessImmediate imm(decoder, pc + 1, UINT32_MAX,
                                   kConservativelyAssumeMemory64,
-                                  kConservativelyAssumeMultiMemory, validate);
+                                  validate);
         (ios.MemoryAccess(imm), ...);
         return 1 + imm.length;
       }
@@ -2340,7 +2329,6 @@ class WasmDecoder : public Decoder {
           FOREACH_SIMD_MEM_OPCODE(DECLARE_OPCODE_CASE) {
             MemoryAccessImmediate imm(decoder, pc + length, UINT32_MAX,
                                       kConservativelyAssumeMemory64,
-                                      kConservativelyAssumeMultiMemory,
                                       validate);
             (ios.MemoryAccess(imm), ...);
             return length + imm.length;
@@ -2349,7 +2337,7 @@ class WasmDecoder : public Decoder {
             MemoryAccessImmediate imm(
                 decoder, pc + length, UINT32_MAX,
                 kConservativelyAssumeMemory64,
-                kConservativelyAssumeMultiMemory, validate);
+                validate);
         if (sizeof...(ios) > 0) {
               SimdLaneImmediate lane_imm(decoder,
                                          pc + length + imm.length, validate);
@@ -2381,9 +2369,8 @@ class WasmDecoder : public Decoder {
             decoder->read_prefixed_opcode<ValidationTag>(pc, "atomic_index");
         switch (opcode) {
           FOREACH_ATOMIC_OPCODE(DECLARE_OPCODE_CASE) {
-            MemoryAccessImmediate imm(
-                decoder, pc + length, UINT32_MAX, kConservativelyAssumeMemory64,
-                kConservativelyAssumeMultiMemory, validate);
+            MemoryAccessImmediate imm(decoder, pc + length, UINT32_MAX,
+                                      kConservativelyAssumeMemory64, validate);
             (ios.MemoryAccess(imm), ...);
             return length + imm.length;
           }
@@ -2462,8 +2449,8 @@ class WasmDecoder : public Decoder {
           case kExprRefCastNull:
           case kExprRefTest:
           case kExprRefTestNull: {
-            HeapTypeImmediate imm(WasmFeatures::All(), decoder, pc + length,
-                                  validate);
+            HeapTypeImmediate imm(WasmEnabledFeatures::All(), decoder,
+                                  pc + length, validate);
             (ios.HeapType(imm), ...);
             return length + imm.length;
           }
@@ -2478,9 +2465,9 @@ class WasmDecoder : public Decoder {
             BranchDepthImmediate branch(decoder, pc + length + flags_imm.length,
                                         validate);
             HeapTypeImmediate source_imm(
-                WasmFeatures::All(), decoder,
+                WasmEnabledFeatures::All(), decoder,
                 pc + length + flags_imm.length + branch.length, validate);
-            HeapTypeImmediate target_imm(WasmFeatures::All(), decoder,
+            HeapTypeImmediate target_imm(WasmEnabledFeatures::All(), decoder,
                                          pc + length + flags_imm.length +
                                              branch.length + source_imm.length,
                                          validate);
@@ -2589,8 +2576,8 @@ class WasmDecoder : public Decoder {
   uint32_t num_locals_ = 0;
 
   const WasmModule* module_;
-  const WasmFeatures enabled_;
-  WasmFeatures* detected_;
+  const WasmEnabledFeatures enabled_;
+  WasmDetectedFeatures* detected_;
   const FunctionSig* sig_;
   bool is_shared_;
   const std::pair<uint32_t, uint32_t>* current_inst_trace_;
@@ -2653,9 +2640,9 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
 
  public:
   template <typename... InterfaceArgs>
-  WasmFullDecoder(Zone* zone, const WasmModule* module, WasmFeatures enabled,
-                  WasmFeatures* detected, const FunctionBody& body,
-                  InterfaceArgs&&... interface_args)
+  WasmFullDecoder(Zone* zone, const WasmModule* module,
+                  WasmEnabledFeatures enabled, WasmDetectedFeatures* detected,
+                  const FunctionBody& body, InterfaceArgs&&... interface_args)
       : WasmDecoder<ValidationTag, decoding_mode>(
             zone, module, enabled, detected, body.sig, body.is_shared,
             body.start, body.end, body.offset),
@@ -2689,7 +2676,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       // We need this because reference locals are initialized with null, and
       // later we run a lowering step for null based on {detected_}.
       if (this->local_type(index).is_reference()) {
-        this->detected_->Add(kFeature_reftypes);
+        this->detected_->add_reftypes();
       }
     }
     this->InitializeInitializedLocalsTracking(non_defaultable);
@@ -2985,8 +2972,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   V8_INLINE MemoryAccessImmediate
   MakeMemoryAccessImmediate(uint32_t pc_offset, uint32_t max_alignment) {
     return MemoryAccessImmediate(this, this->pc_ + pc_offset, max_alignment,
-                                 this->enabled_.has_memory64(),
-                                 this->enabled_.has_multi_memory(), validate);
+                                 this->enabled_.has_memory64(), validate);
   }
 
 #ifdef DEBUG
@@ -3113,7 +3099,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
 #define BUILD_SIMPLE_OPCODE(op, _, sig, ...)              \
   DECODE(op) {                                            \
     if constexpr (decoding_mode == kConstantExpression) { \
-      this->detected_->Add(kFeature_extended_const);      \
+      this->detected_->add_extended_const();              \
     }                                                     \
     return BuildSimpleOperator_##sig(kExpr##op);          \
   }
@@ -3147,8 +3133,9 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     // This instruction is the same for legacy EH and exnref.
     // Count it as exnref if exnref is enabled so that we have an accurate eh
     // count for the deprecation plans.
-    this->detected_->Add(this->enabled_.has_exnref() ? kFeature_exnref
-                                                     : kFeature_legacy_eh);
+    this->detected_->Add(this->enabled_.has_exnref()
+                             ? WasmDetectedFeature::exnref
+                             : WasmDetectedFeature::legacy_eh);
     TagIndexImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     PoppedArgVector args = PopArgs(imm.tag->ToFunctionSig());
@@ -3334,7 +3321,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(ThrowRef) {
-    this->detected_->Add(kFeature_exnref);
+    this->detected_->add_exnref();
     Value value = Pop();
     if (!VALIDATE(
             (value.type.kind() == kRef || value.type.kind() == kRefNull) &&
@@ -3350,7 +3337,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(BrOnNull) {
-    this->detected_->Add(kFeature_typed_funcref);
+    this->detected_->add_typed_funcref();
     BranchDepthImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm, control_.size())) return 0;
     Value ref_object = Pop();
@@ -3388,7 +3375,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(BrOnNonNull) {
-    this->detected_->Add(kFeature_typed_funcref);
+    this->detected_->add_typed_funcref();
     BranchDepthImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm, control_.size())) return 0;
     Value ref_object = Pop();
@@ -3612,7 +3599,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(SelectWithType) {
-    this->detected_->Add(kFeature_reftypes);
+    this->detected_->add_reftypes();
     SelectTypeImmediate imm(this->enabled_, this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     auto [tval, fval, cond] = Pop(imm.type, imm.type, kWasmI32);
@@ -3748,7 +3735,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(RefNull) {
-    this->detected_->Add(kFeature_reftypes);
+    this->detected_->add_reftypes();
     HeapTypeImmediate imm(this->enabled_, this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     if (!VALIDATE(!this->enabled_.has_stringref() ||
@@ -3763,7 +3750,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(RefIsNull) {
-    this->detected_->Add(kFeature_reftypes);
+    this->detected_->add_reftypes();
     Value value = Pop();
     Value* result = Push(kWasmI32);
     switch (value.type.kind()) {
@@ -3785,7 +3772,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(RefFunc) {
-    this->detected_->Add(kFeature_reftypes);
+    this->detected_->add_reftypes();
     IndexImmediate imm(this, this->pc_ + 1, "function index", validate);
     if (!this->ValidateFunction(this->pc_ + 1, imm)) return 0;
     Value* value =
@@ -3795,7 +3782,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(RefAsNonNull) {
-    this->detected_->Add(kFeature_typed_funcref);
+    this->detected_->add_typed_funcref();
     Value value = Pop();
     switch (value.type.kind()) {
       case kBottom:
@@ -3876,7 +3863,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(TableGet) {
-    this->detected_->Add(kFeature_reftypes);
+    this->detected_->add_reftypes();
     TableIndexImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     Value index = Pop(TableIndexType(imm.table));
@@ -3886,7 +3873,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(TableSet) {
-    this->detected_->Add(kFeature_reftypes);
+    this->detected_->add_reftypes();
     TableIndexImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     ValueType table_index_type = TableIndexType(imm.table);
@@ -3933,8 +3920,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   DECODE(CallIndirect) {
     CallIndirectImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
-    const WasmTable* table = &this->module_->tables[imm.table_imm.index];
-    Value index = Pop(TableIndexType(table));
+    Value index = Pop(TableIndexType(imm.table_imm.table));
     PoppedArgVector args = PopArgs(imm.sig);
     Value* returns = PushReturns(imm.sig);
     CALL_INTERFACE_IF_OK_AND_REACHABLE(CallIndirect, index, imm, args.data(),
@@ -3942,13 +3928,13 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     MarkMightThrow();
     if (!this->module_->types[imm.sig_imm.index].is_final) {
       // In this case we emit an rtt.canon as part of the indirect call.
-      this->detected_->Add(kFeature_gc);
+      this->detected_->add_gc();
     }
     return 1 + imm.length;
   }
 
   DECODE(ReturnCall) {
-    this->detected_->Add(kFeature_return_call);
+    this->detected_->add_return_call();
     CallFunctionImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     if (!VALIDATE(this->CanReturnCall(imm.sig))) {
@@ -3963,7 +3949,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(ReturnCallIndirect) {
-    this->detected_->Add(kFeature_return_call);
+    this->detected_->add_return_call();
     CallIndirectImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     if (!VALIDATE(this->CanReturnCall(imm.sig))) {
@@ -3972,21 +3958,20 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
                         "tail call return types mismatch");
       return 0;
     }
-    const WasmTable* table = &this->module_->tables[imm.table_imm.index];
-    Value index = Pop(TableIndexType(table));
+    Value index = Pop(TableIndexType(imm.table_imm.table));
     PoppedArgVector args = PopArgs(imm.sig);
     CALL_INTERFACE_IF_OK_AND_REACHABLE(ReturnCallIndirect, index, imm,
                                        args.data());
     EndControl();
     if (!this->module_->types[imm.sig_imm.index].is_final) {
       // In this case we emit an rtt.canon as part of the indirect call.
-      this->detected_->Add(kFeature_gc);
+      this->detected_->add_gc();
     }
     return 1 + imm.length;
   }
 
   DECODE(CallRef) {
-    this->detected_->Add(kFeature_typed_funcref);
+    this->detected_->add_typed_funcref();
     SigIndexImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     Value func_ref = Pop(ValueType::RefNull(imm.index));
@@ -3999,8 +3984,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(ReturnCallRef) {
-    this->detected_->Add(kFeature_typed_funcref);
-    this->detected_->Add(kFeature_return_call);
+    this->detected_->add_typed_funcref();
+    this->detected_->add_return_call();
     SigIndexImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     if (!VALIDATE(this->CanReturnCall(imm.sig))) {
@@ -4017,7 +4002,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(RefEq) {
-    this->detected_->Add(kFeature_gc);
+    this->detected_->add_gc();
     Value lhs = Pop();
     if (!VALIDATE(IsSubtypeOf(lhs.type, kWasmEqRef, this->module_) ||
                   IsSubtypeOf(lhs.type, ValueType::RefNull(HeapType::kEqShared),
@@ -4049,14 +4034,14 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
                                                            "numeric index");
     if (full_opcode == kExprTableGrow || full_opcode == kExprTableSize ||
         full_opcode == kExprTableFill) {
-      this->detected_->Add(kFeature_reftypes);
+      this->detected_->add_reftypes();
     }
     trace_msg->AppendOpcode(full_opcode);
     return DecodeNumericOpcode(full_opcode, opcode_length);
   }
 
   DECODE(Simd) {
-    this->detected_->Add(kFeature_simd);
+    this->detected_->add_simd();
     if (!CheckHardwareSupportsSimd()) {
       if (v8_flags.correctness_fuzzer_suppressions) {
         FATAL("Aborting on missing Wasm SIMD support");
@@ -4069,13 +4054,13 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     if (!VALIDATE(this->ok())) return 0;
     trace_msg->AppendOpcode(full_opcode);
     if (WasmOpcodes::IsRelaxedSimdOpcode(full_opcode)) {
-      this->detected_->Add(kFeature_relaxed_simd);
+      this->detected_->add_relaxed_simd();
     }
     return DecodeSimdOpcode(full_opcode, opcode_length);
   }
 
   DECODE(Atomic) {
-    this->detected_->Add(kFeature_threads);
+    this->detected_->add_threads();
     auto [full_opcode, opcode_length] =
         this->template read_prefixed_opcode<ValidationTag>(this->pc_,
                                                            "atomic index");
@@ -4097,7 +4082,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       CHECK_PROTOTYPE_OPCODE(stringref);
       return DecodeStringRefOpcode(full_opcode, opcode_length);
     } else {
-      this->detected_->Add(kFeature_gc);
+      this->detected_->add_gc();
       return DecodeGCOpcode(full_opcode, opcode_length);
     }
   }
@@ -5981,8 +5966,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       case kExprTableInit: {
         TableInitImmediate imm(this, this->pc_ + opcode_length, validate);
         if (!this->Validate(this->pc_ + opcode_length, imm)) return 0;
-        const WasmTable* table = &this->module_->tables[imm.table.index];
-        ValueType table_index_type = TableIndexType(table);
+        ValueType table_index_type = TableIndexType(imm.table.table);
         auto [dst, src, size] = Pop(table_index_type, kWasmI32, kWasmI32);
         CALL_INTERFACE_IF_OK_AND_REACHABLE(TableInit, imm, dst, src, size);
         return opcode_length + imm.length;
@@ -5999,15 +5983,12 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       case kExprTableCopy: {
         TableCopyImmediate imm(this, this->pc_ + opcode_length, validate);
         if (!this->Validate(this->pc_ + opcode_length, imm)) return 0;
-        ValueType table_type_dst = TableIndexType(imm.table_dst.table);
-        if (table_type_dst != TableIndexType(imm.table_src.table)) {
-          // TODO(crbug.com/345274931): Allow copying between a 32-bit
-          // and a 64-bit table https://github.com/WebAssembly/memory64/pull/58.
-          this->DecodeError(this->pc_,
-                            "copying between tables of different type");
-        }
-        auto [dst, src, size] =
-            Pop(table_type_dst, table_type_dst, table_type_dst);
+        ValueType dst_type = TableIndexType(imm.table_dst.table);
+        ValueType src_type = TableIndexType(imm.table_src.table);
+        // size_type = min(dst_type, src_type), where kI32 < kI64.
+        ValueType size_type = dst_type == kWasmI32 ? kWasmI32 : src_type;
+
+        auto [dst, src, size] = Pop(dst_type, src_type, size_type);
         CALL_INTERFACE_IF_OK_AND_REACHABLE(TableCopy, imm, dst, src, size);
         return opcode_length + imm.length;
       }
@@ -6033,8 +6014,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         if (!this->Validate(this->pc_ + opcode_length, imm)) return 0;
         ValueType table_index_type = TableIndexType(imm.table);
         auto [start, value, count] =
-            Pop(table_index_type, this->module_->tables[imm.index].type,
-                table_index_type);
+            Pop(table_index_type, imm.table->type, table_index_type);
         CALL_INTERFACE_IF_OK_AND_REACHABLE(TableFill, imm, start, value, count);
         return opcode_length + imm.length;
       }

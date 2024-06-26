@@ -644,7 +644,8 @@ class TypedFrame : public CommonFrame {
   Tagged<HeapObject> unchecked_code() const override { return {}; }
   void Iterate(RootVisitor* v) const override;
 
-  void IterateParamsOfWasmToJSWrapper(RootVisitor* v) const;
+  void IterateParamsOfGenericWasmToJSWrapper(RootVisitor* v) const;
+  void IterateParamsOfOptimizedWasmToJSWrapper(RootVisitor* v) const;
 
  protected:
   inline explicit TypedFrame(StackFrameIteratorBase* iterator);
@@ -905,6 +906,8 @@ class ApiCallbackExitFrame : public ExitFrame {
   // function, stores it in the function slot and returns JSFunction handle.
   Handle<JSFunction> GetFunction() const;
 
+  Handle<FunctionTemplateInfo> GetFunctionTemplateInfo() const;
+
   inline Tagged<Object> receiver() const;
   inline Tagged<Object> GetParameter(int i) const;
   inline int ComputeParametersCount() const;
@@ -933,6 +936,7 @@ class ApiCallbackExitFrame : public ExitFrame {
   // ApiCallbackExitFrame might contain either FunctionTemplateInfo or
   // JSFunction in the function slot.
   inline Tagged<HeapObject> target() const;
+
   inline void set_target(Tagged<HeapObject> function) const;
 
   inline FullObjectSlot target_slot() const;
@@ -1664,13 +1668,8 @@ class StackFrameIteratorForProfiler : public StackFrameIteratorBase {
 
   bool IsValidStackAddress(Address addr) const {
 #if V8_ENABLE_WEBASSEMBLY
-    wasm::StackMemory* head = wasm_stacks_;
-    if (head != nullptr) {
-      if (head->Contains(addr)) return true;
-      for (wasm::StackMemory* current = head->next(); current != head;
-           current = current->next()) {
-        if (current->Contains(addr)) return true;
-      }
+    for (wasm::StackMemory* stack : wasm_stacks_) {
+      if (stack->Contains(addr)) return true;
     }
 #endif
     return low_bound_ <= addr && addr <= high_bound_;
@@ -1698,7 +1697,7 @@ class StackFrameIteratorForProfiler : public StackFrameIteratorBase {
   ExternalCallbackScope* external_callback_scope_;
   Address top_link_register_;
 #if V8_ENABLE_WEBASSEMBLY
-  wasm::StackMemory* wasm_stacks_ = nullptr;
+  std::vector<wasm::StackMemory*>& wasm_stacks_;
 #endif
 };
 

@@ -4241,6 +4241,8 @@ v8_header_set("v8_internal_headers") {
       sources += [ "src/maglev/arm64/maglev-assembler-arm64-inl.h" ]
     } else if (v8_current_cpu == "x64") {
       sources += [ "src/maglev/x64/maglev-assembler-x64-inl.h" ]
+    } else if (v8_current_cpu == "s390x") {
+      sources += [ "src/maglev/s390/maglev-assembler-s390-inl.h" ]
     }
   }
 
@@ -5737,6 +5739,11 @@ v8_source_set("v8_base_without_compiler") {
         "src/maglev/x64/maglev-assembler-x64.cc",
         "src/maglev/x64/maglev-ir-x64.cc",
       ]
+    } else if (v8_current_cpu == "s390x") {
+      sources += [
+        "src/maglev/s390/maglev-assembler-s390.cc",
+        "src/maglev/s390/maglev-ir-s390.cc",
+      ]
     }
   }
 
@@ -6775,6 +6782,7 @@ v8_header_set("v8_heap_base_headers") {
     "src/heap/base/active-system-pages.h",
     "src/heap/base/basic-slot-set.h",
     "src/heap/base/bytes.h",
+    "src/heap/base/cached-unordered-map.h",
     "src/heap/base/incremental-marking-schedule.h",
     "src/heap/base/memory-tagging.h",
     "src/heap/base/stack.h",
@@ -7434,6 +7442,7 @@ group("v8_fuzzers") {
       ":v8_simple_wasm_compile_fuzzer",
       ":v8_simple_wasm_compile_simd_fuzzer",
       ":v8_simple_wasm_compile_wasmgc_fuzzer",
+      ":v8_simple_wasm_deopt_fuzzer",
       ":v8_simple_wasm_fuzzer",
       ":v8_simple_wasm_init_expr_fuzzer",
       ":v8_simple_wasm_streaming_fuzzer",
@@ -7861,6 +7870,10 @@ if (v8_enable_webassembly) {
 
   v8_wasm_fuzzer("wasm_init_expr_fuzzer") {
     sources = [ "test/fuzzer/wasm-init-expr.cc" ]
+  }
+
+  v8_wasm_fuzzer("wasm_deopt_fuzzer") {
+    sources = [ "test/fuzzer/wasm-deopt.cc" ]
   }
 }
 

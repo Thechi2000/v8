@@ -830,7 +830,7 @@ class InstanceBuilder {
  private:
   Isolate* isolate_;
   v8::metrics::Recorder::ContextId context_id_;
-  const WasmFeatures enabled_;
+  const WasmEnabledFeatures enabled_;
   const WasmModule* const module_;
   ErrorThrower* thrower_;
   Handle<WasmModuleObject> module_object_;
@@ -969,67 +969,6 @@ class InstanceBuilder {
 };
 
 namespace {
-class ReportLazyCompilationTimesTask : public v8::Task {
- public:
-  ReportLazyCompilationTimesTask(std::weak_ptr<Counters> counters,
-                                 std::weak_ptr<NativeModule> native_module,
-                                 int delay_in_seconds)
-      : counters_(std::move(counters)),
-        native_module_(std::move(native_module)),
-        delay_in_seconds_(delay_in_seconds) {}
-
-  void Run() final {
-    std::shared_ptr<NativeModule> native_module = native_module_.lock();
-    if (!native_module) return;
-    std::shared_ptr<Counters> counters = counters_.lock();
-    if (!counters) return;
-    int num_compilations = native_module->num_lazy_compilations();
-    // If no compilations happened, we don't add samples. Experiments showed
-    // many cases of num_compilations == 0, and adding these cases would make
-    // other cases less visible.
-    if (!num_compilations) return;
-    if (delay_in_seconds_ == 5) {
-      counters->wasm_num_lazy_compilations_5sec()->AddSample(num_compilations);
-      counters->wasm_sum_lazy_compilation_time_5sec()->AddSample(
-          static_cast<int>(native_module->sum_lazy_compilation_time_in_ms()));
-      counters->wasm_max_lazy_compilation_time_5sec()->AddSample(
-          static_cast<int>(native_module->max_lazy_compilation_time_in_ms()));
-      return;
-    }
-    if (delay_in_seconds_ == 20) {
-      counters->wasm_num_lazy_compilations_20sec()->AddSample(num_compilations);
-      counters->wasm_sum_lazy_compilation_time_20sec()->AddSample(
-          static_cast<int>(native_module->sum_lazy_compilation_time_in_ms()));
-      counters->wasm_max_lazy_compilation_time_20sec()->AddSample(
-          static_cast<int>(native_module->max_lazy_compilation_time_in_ms()));
-      return;
-    }
-    if (delay_in_seconds_ == 60) {
-      counters->wasm_num_lazy_compilations_60sec()->AddSample(num_compilations);
-      counters->wasm_sum_lazy_compilation_time_60sec()->AddSample(
-          static_cast<int>(native_module->sum_lazy_compilation_time_in_ms()));
-      counters->wasm_max_lazy_compilation_time_60sec()->AddSample(
-          static_cast<int>(native_module->max_lazy_compilation_time_in_ms()));
-      return;
-    }
-    if (delay_in_seconds_ == 120) {
-      counters->wasm_num_lazy_compilations_120sec()->AddSample(
-          num_compilations);
-      counters->wasm_sum_lazy_compilation_time_120sec()->AddSample(
-          static_cast<int>(native_module->sum_lazy_compilation_time_in_ms()));
-      counters->wasm_max_lazy_compilation_time_120sec()->AddSample(
-          static_cast<int>(native_module->max_lazy_compilation_time_in_ms()));
-      return;
-    }
-    UNREACHABLE();
-  }
-
- private:
-  std::weak_ptr<Counters> counters_;
-  std::weak_ptr<NativeModule> native_module_;
-  int delay_in_seconds_;
-};
-
 class WriteOutPGOTask : public v8::Task {
  public:
   explicit WriteOutPGOTask(std::weak_ptr<NativeModule> native_module)
@@ -1067,27 +1006,6 @@ MaybeHandle<WasmInstanceObject> InstantiateToInstanceObject(
   if (!instance_object.is_null()) {
     const std::shared_ptr<NativeModule>& native_module =
         module_object->shared_native_module();
-    // Post tasks for lazy compilation metrics before we call the start
-    // function.
-    if (v8_flags.wasm_lazy_compilation && !v8_flags.single_threaded &&
-        native_module->ShouldLazyCompilationMetricsBeReported()) {
-      V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
-          std::make_unique<ReportLazyCompilationTimesTask>(
-              isolate->async_counters(), native_module, 5),
-          5.0);
-      V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
-          std::make_unique<ReportLazyCompilationTimesTask>(
-              isolate->async_counters(), native_module, 20),
-          20.0);
-      V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
-          std::make_unique<ReportLazyCompilationTimesTask>(
-              isolate->async_counters(), native_module, 60),
-          60.0);
-      V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
-          std::make_unique<ReportLazyCompilationTimesTask>(
-              isolate->async_counters(), native_module, 120),
-          120.0);
-    }
     if (v8_flags.experimental_wasm_pgo_to_file &&
         native_module->ShouldPgoDataBeWritten() &&
         native_module->module()->num_declared_functions > 0) {
@@ -1319,31 +1237,24 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   //--------------------------------------------------------------------------
   int table_count = static_cast<int>(module_->tables.size());
   {
-    for (int i = 0; i < table_count; i++) {
-      const WasmTable& table = module_->tables[i];
-      if (table.initial_size > v8_flags.wasm_max_table_size) {
-        thrower_->RangeError(
-            "initial table size (%u elements) is larger than implementation "
-            "limit (%u elements)",
-            table.initial_size, v8_flags.wasm_max_table_size.value());
-        return {};
-      }
-    }
-
     Handle<FixedArray> tables = isolate_->factory()->NewFixedArray(table_count);
     Handle<FixedArray> shared_tables =
         shared ? isolate_->factory()->NewFixedArray(table_count)
                : Handle<FixedArray>();
     for (int i = module_->num_imported_tables; i < table_count; i++) {
       const WasmTable& table = module_->tables[i];
+      auto table_type =
+          table.is_table64 ? WasmTableFlag::kTable64 : WasmTableFlag::kTable32;
       // Initialize tables with null for now. We will initialize non-defaultable
       // tables later, in {SetTableInitialValues}.
       DirectHandle<WasmTableObject> table_obj = WasmTableObject::New(
-          isolate_, instance_object, table.type, table.initial_size,
-          table.has_maximum_size, table.maximum_size,
+          isolate_, table.shared ? shared_trusted_data : trusted_data,
+          table.type, table.initial_size, table.has_maximum_size,
+          table.maximum_size,
           IsSubtypeOf(table.type, kWasmExternRef, module_)
               ? Handle<HeapObject>{isolate_->factory()->null_value()}
-              : Handle<HeapObject>{isolate_->factory()->wasm_null()});
+              : Handle<HeapObject>{isolate_->factory()->wasm_null()},
+          table_type);
       (table.shared ? shared_tables : tables)->set(i, *table_obj);
     }
     trusted_data->set_tables(*tables);
@@ -2150,9 +2061,16 @@ bool InstanceBuilder::ProcessImportedTable(
     }
   }
 
+  if (table.is_table64 != table_object->is_table64()) {
+    thrower_->LinkError("cannot import table%d as table%d",
+                        table_object->is_table64() ? 64 : 32,
+                        table.is_table64 ? 64 : 32);
+    return false;
+  }
+
   const WasmModule* table_type_module =
-      !IsUndefined(table_object->instance())
-          ? Cast<WasmInstanceObject>(table_object->instance())->module()
+      table_object->has_trusted_data()
+          ? table_object->trusted_data(isolate_)->module()
           : trusted_instance_data->module();
 
   if (!EquivalentTypes(table.type, table_object->type(), module_,
@@ -2553,9 +2471,6 @@ bool InstanceBuilder::ProcessImportedMemories(
         static_cast<uint32_t>(buffer->byte_length() / kWasmPageSize);
     const WasmMemory* memory = &module_->memories[memory_index];
     if (memory->is_memory64 != memory_object->is_memory64()) {
-      // For now, we forbid importing memory32 as memory64 and vice versa.
-      // TODO(13780): Check if the final spec says anything about this or has
-      // any tests. Adapt if needed.
       thrower_->LinkError("cannot import memory%d as memory%d",
                           memory_object->is_memory64() ? 64 : 32,
                           memory->is_memory64 ? 64 : 32);
@@ -2983,7 +2898,7 @@ ValueOrError ConsumeElementSegmentEntry(
     case kExprRefNull: {
       auto [heap_type, length] =
           value_type_reader::read_heap_type<Decoder::FullValidationTag>(
-              &decoder, decoder.pc() + 1, WasmFeatures::All());
+              &decoder, decoder.pc() + 1, WasmEnabledFeatures::All());
       if (V8_LIKELY(decoder.lookahead(1 + length, kExprEnd))) {
         decoder.consume_bytes(length + 2);
         return function_mode == kStrictFunctionsAndNull
@@ -3005,7 +2920,7 @@ ValueOrError ConsumeElementSegmentEntry(
   constexpr bool kIsShared = false;  // TODO(14616): Is this correct?
   FunctionBody body(&sig, decoder.pc_offset(), decoder.pc(), decoder.end(),
                     kIsShared);
-  WasmFeatures detected;
+  WasmDetectedFeatures detected;
   ValueOrError result;
   {
     // We need a scope for the decoder because its destructor resets some Zone
@@ -3015,8 +2930,9 @@ ValueOrError ConsumeElementSegmentEntry(
     // size.
     WasmFullDecoder<Decoder::FullValidationTag, ConstantExpressionInterface,
                     kConstantExpression>
-        full_decoder(zone, trusted_instance_data->module(), WasmFeatures::All(),
-                     &detected, body, trusted_instance_data->module(), isolate,
+        full_decoder(zone, trusted_instance_data->module(),
+                     WasmEnabledFeatures::All(), &detected, body,
+                     trusted_instance_data->module(), isolate,
                      trusted_instance_data, shared_trusted_instance_data);
 
     full_decoder.DecodeFunctionBody();

@@ -1659,26 +1659,6 @@ PerIsolateData::~PerIsolateData() {
 #endif
 }
 
-void PerIsolateData::SetTimeout(Local<Function> callback,
-                                Local<Context> context) {
-  set_timeout_callbacks_.emplace(isolate_, callback);
-  set_timeout_contexts_.emplace(isolate_, context);
-}
-
-MaybeLocal<Function> PerIsolateData::GetTimeoutCallback() {
-  if (set_timeout_callbacks_.empty()) return MaybeLocal<Function>();
-  Local<Function> result = set_timeout_callbacks_.front().Get(isolate_);
-  set_timeout_callbacks_.pop();
-  return result;
-}
-
-MaybeLocal<Context> PerIsolateData::GetTimeoutContext() {
-  if (set_timeout_contexts_.empty()) return MaybeLocal<Context>();
-  Local<Context> result = set_timeout_contexts_.front().Get(isolate_);
-  set_timeout_contexts_.pop();
-  return result;
-}
-
 void PerIsolateData::RemoveUnhandledPromise(Local<Promise> promise) {
   if (ignore_unhandled_promises_) return;
   // Remove handled promises from the list
@@ -2791,6 +2771,30 @@ void Shell::ExecuteFile(const v8::FunctionCallbackInfo<v8::Value>& info) {
   }
 }
 
+class SetTimeoutTask : public v8::Task {
+ public:
+  SetTimeoutTask(v8::Isolate* isolate, v8::Local<v8::Context> context,
+                 v8::Local<v8::Function> callback)
+      : isolate_(isolate),
+        context_(isolate, context),
+        callback_(isolate, callback) {}
+
+  void Run() override {
+    HandleScope scope(isolate_);
+    Local<Context> context = context_.Get(isolate_);
+    Local<Function> callback = callback_.Get(isolate_);
+    Context::Scope context_scope(context);
+    MaybeLocal<Value> result =
+        callback->Call(context, Undefined(isolate_), 0, nullptr);
+    USE(result);
+  }
+
+ private:
+  v8::Isolate* isolate_;
+  v8::Global<v8::Context> context_;
+  v8::Global<v8::Function> callback_;
+};
+
 void Shell::SetTimeout(const v8::FunctionCallbackInfo<v8::Value>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   Isolate* isolate = info.GetIsolate();
@@ -2798,7 +2802,8 @@ void Shell::SetTimeout(const v8::FunctionCallbackInfo<v8::Value>& info) {
   if (info.Length() == 0 || !info[0]->IsFunction()) return;
   Local<Function> callback = info[0].As<Function>();
   Local<Context> context = isolate->GetCurrentContext();
-  PerIsolateData::Get(isolate)->SetTimeout(callback, context);
+  g_platform->GetForegroundTaskRunner(isolate)->PostTask(
+      std::make_unique<SetTimeoutTask>(isolate, context, callback));
 }
 
 void Shell::ReadCodeTypeAndArguments(
@@ -4822,9 +4827,10 @@ void Worker::ExecuteInThread() {
 
           Local<Object> global = context->Global();
           Local<Value> this_value = External::New(isolate_, this);
-          Local<FunctionTemplate> postmessage_fun_template =
-              FunctionTemplate::New(isolate_, PostMessageOut, this_value);
 
+          Local<FunctionTemplate> postmessage_fun_template =
+              FunctionTemplate::New(isolate_, Worker::PostMessageOut,
+                                    this_value);
           Local<Function> postmessage_fun;
           if (postmessage_fun_template->GetFunction(context).ToLocal(
                   &postmessage_fun)) {
@@ -4834,6 +4840,18 @@ void Worker::ExecuteInThread() {
                     v8::String::NewFromUtf8Literal(
                         isolate_, "postMessage", NewStringType::kInternalized),
                     postmessage_fun)
+                .FromJust();
+          }
+
+          Local<FunctionTemplate> close_fun_template =
+              FunctionTemplate::New(isolate_, Worker::Close, this_value);
+          Local<Function> close_fun;
+          if (close_fun_template->GetFunction(context).ToLocal(&close_fun)) {
+            global
+                ->Set(context,
+                      v8::String::NewFromUtf8Literal(
+                          isolate_, "close", NewStringType::kInternalized),
+                      close_fun)
                 .FromJust();
           }
 
@@ -4907,6 +4925,16 @@ void Worker::PostMessageOut(const v8::FunctionCallbackInfo<v8::Value>& info) {
     worker->out_queue_.Enqueue(std::move(data));
     worker->out_semaphore_.Signal();
   }
+}
+
+void Worker::Close(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  DCHECK(i::ValidateCallbackInfo(info));
+  Isolate* isolate = info.GetIsolate();
+  HandleScope handle_scope(isolate);
+  DCHECK(info.Data()->IsExternal());
+  Local<External> this_value = info.Data().As<External>();
+  Worker* worker = static_cast<Worker*>(this_value->Value());
+  worker->Terminate();
 }
 
 #ifdef V8_TARGET_OS_WIN
@@ -5394,62 +5422,50 @@ void Shell::NotifyFinishStreamingTask(Isolate* isolate) {
 }
 
 namespace {
-bool RunSetTimeoutCallback(Isolate* isolate, bool* did_run) {
-  PerIsolateData* data = PerIsolateData::Get(isolate);
-  HandleScope handle_scope(isolate);
-  Local<Function> callback;
-  if (!data->GetTimeoutCallback().ToLocal(&callback)) return true;
-  Local<Context> context;
-  if (!data->GetTimeoutContext().ToLocal(&context)) return true;
-  TryCatch try_catch(isolate);
-  try_catch.SetVerbose(true);
-  Context::Scope context_scope(context);
-  if (callback->Call(context, Undefined(isolate), 0, nullptr).IsEmpty()) {
-    return false;
-  }
-  *did_run = true;
-  return true;
-}
-
 bool ProcessMessages(
     Isolate* isolate,
     const std::function<platform::MessageLoopBehavior()>& behavior) {
-  while (true) {
-    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-    i::SaveAndSwitchContext saved_context(i_isolate, i::Context());
-    SealHandleScope shs(isolate);
-    for (bool ran_tasks = true; ran_tasks;) {
-      // Execute one foreground task (if one exists), then microtasks.
-      if (isolate->IsExecutionTerminating()) return false;
-      ran_tasks = v8::platform::PumpMessageLoop(g_default_platform, isolate,
-                                                behavior());
-      if (isolate->IsExecutionTerminating()) return false;
-      if (ran_tasks) MicrotasksScope::PerformCheckpoint(isolate);
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  i::SaveAndSwitchContext saved_context(i_isolate, i::Context());
+  SealHandleScope shs(isolate);
 
-      // In predictable mode we push all background tasks into the foreground
-      // task queue of the {kProcessGlobalPredictablePlatformWorkerTaskQueue}
-      // isolate. We execute all background tasks after running one foreground
-      // task.
-      if (i::v8_flags.verify_predictable) {
+  if (isolate->IsExecutionTerminating()) return false;
+  TryCatch try_catch(isolate);
+  try_catch.SetVerbose(true);
+
+  while (true) {
+    bool ran_a_task;
+    ran_a_task =
+        v8::platform::PumpMessageLoop(g_default_platform, isolate, behavior());
+    if (try_catch.HasCaught()) return false;
+    if (ran_a_task) MicrotasksScope::PerformCheckpoint(isolate);
+    if (isolate->IsExecutionTerminating()) return false;
+
+    // In predictable mode we push all background tasks into the foreground
+    // task queue of the {kProcessGlobalPredictablePlatformWorkerTaskQueue}
+    // isolate. We execute all background tasks after running one foreground
+    // task.
+    if (i::v8_flags.verify_predictable) {
+      TryCatch try_catch(isolate);
+      try_catch.SetVerbose(true);
+      while (v8::platform::PumpMessageLoop(
+          g_default_platform, kProcessGlobalPredictablePlatformWorkerTaskQueue,
+          platform::MessageLoopBehavior::kDoNotWait)) {
+        ran_a_task = true;
+        if (try_catch.HasCaught()) return false;
         if (isolate->IsExecutionTerminating()) return false;
-        while (v8::platform::PumpMessageLoop(
-            g_default_platform,
-            kProcessGlobalPredictablePlatformWorkerTaskQueue,
-            platform::MessageLoopBehavior::kDoNotWait)) {
-          ran_tasks = true;
-          if (isolate->IsExecutionTerminating()) return false;
-        }
       }
     }
-    if (g_default_platform->IdleTasksEnabled(isolate)) {
-      v8::platform::RunIdleTasks(g_default_platform, isolate,
-                                 50.0 / base::Time::kMillisecondsPerSecond);
-    }
-    if (isolate->IsExecutionTerminating()) return false;
-    bool ran_set_timeout = false;
-    if (!RunSetTimeoutCallback(isolate, &ran_set_timeout)) return false;
-    if (!ran_set_timeout) return true;
+
+    if (!ran_a_task) break;
   }
+  if (g_default_platform->IdleTasksEnabled(isolate)) {
+    v8::platform::RunIdleTasks(g_default_platform, isolate,
+                               50.0 / base::Time::kMillisecondsPerSecond);
+    if (try_catch.HasCaught()) return false;
+    if (isolate->IsExecutionTerminating()) return false;
+  }
+  return true;
 }
 }  // anonymous namespace
 

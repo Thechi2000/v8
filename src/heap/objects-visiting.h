@@ -43,6 +43,7 @@ namespace internal {
   V(FeedbackMetadata)                \
   V(Foreign)                         \
   V(FunctionTemplateInfo)            \
+  V(HeapNumber)                      \
   V(Hole)                            \
   V(Map)                             \
   V(NativeContext)                   \
@@ -69,12 +70,9 @@ namespace internal {
   IF_WASM(V, WasmArray)              \
   IF_WASM(V, WasmContinuationObject) \
   IF_WASM(V, WasmFuncRef)            \
-  IF_WASM(V, WasmInstanceObject)     \
   IF_WASM(V, WasmNull)               \
   IF_WASM(V, WasmResumeData)         \
   IF_WASM(V, WasmStruct)             \
-  IF_WASM(V, WasmSuspenderObject)    \
-  IF_WASM(V, WasmSuspendingObject)   \
   IF_WASM(V, WasmTypeInfo)           \
   SIMPLE_HEAP_OBJECT_LIST1(V)
 
@@ -91,7 +89,58 @@ namespace internal {
   V(JSSynchronizationPrimitive)             \
   V(JSTypedArray)                           \
   V(JSWeakCollection)                       \
-  V(JSWeakRef)
+  V(JSWeakRef)                              \
+  IF_WASM(V, WasmInstanceObject)            \
+  IF_WASM(V, WasmSuspenderObject)           \
+  IF_WASM(V, WasmSuspendingObject)          \
+  IF_WASM(V, WasmTableObject)
+
+// List of visitor ids that can only appear in read-only maps. Unfortunately,
+// these are generally contained in all other lists.
+//
+// Adding an instance type here allows skipping vistiation of Map slots for
+// visitors with `ShouldVisitReadOnlyMapPointer() == false`.
+#define VISITOR_IDS_WITH_READ_ONLY_MAPS_LIST(V)           \
+  /* All trusted objects have maps in read-only space. */ \
+  CONCRETE_TRUSTED_OBJECT_TYPE_LIST1(V)                   \
+  V(AccessorInfo)                                         \
+  V(AllocationSite)                                       \
+  V(BigInt)                                               \
+  V(BytecodeWrapper)                                      \
+  V(ByteArray)                                            \
+  V(Cell)                                                 \
+  V(CodeWrapper)                                          \
+  V(DataHandler)                                          \
+  V(DescriptorArray)                                      \
+  V(EmbedderDataArray)                                    \
+  V(ExternalString)                                       \
+  V(FeedbackCell)                                         \
+  V(FeedbackMetadata)                                     \
+  V(FeedbackVector)                                       \
+  V(Filler)                                               \
+  V(FixedArray)                                           \
+  V(FixedDoubleArray)                                     \
+  V(FunctionTemplateInfo)                                 \
+  V(FreeSpace)                                            \
+  V(HeapNumber)                                           \
+  V(PreparseData)                                         \
+  V(PropertyArray)                                        \
+  V(PropertyCell)                                         \
+  V(PrototypeInfo)                                        \
+  V(ScopeInfo)                                            \
+  V(SeqOneByteString)                                     \
+  V(SeqTwoByteString)                                     \
+  V(SharedFunctionInfo)                                   \
+  V(ShortcutCandidate)                                    \
+  V(SlicedString)                                         \
+  V(SloppyArgumentsElements)                              \
+  V(Symbol)                                               \
+  V(ThinString)                                           \
+  V(TransitionArray)                                      \
+  V(UncompiledDataWithoutPreparseData)                    \
+  V(UncompiledDataWithPreparseData)                       \
+  V(WeakArrayList)                                        \
+  V(WeakFixedArray)
 
 #define FORWARD_DECLARE(TypeName) class TypeName;
 TYPED_VISITOR_ID_LIST(FORWARD_DECLARE)
@@ -131,6 +180,11 @@ class HeapVisitor : public ObjectVisitorWithCageBases {
   V8_INLINE static constexpr bool ShouldVisitReadOnlyMapPointer() {
     return true;
   }
+  // If this predicate returns false the default implementation of
+  // `VisitFiller()` and `VisitFreeSpace()` will be unreachable.
+  V8_INLINE static constexpr bool CanEncounterFillerOrFreeSpace() {
+    return true;
+  }
 
   // Only visits the Map pointer if `ShouldVisitMapPointer()` returns true.
   template <VisitorId visitor_id>
@@ -154,13 +208,12 @@ class HeapVisitor : public ObjectVisitorWithCageBases {
 #undef VISIT
   V8_INLINE ResultType VisitShortcutCandidate(Tagged<Map> map,
                                               Tagged<ConsString> object);
-  V8_INLINE ResultType VisitDataObject(Tagged<Map> map,
-                                       Tagged<HeapObject> object);
   V8_INLINE ResultType VisitJSObjectFast(Tagged<Map> map,
                                          Tagged<JSObject> object);
   V8_INLINE ResultType VisitJSApiObject(Tagged<Map> map,
                                         Tagged<JSObject> object);
   V8_INLINE ResultType VisitStruct(Tagged<Map> map, Tagged<HeapObject> object);
+  V8_INLINE ResultType VisitFiller(Tagged<Map> map, Tagged<HeapObject> object);
   V8_INLINE ResultType VisitFreeSpace(Tagged<Map> map,
                                       Tagged<FreeSpace> object);
 

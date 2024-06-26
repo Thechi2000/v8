@@ -76,7 +76,7 @@ class StackHandlerIterator {
     // Make sure the handler has already been unwound to this frame. With stack
     // switching this is not equivalent to the inequality below, because the
     // frame and the handler could be in different stacks.
-    DCHECK_IMPLIES(frame->isolate()->wasm_stacks() == nullptr,
+    DCHECK_IMPLIES(frame->isolate()->wasm_stacks().empty(),
                    frame->sp() <= AddressOf(handler));
     // For CWasmEntry frames, the handler was registered by the last C++
     // frame (Execution::CallWasm), so even though its address is already
@@ -141,7 +141,7 @@ void StackFrameIterator::Advance() {
   // chain must have been completely unwound. Except for wasm stack-switching:
   // we stop at the end of the current segment.
 #if V8_ENABLE_WEBASSEMBLY
-  DCHECK_IMPLIES(done() && isolate()->wasm_stacks() == nullptr,
+  DCHECK_IMPLIES(done() && isolate()->wasm_stacks().empty(),
                  handler_ == nullptr);
 #else
   DCHECK_IMPLIES(done(), handler_ == nullptr);
@@ -809,7 +809,7 @@ StackFrame::Type StackFrameIterator::ComputeStackFrameType(
     StackFrame::State* state) const {
 #if V8_ENABLE_WEBASSEMBLY
   if (state->fp == kNullAddress) {
-    DCHECK(isolate_->wasm_stacks() != nullptr);  // I.e., JSPI active
+    DCHECK(!isolate_->wasm_stacks().empty());  // I.e., JSPI active
     return StackFrame::NO_FRAME_TYPE;
   }
 #endif
@@ -900,7 +900,7 @@ StackFrame::Type StackFrameIteratorForProfiler::ComputeStackFrameType(
     StackFrame::State* state) const {
 #if V8_ENABLE_WEBASSEMBLY
   if (state->fp == kNullAddress) {
-    DCHECK(isolate_->wasm_stacks() != nullptr);  // I.e., JSPI active
+    DCHECK(!isolate_->wasm_stacks().empty());  // I.e., JSPI active
     return StackFrame::NO_FRAME_TYPE;
   }
 #endif
@@ -1185,6 +1185,19 @@ Handle<JSFunction> ApiCallbackExitFrame::GetFunction() const {
   return function;
 }
 
+Handle<FunctionTemplateInfo> ApiCallbackExitFrame::GetFunctionTemplateInfo()
+    const {
+  Tagged<HeapObject> maybe_function = target();
+  if (IsJSFunction(maybe_function)) {
+    Tagged<SharedFunctionInfo> shared_info =
+        Cast<JSFunction>(maybe_function)->shared();
+    DCHECK(shared_info->IsApiFunction());
+    return handle(shared_info->api_func_data(), isolate());
+  }
+  DCHECK(IsFunctionTemplateInfo(maybe_function));
+  return handle(Cast<FunctionTemplateInfo>(maybe_function), isolate());
+}
+
 Handle<FixedArray> ApiCallbackExitFrame::GetParameters() const {
   if (V8_LIKELY(!v8_flags.detailed_error_stack_trace)) {
     return isolate()->factory()->empty_fixed_array();
@@ -1212,6 +1225,12 @@ void ApiCallbackExitFrame::Summarize(std::vector<FrameSummary>* frames) const {
 
 // Ensure layout of v8::PropertyCallbackInfo is in sync with
 // ApiAccessorExitFrameConstants.
+static_assert(
+    ApiAccessorExitFrameConstants::kPropertyCallbackInfoPropertyKeyIndex ==
+    PropertyCallbackArguments::kPropertyKeyIndex);
+static_assert(
+    ApiAccessorExitFrameConstants::kPropertyCallbackInfoReturnValueIndex ==
+    PropertyCallbackArguments::kReturnValueIndex);
 static_assert(
     ApiAccessorExitFrameConstants::kPropertyCallbackInfoReceiverIndex ==
     PropertyCallbackArguments::kThisIndex);
@@ -1608,7 +1627,7 @@ void WasmFrame::Iterate(RootVisitor* v) const {
                        frame_header_limit);
 }
 
-void TypedFrame::IterateParamsOfWasmToJSWrapper(RootVisitor* v) const {
+void TypedFrame::IterateParamsOfGenericWasmToJSWrapper(RootVisitor* v) const {
   Tagged<Object> maybe_signature = Tagged<Object>(
       Memory<Address>(fp() + WasmToJSWrapperConstants::kSignatureOffset));
   if (IsSmi(maybe_signature)) {
@@ -1724,6 +1743,18 @@ void TypedFrame::IterateParamsOfWasmToJSWrapper(RootVisitor* v) const {
     }
   }
 }
+
+void TypedFrame::IterateParamsOfOptimizedWasmToJSWrapper(RootVisitor* v) const {
+  Tagged<GcSafeCode> code = GcSafeLookupCode();
+  if (code->wasm_js_tagged_parameter_count() > 0) {
+    FullObjectSlot tagged_parameter_base(&Memory<Address>(caller_sp()));
+    tagged_parameter_base += code->wasm_js_first_tagged_parameter();
+    FullObjectSlot tagged_parameter_limit =
+        tagged_parameter_base + code->wasm_js_tagged_parameter_count();
+    v->VisitRootPointers(Root::kStackRoots, nullptr, tagged_parameter_base,
+                         tagged_parameter_limit);
+  }
+}
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void TypedFrame::Iterate(RootVisitor* v) const {
@@ -1755,10 +1786,13 @@ void TypedFrame::Iterate(RootVisitor* v) const {
   CHECK(entry->code.has_value());
   Tagged<GcSafeCode> code = entry->code.value();
 #if V8_ENABLE_WEBASSEMBLY
-  bool is_wasm_to_js =
+  bool is_generic_wasm_to_js =
       code->is_builtin() && code->builtin_id() == Builtin::kWasmToJsWrapperCSA;
-  if (is_wasm_to_js) {
-    IterateParamsOfWasmToJSWrapper(v);
+  bool is_optimized_wasm_to_js = this->type() == WASM_TO_JS_FUNCTION;
+  if (is_generic_wasm_to_js) {
+    IterateParamsOfGenericWasmToJSWrapper(v);
+  } else if (is_optimized_wasm_to_js) {
+    IterateParamsOfOptimizedWasmToJSWrapper(v);
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   DCHECK(code->is_turbofanned());
@@ -1791,10 +1825,14 @@ void TypedFrame::Iterate(RootVisitor* v) const {
   // wrapper switched to before pushing the outgoing stack parameters and
   // calling the target. It marks the limit of the stack param area, and is
   // distinct from the beginning of the spill area.
-  Address central_stack_sp =
-      Memory<Address>(fp() + WasmToJSWrapperConstants::kCentralStackSPOffset);
+  int central_stack_sp_offset =
+      is_generic_wasm_to_js
+          ? WasmToJSWrapperConstants::kCentralStackSPOffset
+          : WasmImportWrapperFrameConstants::kCentralStackSPOffset;
+  Address central_stack_sp = Memory<Address>(fp() + central_stack_sp_offset);
   FullObjectSlot parameters_limit(
-      is_wasm_to_js && central_stack_sp != kNullAddress
+      (is_generic_wasm_to_js || is_optimized_wasm_to_js) &&
+              central_stack_sp != kNullAddress
           ? central_stack_sp
           : frame_header_base.address() - spill_slots_size);
 #else

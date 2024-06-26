@@ -92,14 +92,15 @@ void PrintFunctionCallbackInfo(Address* implicit_args, Address* js_args,
 void PrintPropertyCallbackInfo(Address* args, std::ostream& os) {
   using PCA = internal::PropertyCallbackArguments;
 
-  static_assert(PCA::kArgsLength == 7);
-  os << "FunctionCallbackInfo: "  //
+  static_assert(PCA::kArgsLength == 8);
+  os << "PropertyCallbackInfo: "  //
      << "\n - isolate: " << AS_PTR(args[PCA::kIsolateIndex])
      << "\n - return_value: " << AS_OBJ(args[PCA::kReturnValueIndex])
      << "\n - should_throw: " << AS_OBJ(args[PCA::kShouldThrowOnErrorIndex])
      << "\n - holder: " << AS_OBJ(args[PCA::kHolderIndex])
      << "\n - holderV2: " << AS_OBJ(args[PCA::kHolderV2Index])
      << "\n - data: " << AS_OBJ(args[PCA::kDataIndex])  //
+     << "\n - property_key: " << AS_OBJ(args[PCA::kPropertyKeyIndex])
      << "\n - receiver: " << AS_OBJ(args[PCA::kThisIndex]);
 
   // In case it's a setter call there will be additional |value| parameter,
@@ -433,6 +434,8 @@ bool JSObject::PrintProperties(std::ostream& os) {
       os << " ";
       details.PrintAsFastTo(os, PropertyDetails::kForProperties);
       if (details.location() == PropertyLocation::kField) {
+        os << " @ ";
+        FieldType::PrintTo(descs->GetFieldType(i), os);
         int field_index = details.field_index();
         if (field_index < nof_inobject_properties) {
           os << ", location: in-object";
@@ -2231,7 +2234,14 @@ void Code::CodePrint(std::ostream& os, const char* name, Address current_pc) {
   os << "\n - instruction_size: " << instruction_size();
   os << "\n - metadata_size: " << metadata_size();
 
-  os << "\n - inlined_bytecode_size: " << inlined_bytecode_size();
+  if (kind() != CodeKind::WASM_TO_JS_FUNCTION) {
+    os << "\n - inlined_bytecode_size: " << inlined_bytecode_size();
+  } else {
+    os << "\n - wasm_js_tagged_parameter_count: "
+       << wasm_js_tagged_parameter_count();
+    os << "\n - wasm_js_first_tagged_parameter: "
+       << wasm_js_first_tagged_parameter();
+  }
   os << "\n - osr_offset: " << osr_offset();
   os << "\n - handler_table_offset: " << handler_table_offset();
   os << "\n - unwinding_info_offset: " << unwinding_info_offset();
@@ -2314,7 +2324,8 @@ void SourceTextModule::SourceTextModulePrint(std::ostream& os) {
   os << "\n - requested_modules: " << Brief(requested_modules());
   os << "\n - import_meta: " << Brief(import_meta(kAcquireLoad));
   os << "\n - cycle_root: " << Brief(cycle_root());
-  os << "\n - async_evaluating_ordinal: " << async_evaluating_ordinal();
+  os << "\n - has_toplevel_await: " << has_toplevel_await();
+  os << "\n - async_evaluation_ordinal: " << async_evaluation_ordinal();
   os << "\n";
 }
 

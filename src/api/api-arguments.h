@@ -42,9 +42,6 @@ class CustomArguments : public CustomArgumentsBase {
   template <typename V>
   Handle<V> GetReturnValue(Isolate* isolate) const;
 
-  template <typename V>
-  Handle<V> GetReturnValueNoHoleCheck(Isolate* isolate) const;
-
   inline Isolate* isolate() const {
     return reinterpret_cast<Isolate*>((*slot_at(T::kIsolateIndex)).ptr());
   }
@@ -82,7 +79,14 @@ class PropertyCallbackArguments final
   static constexpr int kHolderIndex = T::kHolderIndex;
   static constexpr int kIsolateIndex = T::kIsolateIndex;
   static constexpr int kShouldThrowOnErrorIndex = T::kShouldThrowOnErrorIndex;
+  static constexpr int kPropertyKeyIndex = T::kPropertyKeyIndex;
 
+  // This constructor leaves kPropertyKeyIndex and kReturnValueIndex slots
+  // uninitialized in order to let them be initialized by the subsequent
+  // CallXXX(..) and avoid double initialization. As a consequence, there
+  // must be no GC call between this constructor and CallXXX(..).
+  // In debug mode these slots are zapped, so GC should be able to detect
+  // the misuse of this object.
   PropertyCallbackArguments(Isolate* isolate, Tagged<Object> data,
                             Tagged<Object> self, Tagged<JSObject> holder,
                             Maybe<ShouldThrow> should_throw);
@@ -113,14 +117,20 @@ class PropertyCallbackArguments final
                                        Handle<Name> name);
   inline Handle<JSAny> CallNamedGetter(Handle<InterceptorInfo> interceptor,
                                        Handle<Name> name);
-  inline Handle<Object> CallNamedSetter(
+
+  // Calls Setter/Definer/Deleter callback and returns whether the request
+  // was intercepted.
+  // Pending exception handling and interpretation of the result should be
+  // done by the caller using GetBooleanReturnValue(..).
+  inline v8::Intercepted CallNamedSetter(
       DirectHandle<InterceptorInfo> interceptor, Handle<Name> name,
       Handle<Object> value);
-  inline Handle<Object> CallNamedDefiner(
+  inline v8::Intercepted CallNamedDefiner(
       DirectHandle<InterceptorInfo> interceptor, Handle<Name> name,
       const v8::PropertyDescriptor& desc);
-  inline Handle<Object> CallNamedDeleter(
+  inline v8::Intercepted CallNamedDeleter(
       DirectHandle<InterceptorInfo> interceptor, Handle<Name> name);
+
   inline Handle<JSAny> CallNamedDescriptor(Handle<InterceptorInfo> interceptor,
                                            Handle<Name> name);
   // Returns JSArray-like object with property names or undefined.
@@ -133,14 +143,20 @@ class PropertyCallbackArguments final
                                          uint32_t index);
   inline Handle<JSAny> CallIndexedGetter(Handle<InterceptorInfo> interceptor,
                                          uint32_t index);
-  inline Handle<Object> CallIndexedSetter(
+
+  // Calls Setter/Definer/Deleter callback and returns whether the request
+  // was intercepted.
+  // Pending exception handling and interpretation of the result should be
+  // done by the caller using GetBooleanReturnValue(..).
+  inline v8::Intercepted CallIndexedSetter(
       DirectHandle<InterceptorInfo> interceptor, uint32_t index,
       Handle<Object> value);
-  inline Handle<Object> CallIndexedDefiner(
+  inline v8::Intercepted CallIndexedDefiner(
       DirectHandle<InterceptorInfo> interceptor, uint32_t index,
       const v8::PropertyDescriptor& desc);
-  inline Handle<Object> CallIndexedDeleter(Handle<InterceptorInfo> interceptor,
-                                           uint32_t index);
+  inline v8::Intercepted CallIndexedDeleter(Handle<InterceptorInfo> interceptor,
+                                            uint32_t index);
+
   inline Handle<JSAny> CallIndexedDescriptor(
       Handle<InterceptorInfo> interceptor, uint32_t index);
   // Returns JSArray-like object with property names or undefined.
@@ -153,6 +169,39 @@ class PropertyCallbackArguments final
 #ifdef DEBUG
     javascript_execution_counter_ = 0;
 #endif  // DEBUG
+  }
+
+  // Converts the result of Setter/Definer/Deleter interceptor callback to
+  // Maybe<InterceptorResult>.
+  // Currently, in certain scenarios the actual boolean result returned by
+  // the Setter/Definer operation is ignored and thus we don't need to process
+  // the actual return value.
+  inline Maybe<InterceptorResult> GetBooleanReturnValue(
+      v8::Intercepted intercepted, const char* callback_kind_for_error_message,
+      bool ignore_return_value = false);
+
+  // TODO(ishell): cleanup this hack by embedding the PropertyCallbackInfo
+  // into PropertyCallbackArguments object.
+  template <typename T>
+  const v8::PropertyCallbackInfo<T>& GetPropertyCallbackInfo() {
+    return *(reinterpret_cast<PropertyCallbackInfo<T>*>(&values_[0]));
+  }
+
+  // Forwards ShouldThrowOnError() request to the underlying
+  // v8::PropertyCallbackInfo<> object.
+  bool ShouldThrowOnError() {
+    return GetPropertyCallbackInfo<Value>().ShouldThrowOnError();
+  }
+
+  // Unofficial way of getting property key from v8::PropertyCallbackInfo<T>.
+  template <typename T>
+  static Tagged<Object> GetPropertyKey(const PropertyCallbackInfo<T>& info) {
+    return Tagged<Object>(info.args_[kPropertyKeyIndex]);
+  }
+  template <typename T>
+  static Handle<Object> GetPropertyKeyHandle(
+      const PropertyCallbackInfo<T>& info) {
+    return Handle<Object>(&info.args_[kPropertyKeyIndex]);
   }
 
  private:
@@ -212,7 +261,8 @@ class FunctionCallbackArguments
    * and used if it's been set to anything inside the callback.
    * New style callbacks always use the return value.
    */
-  inline Handle<Object> Call(Tagged<FunctionTemplateInfo> function);
+  inline Handle<Object> CallOrConstruct(Tagged<FunctionTemplateInfo> function,
+                                        bool is_construct);
 
   // Unofficial way of getting target FunctionTemplateInfo from
   // v8::FunctionCallbackInfo<T>.
