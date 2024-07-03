@@ -369,7 +369,6 @@
   V(_, offset_string, "offset")                                               \
   V(_, offsetNanoseconds_string, "offsetNanoseconds")                         \
   V(_, ok_string, "ok")                                                       \
-  V(_, optimizedLinear_string, "optimizedLinear") /* TODO Should this be generated ? */ \
   V(_, one_string, "1")                                                       \
   V(_, other_string, "other")                                                 \
   V(_, overflow_string, "overflow")                                           \

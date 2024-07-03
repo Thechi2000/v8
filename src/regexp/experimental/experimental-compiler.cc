@@ -476,7 +476,9 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
       assembler_.FilterGroup(node->index());
       can_compile_node_ = false;
       node->body()->Accept(this, nullptr);
-      return nullptr;
+    } else {
+      nodes_.emplace_back(node);
+      assembler_.FilterChild(nodes_.back().label);
     }
 
     return nullptr;
@@ -492,14 +494,13 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
       assembler_.FilterLookaround(node->index());
       can_compile_node_ = false;
       node->body()->Accept(this, nullptr);
+    } else {
       if (node->CaptureRegisters().is_empty()) {
         return nullptr;
       }
 
       nodes_.emplace_back(node);
       assembler_.FilterChild(nodes_.back().label);
-
-      return nullptr;
     }
 
     return nullptr;

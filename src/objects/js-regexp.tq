@@ -12,7 +12,6 @@ bitfield struct JSRegExpFlags extends uint31 {
   linear: bool: 1 bit;
   has_indices: bool: 1 bit;
   unicode_sets: bool: 1 bit;
-  optimized_linear: bool: 1 bit;
 }
 
 extern class JSRegExp extends JSObject {

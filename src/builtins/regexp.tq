@@ -203,8 +203,7 @@ extern enum Flag constexpr 'JSRegExp::Flag' {
   kDotAll,
   kHasIndices,
   kLinear,
-  kUnicodeSets,
-  kOptimizedLinear
+  kUnicodeSets
 }
 
 const kNoCounterFlagGetter: constexpr int31 = -1;
@@ -289,12 +288,6 @@ transitioning javascript builtin RegExpPrototypeStickyGetter(
   return FlagGetter(
       receiver, Flag::kSticky, kRegExpPrototypeStickyGetter,
       'RegExp.prototype.sticky');
-}
-
-transitioning javascript builtin RegExpPrototypeOptimizedLinearGetter(
-    js-implicit context: NativeContext, receiver: JSAny)(): JSAny {
-  return FlagGetter(
-      receiver, Flag::kOptimizedLinear, kNoCounterFlagGetter, 'RegExp.prototype.optimizedLinear');
 }
 
 // ES6 21.2.5.15.

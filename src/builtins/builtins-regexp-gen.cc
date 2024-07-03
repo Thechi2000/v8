@@ -1043,7 +1043,6 @@ TNode<String> RegExpBuiltinsAssembler::FlagsGetter(TNode<Context> context,
     CASE_FOR_FLAG("unicode", JSRegExp::kUnicode);
     CASE_FOR_FLAG("sticky", JSRegExp::kSticky);
     CASE_FOR_FLAG("unicodeSets", JSRegExp::kUnicodeSets);
-    CASE_FOR_FLAG("optimizedLinear", JSRegExp::kOptimizedLinear); // TODO Should this be generated ?
 #undef CASE_FOR_FLAG
 
 #define CASE_FOR_FLAG(NAME, V8_FLAG_EXTERN_REF, FLAG)                      \

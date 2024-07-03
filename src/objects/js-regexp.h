@@ -108,14 +108,7 @@ class JSRegExp : public TorqueGeneratedJSRegExp<JSRegExp, JSObject> {
   static_assert(static_cast<int>(k##Camel) == v8::RegExp::k##Camel); \
   static_assert(static_cast<int>(k##Camel) ==                        \
                 static_cast<int>(RegExpFlag::k##Camel));
-  static_assert(static_cast<int>(kOptimizedLinear) ==
-                v8 ::RegExp ::kOptimizedLinear);
-  static_assert(static_cast<int>(kOptimizedLinear) ==
-                static_cast<int>(RegExpFlag ::kOptimizedLinear));
-  static_assert(static_cast<int>(kDotAll) == v8 ::RegExp ::kDotAll);
-  static_assert(static_cast<int>(kDotAll) ==
-                static_cast<int>(RegExpFlag ::kDotAll));
-
+  REGEXP_FLAG_LIST(V)
 #undef V
   static_assert(kFlagCount == v8::RegExp::kFlagCount);
   static_assert(kFlagCount == kRegExpFlagCount);
