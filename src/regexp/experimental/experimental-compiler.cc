@@ -605,7 +605,9 @@ class CompileVisitor : private RegExpVisitor {
         lookarounds_(zone),
         quantifier_id_remapping_({}),
         assembler_(zone),
-        reverse_(false) {
+        reverse_(false),
+        ignore_captures_(false),
+        ignore_lookarounds_(false) {
     if (v8_flags.experimental_regexp_engine_capture_group_opt) {
       quantifier_id_remapping_.emplace(zone_);
     }
@@ -629,7 +631,10 @@ class CompileVisitor : private RegExpVisitor {
 
     reverse_ = lookaround->type() == RegExpLookaround::LOOKAHEAD;
 
+    ignore_captures_ = true;
     lookaround->body()->Accept(this, nullptr);
+    ignore_captures_ = false;
+
     assembler_.WriteLookaroundTable(lookaround->index());
 
     // Generate the second sections, reversed in the case of a lookbehind.
@@ -1090,15 +1095,18 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   void* VisitCapture(RegExpCapture* node, void*) override {
-    // Only negative lookbehinds contain captures (enforced by the
-    // `CanBeHandled` visitor). Capture groups inside negative lookarounds
-    // always yield undefined, so we can avoid the SetRegister instructions.
-    int index = node->index();
-    int start_register = RegExpCapture::StartRegister(index);
-    int end_register = RegExpCapture::EndRegister(index);
-    assembler_.SetRegisterToCp(reverse_ ? end_register : start_register);
-    node->body()->Accept(this, nullptr);
-    assembler_.SetRegisterToCp(reverse_ ? start_register : end_register);
+    if (ignore_captures_) {
+      // Skips the `SET_REGISTER_TO_CP` instructions.
+      node->body()->Accept(this, nullptr);
+    } else {
+      int index = node->index();
+      int start_register = RegExpCapture::StartRegister(index);
+      int end_register = RegExpCapture::EndRegister(index);
+
+      assembler_.SetRegisterToCp(reverse_ ? end_register : start_register);
+      node->body()->Accept(this, nullptr);
+      assembler_.SetRegisterToCp(reverse_ ? start_register : end_register);
+    }
 
     return nullptr;
   }
@@ -1161,6 +1169,15 @@ class CompileVisitor : private RegExpVisitor {
 
   BytecodeAssembler assembler_;
   bool reverse_;
+
+  // Do not produce `SET_REGISTER_TO_CP` instructions. Used when compiling
+  // the lookarounds' matching automata, since the capture results will be never
+  // be used.
+  bool ignore_captures_;
+
+  // Do not produce `READ_LOOKAROUND_TABLE` instructions. Used when compiling
+  // the lookarounds' capturing automata, since the string is known to match the
+  // expression.
   bool ignore_lookarounds_;
 };
 

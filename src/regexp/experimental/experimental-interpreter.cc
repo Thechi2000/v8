@@ -1021,6 +1021,7 @@ class NfaInterpreter {
               return RegExp::kInternalRegExpSuccess;
             }
 
+            // Store the match informations for positive lookarounds.
             if (inst.payload.read_lookaround.is_positive() &&
                 !only_captureless_lookbehinds_) {
               GetLookaroundClockArray(
@@ -1033,11 +1034,6 @@ class NfaInterpreter {
             ++t.pc;
             break;
           } else {
-            // Destroy the thread if the corresponding lookbehind did or did not
-            // complete a match at the current position (depending on whether or
-            // not the lookbehind is positive). The thread's priority ensures
-            // that all the threads of the lookbehind have already been run at
-            // this position.
             const int32_t lookbehind_index =
                 inst.payload.read_lookaround.lookaround_index();
             SBXCHECK_GE(lookbehind_index, 0);
