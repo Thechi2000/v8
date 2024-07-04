@@ -185,15 +185,14 @@ class CanBeHandledVisitor final : private RegExpVisitor {
       return nullptr;
     }
 
-    if (node->type() == RegExpLookaround::LOOKAHEAD ||
-        node->capture_count() > 0) {
-      if (!v8_flags.experimental_regexp_engine_capture_group_opt) {
-        result_ = false;
-        return nullptr;
-      }
-
-      node->body()->Accept(this, nullptr);
+    if ((node->type() == RegExpLookaround::LOOKAHEAD ||
+         node->capture_count() > 0) &&
+        !v8_flags.experimental_regexp_engine_capture_group_opt) {
+      result_ = false;
+      return nullptr;
     }
+
+    node->body()->Accept(this, nullptr);
     return nullptr;
   }
 
