@@ -661,6 +661,10 @@ class NfaInterpreter {
            !(FoundMatch() && blocked_threads_.is_empty())) {
       DCHECK(active_threads_.is_empty());
 
+      if (lookbehind_table_.has_value()) {
+        std::fill(lookbehind_table_->begin(), lookbehind_table_->end(), false);
+      }
+
       if (reverse_) {
         --input_index_;
       }
