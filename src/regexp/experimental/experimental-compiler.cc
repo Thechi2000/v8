@@ -638,7 +638,7 @@ class CompileVisitor : private RegExpVisitor {
     assembler_.WriteLookaroundTable(lookaround->index());
 
     // Generate the second sections, reversed in the case of a lookbehind.
-    if (lookaround->capture_count() > 0) {
+    if (lookaround->capture_count() > 0 && lookaround->is_positive()) {
       reverse_ = lookaround->type() == RegExpLookaround::LOOKBEHIND;
 
       ignore_lookarounds_ = true;
