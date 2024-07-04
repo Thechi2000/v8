@@ -346,12 +346,14 @@ class NfaInterpreter {
     // (regarding their appearance order) to never execute a lookaround before
     // one of its child.
     std::optional<struct Lookaround> lookaround;
+    bool in_lookaround = false;
     int lookaround_index;
     for (int i = 0; i < bytecode_.length() - 1; ++i) {
       auto& inst = bytecode_[i];
 
       if (inst.opcode == RegExpInstruction::START_LOOKAROUND) {
         DCHECK(!lookaround.has_value());
+        in_lookaround = true;
 
         // Stores the partial information for a lookaround. The rest will be
         // determined upon reaching a `WRITE_LOOKAROUND_TABLE` instruction.
@@ -367,7 +369,7 @@ class NfaInterpreter {
       }
 
       if (inst.opcode == RegExpInstruction::SET_REGISTER_TO_CP &&
-          lookaround.has_value()) {
+          in_lookaround) {
         only_captureless_lookbehinds_ = false;
       }
 
@@ -386,6 +388,10 @@ class NfaInterpreter {
         lookaround = {};
 
         lookarounds_priority_.Add(lookaround_index, zone_);
+      }
+
+      if (inst.opcode == RegExpInstruction::END_LOOKAROUND) {
+        in_lookaround = false;
       }
 
       // The first `FILTER_*` instruction encountered is the start of the
