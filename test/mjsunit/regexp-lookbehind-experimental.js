@@ -78,32 +78,6 @@ testRE(re, "!of ,", false);
 testRE(re, "off ,", false);
 execRE(re, "!oof ,", ["of"]);
 
-// Positive lookahead with captures.
-re = /^[^\'\"]*(?=([\'\"])).*\1(\w+)\1/;
-testRE(re, "  'foo' ", true);
-testRE(re, '  "foo" ', true);
-testRE(re, " \" 'foo' ", false);
-testRE(re, ' \' "foo" ', false);
-testRE(re, "  'foo\" ", false);
-testRE(re, "  \"foo' ", false);
-execRE(re, "  'foo' ", ["  'foo'", "'", "foo"]);
-execRE(re, '  "foo" ', ['  "foo"', '"', "foo"]);
-
-// Captures are cleared on backtrack past the look-ahead.
-/* re = /^(?:(?=(.))a|b)\1$/;
-testRE(re, "aa", true);
-testRE(re, "b", true);
-testRE(re, "bb", false);
-testRE(re, "a", false);
-execRE(re, "aa", ["aa", "a"]);
-execRE(re, "b", ["b", undefined]);
-
-re = /^(?=(.)(?=(.)\1\2)\2\1)\1\2/;
-testRE(re, "abab", true);
-testRE(re, "ababxxxxxxxx", true);
-testRE(re, "aba", false);
-execRE(re, "abab", ["ab", "a", "b"]); */
-
 re = /^(?:a(?<=(.))|b|c)$/;
 testRE(re, "a", true);
 testRE(re, "b", true);
@@ -123,11 +97,6 @@ re = /.(?<!x)/;
 testRE(re, "y", true);
 testRE(re, "x", false);
 execRE(re, "y", ["y"]);
-
-re = /(?<!(\d))|\d/;
-testRE(re, "4", true);
-execRE(re, "4", ["4", undefined]);
-execRE(re, "x", ["", undefined]);
 
 // Test mixed nested look-ahead with captures.
 

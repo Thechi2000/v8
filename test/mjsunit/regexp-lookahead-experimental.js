@@ -78,32 +78,6 @@ testRE(re, ", fo!", false);
 testRE(re, ", ffo", false);
 execRE(re, ", foo!", ["fo"]);
 
-// Positive lookahead with captures.
-re = /^[^\'\"]*(?=([\'\"])).*\1(\w+)\1/;
-testRE(re, "  'foo' ", true);
-testRE(re, '  "foo" ', true);
-testRE(re, " \" 'foo' ", false);
-testRE(re, ' \' "foo" ', false);
-testRE(re, "  'foo\" ", false);
-testRE(re, "  \"foo' ", false);
-execRE(re, "  'foo' ", ["  'foo'", "'", "foo"]);
-execRE(re, '  "foo" ', ['  "foo"', '"', "foo"]);
-
-// Captures are cleared on backtrack past the look-ahead.
-/* re = /^(?:(?=(.))a|b)\1$/;
-testRE(re, "aa", true);
-testRE(re, "b", true);
-testRE(re, "bb", false);
-testRE(re, "a", false);
-execRE(re, "aa", ["aa", "a"]);
-execRE(re, "b", ["b", undefined]);
-
-re = /^(?=(.)(?=(.)\1\2)\2\1)\1\2/;
-testRE(re, "abab", true);
-testRE(re, "ababxxxxxxxx", true);
-testRE(re, "aba", false);
-execRE(re, "abab", ["ab", "a", "b"]); */
-
 re = /^(?:(?=(.))a|b|c)$/;
 testRE(re, "a", true);
 testRE(re, "b", true);

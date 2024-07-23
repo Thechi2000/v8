@@ -86,6 +86,7 @@ class FilterGroups {
       int pc, base::Vector<int> registers,
       base::Vector<uint64_t> quantifiers_clocks,
       base::Vector<uint64_t> capture_clocks,
+      std::optional<base::Vector<uint64_t>> lookaround_clocks,
       base::Vector<int> filtered_registers,
       base::Vector<const RegExpInstruction> bytecode, Zone* zone) {
     /* Capture groups that were not traversed in the last iteration of a
@@ -101,7 +102,8 @@ class FilterGroups {
      * `FilterGroupsCompileVisitor` (experimental-compiler.cc). */
 
     return FilterGroups(pc, bytecode, zone)
-        .Run(registers, quantifiers_clocks, capture_clocks, filtered_registers);
+        .Run(registers, quantifiers_clocks, capture_clocks, lookaround_clocks,
+             filtered_registers);
   }
 
  private:
@@ -141,6 +143,7 @@ class FilterGroups {
   base::Vector<int> Run(base::Vector<int> registers_,
                         base::Vector<uint64_t> quantifiers_clocks_,
                         base::Vector<uint64_t> capture_clocks_,
+                        std::optional<base::Vector<uint64_t>> lookaround_clocks,
                         base::Vector<int> filtered_registers_) {
     pc_stack_.push(pc_);
     max_clock_stack_.push(max_clock_);
@@ -165,7 +168,8 @@ class FilterGroups {
 
           // Checks whether the captured group should be saved or discarded.
           int register_id = 2 * group_id;
-          if (capture_clocks_[register_id] >= max_clock_) {
+          if (capture_clocks_[register_id] >= max_clock_ &&
+              capture_clocks_[register_id] != kUndefinedClockValue) {
             filtered_registers_[register_id] = registers_[register_id];
             filtered_registers_[register_id + 1] = registers_[register_id + 1];
             IncrementPC();
@@ -189,6 +193,21 @@ class FilterGroups {
             // If the node should be discarded, all its children should be too.
             // By going back to the parent, we don't visit the children, and
             // therefore don't copy their registers.
+            Up();
+          }
+          break;
+        }
+
+        case RegExpInstruction::FILTER_LOOKAROUND: {
+          // Checks whether the lookaround should be saved or discarded.
+          if (!lookaround_clocks.has_value() ||
+              lookaround_clocks->at(instr.payload.lookaround_id) >=
+                  max_clock_) {
+            IncrementPC();
+          } else {
+            // If the node should be discarded, all its children should be
+            // too. By going back to the parent, we don't visit the
+            // children, and therefore don't copy their registers.
             Up();
           }
           break;
@@ -1302,120 +1321,17 @@ class NfaInterpreter {
       filtered_registers[0] = registers[0];
       filtered_registers[1] = registers[1];
 
-      return FilterGroups(main_thread, filtered_registers);
+      return FilterGroups::Filter(
+          *filter_groups_pc_, GetRegisterArray(main_thread),
+          GetQuantifierClockArray(main_thread),
+          GetCaptureClockArray(main_thread),
+          only_captureless_lookbehinds_
+              ? std::nullopt
+              : std::optional(GetLookaroundClockArray(main_thread)),
+          filtered_registers, bytecode_, zone_);
     } else {
       return registers;
     }
-  }
-
-  base::Vector<int> FilterGroups(InterpreterThread main_thread,
-                                 base::Vector<int> filtered_registers) {
-    struct NodeStatus {
-      int pc;
-      // The last clock encountered (either from a quantifier or a capture
-      // group). Any groups whose clock is less then max_clock_ needs to be
-      // discarded.
-      uint64_t max_clock;
-    };
-
-    if (!filter_groups_pc_.has_value()) {
-      return filtered_registers;
-    }
-
-    NodeStatus status_ = {*filter_groups_pc_, 0};
-    ZoneStack<NodeStatus> status_stack_(zone_);
-    status_stack_.push(status_);
-
-    base::Vector<int> registers = GetRegisterArray(main_thread);
-    base::Vector<uint64_t> capture_clocks = GetCaptureClockArray(main_thread);
-    base::Vector<uint64_t> quantifier_clocks =
-        GetQuantifierClockArray(main_thread);
-
-    std::optional<base::Vector<uint64_t>> lookaround_clocks = std::nullopt;
-    if (!only_captureless_lookbehinds_) {
-      lookaround_clocks = GetLookaroundClockArray(main_thread);
-    }
-
-    auto up = [&]() {
-      if (status_stack_.size() > 0) {
-        status_ = status_stack_.top();
-        status_stack_.pop();
-      }
-    };
-
-    auto incr = [&]() {
-      ++status_.pc;
-      if (status_.pc == bytecode_.length() ||
-          bytecode_[status_.pc].opcode != RegExpInstruction::FILTER_CHILD) {
-        up();
-      }
-    };
-
-    while (!status_stack_.empty()) {
-      auto instr = bytecode_[status_.pc];
-      switch (instr.opcode) {
-        case RegExpInstruction::FILTER_CHILD:
-          // Enter the child's node.
-          status_stack_.push({status_.pc + 1, status_.max_clock});
-          status_.pc = instr.payload.pc;
-          break;
-
-        case RegExpInstruction::FILTER_GROUP: {
-          int group_id = instr.payload.group_id;
-
-          // Checks whether the captured group should be saved or discarded.
-          int register_id = 2 * group_id;
-          if (capture_clocks[register_id] >= status_.max_clock &&
-              capture_clocks[register_id] != kUndefinedClockValue) {
-            filtered_registers[register_id] = registers[register_id];
-            filtered_registers[register_id + 1] = registers[register_id + 1];
-            incr();
-          } else {
-            // If the node should be discarded, all its children should be
-            // too. By going back to the parent, we don't visit the
-            // children, and therefore don't copy their registers.
-            up();
-          }
-          break;
-        }
-
-        case RegExpInstruction::FILTER_QUANTIFIER: {
-          int quantifier_id = instr.payload.quantifier_id;
-
-          // Checks whether the quantifier should be saved or discarded.
-          if (quantifier_clocks[quantifier_id] >= status_.max_clock) {
-            status_.max_clock = quantifier_clocks[quantifier_id];
-            incr();
-          } else {
-            // If the node should be discarded, all its children should be
-            // too. By going back to the parent, we don't visit the
-            // children, and therefore don't copy their registers.
-            up();
-          }
-          break;
-        }
-
-        case RegExpInstruction::FILTER_LOOKAROUND: {
-          // Checks whether the lookaround should be saved or discarded.
-          if (!lookaround_clocks.has_value() ||
-              lookaround_clocks->at(instr.payload.lookaround_id) >=
-                  status_.max_clock) {
-            incr();
-          } else {
-            // If the node should be discarded, all its children should be
-            // too. By going back to the parent, we don't visit the
-            // children, and therefore don't copy their registers.
-            up();
-          }
-          break;
-        }
-
-        default:
-          UNREACHABLE();
-      }
-    }
-
-    return filtered_registers;
   }
 
   void DestroyThread(InterpreterThread t) {
