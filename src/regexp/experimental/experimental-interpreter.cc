@@ -4,8 +4,6 @@
 
 #include "src/regexp/experimental/experimental-interpreter.h"
 
-#include <cstdint>
-
 #include "src/objects/string-inl.h"
 #include "src/regexp/experimental/experimental.h"
 
@@ -561,12 +559,12 @@ class NfaInterpreter {
       for (InterpreterThread t : blocked_threads_) {
         DestroyThread(t);
       }
-      blocked_threads_.DropAndClear();
+      blocked_threads_.Rewind(0);
 
       for (InterpreterThread t : active_threads_) {
         DestroyThread(t);
       }
-      active_threads_.DropAndClear();
+      active_threads_.Rewind(0);
 
       int idx = lookarounds_priority_.at(i);
 
@@ -614,12 +612,12 @@ class NfaInterpreter {
       for (InterpreterThread t : blocked_threads_) {
         DestroyThread(t);
       }
-      blocked_threads_.DropAndClear();
+      blocked_threads_.Rewind(0);
 
       for (InterpreterThread t : active_threads_) {
         DestroyThread(t);
       }
-      active_threads_.DropAndClear();
+      active_threads_.Rewind(0);
 
       best_match_thread_ = std::nullopt;
 
@@ -998,7 +996,7 @@ class NfaInterpreter {
           for (InterpreterThread s : active_threads_) {
             DestroyThread(s);
           }
-          active_threads_.DropAndClear();
+          active_threads_.Rewind(0);
           return RegExp::kInternalRegExpSuccess;
         case RegExpInstruction::WRITE_LOOKAROUND_TABLE:
           // Reaching this instruction means that the current lookaround thread

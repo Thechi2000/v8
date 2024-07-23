@@ -138,9 +138,9 @@ struct RegExpInstruction {
   class StartLookaroundPayload {
    public:
     StartLookaroundPayload() = default;
-    StartLookaroundPayload(int32_t LOOKAROUND_index, bool is_positive)
+    StartLookaroundPayload(int32_t LOOKAROUND_index, bool is_ahead)
         : payload_(IsAhead::update(LookaroundIndex::encode(LOOKAROUND_index),
-                                   is_positive)) {}
+                                   is_ahead)) {}
 
     int32_t lookaround_index() const {
       return LookaroundIndex::decode(payload_);

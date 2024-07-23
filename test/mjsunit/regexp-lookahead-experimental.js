@@ -37,7 +37,7 @@ function stringEscape(string) {
 function testRE(re, input, expected_result) {
   assertEquals(%RegexpTypeTag(re), "EXPERIMENTAL");
 
-  var testName = re + ".test(" + stringEscape(input) +")";
+  var testName = re + ".test(" + stringEscape(input) + ")";
   if (expected_result) {
     assertTrue(re.test(input), testName);
   } else {
@@ -48,7 +48,7 @@ function testRE(re, input, expected_result) {
 function execRE(re, input, expected_result) {
   assertEquals(%RegexpTypeTag(re), "EXPERIMENTAL");
 
-  var testName = re + ".exec('" + stringEscape(input) +"')";
+  var testName = re + ".exec('" + stringEscape(input) + "')";
   assertEquals(expected_result, re.exec(input), testName);
 }
 
@@ -79,15 +79,15 @@ testRE(re, ", ffo", false);
 execRE(re, ", foo!", ["fo"]);
 
 // Positive lookahead with captures.
-/* re = /^[^\'\"]*(?=([\'\"])).*\1(\w+)\1/;
+re = /^[^\'\"]*(?=([\'\"])).*\1(\w+)\1/;
 testRE(re, "  'foo' ", true);
 testRE(re, '  "foo" ', true);
 testRE(re, " \" 'foo' ", false);
-testRE(re, " ' \"foo\" ", false);
+testRE(re, ' \' "foo" ', false);
 testRE(re, "  'foo\" ", false);
 testRE(re, "  \"foo' ", false);
 execRE(re, "  'foo' ", ["  'foo'", "'", "foo"]);
-execRE(re, '  "foo" ', ['  "foo"', '"', 'foo']); */
+execRE(re, '  "foo" ', ['  "foo"', '"', "foo"]);
 
 // Captures are cleared on backtrack past the look-ahead.
 /* re = /^(?:(?=(.))a|b)\1$/;
@@ -117,8 +117,6 @@ execRE(/^(?=(b))b/, "b", ["b", "b"]);
 execRE(/^(?:(?=(b))|a)b/, "ab", ["ab", undefined]);
 execRE(/^(?:(?=(b)(?:(?=(c))|d))|)bd/, "bd", ["bd", "b", undefined]);
 
-
-
 // Test of Negative Look-Ahead.
 
 re = /(?!x)./;
@@ -130,7 +128,6 @@ re = /(?!(\d))|\d/;
 testRE(re, "4", true);
 execRE(re, "4", ["4", undefined]);
 execRE(re, "x", ["", undefined]);
-
 
 // Test mixed nested look-ahead with captures.
 
@@ -146,7 +143,7 @@ execRE(re, "xy", ["", undefined, undefined]);
 
 re = /^(?=(x)(?!(y)))/;
 testRE(re, "xz", true);
-testRE(re, "xy", false)
+testRE(re, "xy", false);
 execRE(re, "xz", ["", "x", undefined]);
 
 re = /^(?!(x)(?=(y)))/;

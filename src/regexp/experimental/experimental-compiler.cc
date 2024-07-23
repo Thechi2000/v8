@@ -185,6 +185,8 @@ class CanBeHandledVisitor final : private RegExpVisitor {
       return nullptr;
     }
 
+    // If `experimental_regexp_engine_capture_group_opt` is false, reject all
+    // lookaheads or capturing lookbehinds.
     if ((node->type() == RegExpLookaround::LOOKAHEAD ||
          node->capture_count() > 0) &&
         !v8_flags.experimental_regexp_engine_capture_group_opt) {
@@ -615,7 +617,6 @@ class CompileVisitor : private RegExpVisitor {
   // Generate all the instructions to match and capture a lookaround.
   void CompileLookaround(RegExpLookaround* lookaround) {
     // Generate the first section, reversed in the case of a lookahead.
-    // {TODO disable capture groups}
     assembler_.StartLookaround(
         lookaround->index(), lookaround->type() == RegExpLookaround::LOOKAHEAD);
 
