@@ -479,7 +479,7 @@ class NfaInterpreter {
 
       if (!FoundMatch()) break;
 
-      base::Vector<int> registers = *best_match_registers_;
+      base::Vector<int> registers = GetFilteredRegisters(*best_match_thread_);
       output_registers =
           std::copy(registers.begin(), registers.end(), output_registers);
 
@@ -602,22 +602,20 @@ class NfaInterpreter {
   }
 
   // Capture the groups in matched lookarounds.
-  void FillLookaroundCaptures() {
+  InterpreterThread FillLookaroundCaptures(InterpreterThread main_thread) {
     DCHECK(best_match_thread_.has_value());
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
     DCHECK(!only_captureless_lookbehinds_);
 
     if (lookarounds_.is_empty()) {
-      return;
+      return main_thread;
     }
-
-    InterpreterThread base_thread = *best_match_thread_;
 
     // We need to capture the lookarounds from parents to childrens, since we
     // need the index on which the lookaround was matched, and those indexes are
     // computed when the parent expression is captured.
     for (int lookaround_id : lookarounds_priority_) {
-      if (GetLookaroundMatchIndexArray(base_thread)[lookaround_id] ==
+      if (GetLookaroundMatchIndexArray(main_thread)[lookaround_id] ==
           kUndefinedMatchIndexValue) {
         continue;
       }
@@ -641,24 +639,24 @@ class NfaInterpreter {
       best_match_thread_ = std::nullopt;
 
       reverse_ = !lookaround.is_ahead;
-      input_index_ = GetLookaroundMatchIndexArray(base_thread)[lookaround_id];
+      input_index_ = GetLookaroundMatchIndexArray(main_thread)[lookaround_id];
 
       // We reuse the same thread as initial thread, to avoid having to merge
       // the new `best_match_thread_` with the previous results.
-      base_thread.pc = lookaround.capture_pc;
-      base_thread.consumed_since_last_quantifier =
+      main_thread.pc = lookaround.capture_pc;
+      main_thread.consumed_since_last_quantifier =
           InterpreterThread::ConsumedCharacter::DidConsume;
-      active_threads_.Add(base_thread, zone_);
+      active_threads_.Add(main_thread, zone_);
 
       RunActiveThreadsToEnd();
 
       // The lookaround has already been matched once on this position during
       // the match research.
       DCHECK(best_match_thread_.has_value());
-      base_thread = *best_match_thread_;
+      main_thread = *best_match_thread_;
     }
 
-    best_match_thread_ = base_thread;
+    return main_thread;
   }
 
   int RunActiveThreadsToEnd() {
@@ -816,7 +814,6 @@ class NfaInterpreter {
       DestroyThread(*best_match_thread_);
       best_match_thread_ = std::nullopt;
     }
-    // TODO clear best_match_registers_
 
     active_threads_.Add(NewEmptyThread(0), zone_);
 
@@ -829,15 +826,6 @@ class NfaInterpreter {
     int err_code = RunActiveThreadsToEnd();
     if (err_code != RegExp::kInternalRegExpSuccess) {
       return err_code;
-    }
-
-    if (best_match_thread_.has_value()) {
-      if (!only_captureless_lookbehinds_) {
-        FillLookaroundCaptures();
-      }
-
-      DCHECK(best_match_thread_.has_value());
-      best_match_registers_ = GetFilteredRegisters(*best_match_thread_);
     }
 
     return RegExp::kInternalRegExpSuccess;
@@ -1312,6 +1300,10 @@ class NfaInterpreter {
   }
 
   base::Vector<int> GetFilteredRegisters(InterpreterThread main_thread) {
+    if (!only_captureless_lookbehinds_) {
+      main_thread = FillLookaroundCaptures(main_thread);
+    }
+
     base::Vector<int> registers = GetRegisterArray(main_thread);
 
     if (filter_groups_pc_.has_value()) {
@@ -1451,11 +1443,6 @@ class NfaInterpreter {
   std::optional<RecyclingZoneAllocator<uint64_t>>
       capture_clock_array_allocator_;
 
-  // The register array of the best match found so far during the current
-  // search.  If several threads ACCEPTed, then this will be the register
-  // array of the accepting thread with highest priority.  Should be
-  // deallocated with `register_array_allocator_`.
-  std::optional<base::Vector<int>> best_match_registers_;
   std::optional<InterpreterThread> best_match_thread_;
 
   struct Lookaround {
