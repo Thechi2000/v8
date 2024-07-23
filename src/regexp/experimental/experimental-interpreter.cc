@@ -343,7 +343,6 @@ class NfaInterpreter {
         capture_clock_array_allocator_(std::nullopt),
         best_match_thread_(std::nullopt),
         lookarounds_(0, zone),
-        lookarounds_priority_(0, zone),
         lookaround_table_(std::nullopt),
         lookbehind_table_(std::nullopt),
         only_captureless_lookbehinds_(true),
@@ -356,12 +355,7 @@ class NfaInterpreter {
     DCHECK_LE(input_index_, input_.length());
 
     // Iterate over the bytecode to find the PC of the filtering
-    // instructions and lookarounds, and the number of quantifiers. It also
-    // builds a lookaround priority list: the compilation ensures that a
-    // lookaround's bytecode can only before the bytecode of all the lookarounds
-    // it contains. Thus lookarounds must be run from the last to the first
-    // (regarding their appearance order) to never execute a lookaround before
-    // one of its child.
+    // instructions and lookarounds, and the number of quantifiers.
     std::optional<struct Lookaround> lookaround;
     bool in_lookaround = false;
     int lookaround_index;
@@ -403,8 +397,6 @@ class NfaInterpreter {
         }
         lookarounds_.Set(lookaround_index, *lookaround);
         lookaround = {};
-
-        lookarounds_priority_.Add(lookaround_index, zone_);
       }
 
       if (inst.opcode == RegExpInstruction::END_LOOKAROUND) {
@@ -573,7 +565,7 @@ class NfaInterpreter {
 
     int old_input_index = input_index_;
 
-    for (int i = lookarounds_priority_.length() - 1; i >= 0; --i) {
+    for (int i = 0; i < lookarounds_.length(); ++i) {
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
         DestroyThread(t);
@@ -585,13 +577,11 @@ class NfaInterpreter {
       }
       active_threads_.Rewind(0);
 
-      int idx = lookarounds_priority_.at(i);
-
-      current_lookaround_ = idx;
-      reverse_ = lookarounds_.at(idx).is_ahead;
+      current_lookaround_ = i;
+      reverse_ = lookarounds_.at(i).is_ahead;
       input_index_ = reverse_ ? input_.length() : 0;
 
-      active_threads_.Add(NewEmptyThread(lookarounds_.at(idx).match_pc), zone_);
+      active_threads_.Add(NewEmptyThread(lookarounds_.at(i).match_pc), zone_);
 
       RunActiveThreadsToEnd();
     }
@@ -614,7 +604,8 @@ class NfaInterpreter {
     // We need to capture the lookarounds from parents to childrens, since we
     // need the index on which the lookaround was matched, and those indexes are
     // computed when the parent expression is captured.
-    for (int lookaround_id : lookarounds_priority_) {
+    for (int lookaround_id = lookarounds_.length() - 1; lookaround_id >= 0;
+         --lookaround_id) {
       if (GetLookaroundMatchIndexArray(main_thread)[lookaround_id] ==
           kUndefinedMatchIndexValue) {
         continue;
@@ -818,7 +809,7 @@ class NfaInterpreter {
     active_threads_.Add(NewEmptyThread(0), zone_);
 
     if (only_captureless_lookbehinds_) {
-      for (int i : lookarounds_priority_) {
+      for (int i = lookarounds_.length() - 1; i >= 0; --i) {
         active_threads_.Add(NewEmptyThread(lookarounds_.at(i).match_pc), zone_);
       }
     }
@@ -1453,12 +1444,12 @@ class NfaInterpreter {
 
   // Stores the match pc, capture pc and direction of each lookaround,
   // mapped by lookaround id. Computed during the NFA instantiation (see the
-  // constructor).
+  // constructor). It also serves as a priority list: the compilation ensures
+  // that a lookaround's bytecode can only before the bytecode of all the
+  // lookarounds it contains. Thus lookarounds must be run from the last to the
+  // first (regarding their appearance order) to never execute a lookaround
+  // before one of its child.
   ZoneList<Lookaround> lookarounds_;
-
-  // Stores the id of the lookarounds, ordered such that a lookaround can
-  // only depend on lookarounds appearing after its position in this list.
-  ZoneList<int> lookarounds_priority_;
 
   // Truth table for the lookarounds. lookaround_table_[l][r] indicates
   // whether the lookaround of index l did complete a match on the position
