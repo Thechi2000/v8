@@ -1175,9 +1175,10 @@ class CompileVisitor : private RegExpVisitor {
   // be used.
   bool ignore_captures_;
 
-  // Do not produce `READ_LOOKAROUND_TABLE` instructions. Used when compiling
-  // the lookarounds' capturing automata, since the string is known to match the
-  // expression.
+  // Indicates whether the encountered lookarounds should be pushed into the
+  // queue. Set when compiling the lookarounds' capturing automata, as the
+  // children lookarounds where already pushed while compiling the matching
+  // automata.
   bool ignore_lookarounds_;
 };
 
