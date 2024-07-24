@@ -284,15 +284,27 @@ class NfaInterpreter {
   // with high priority are left, we return the match that was produced by the
   // ACCEPTing thread with highest priority.
   //
-  // To handle lookarounds, the interpreter builds a table indicating
-  // at each index of the input which lookaround does match, therefore having a
-  // size of input_size x lookaround_count. It is constructed before starting
-  // the search, by running each lookaround's automaton independently on the
-  // whole input. Since a lookaround may depend on others, it is imperative to
-  // run them in a correct order, starting from those not containing any other.
-  // This order is inferred from the order in which the lookarounds' automata
-  // appear in the bytecode. Once the table is completed, the interpreter runs
-  // the main expression's bytecode to find a match.
+  // The handling of lookarounds is split into two cases: either there are only
+  // captureless lookbehinds, or other lookarounds are present (capturing and/or
+  // lookaheads). The latter case require the
+  // `experimental_regexp_engine_capture_group_opt` flag to be set. The bytecode
+  // for both cases is similar, and the interpreter will choose which algorithm
+  // to use when iterating over the bytecode in the constructor.
+  //
+  // In the first case (caputreless lookbehinds), the interpreter will run each
+  // lookbehinds in a thread, in parrallel to the main expression, and those
+  // threads will write into the `lookbehind_table_` when they find a match.
+  //
+  // In the second case, before running the main expression, the interpreter
+  // builds a table indicating at each index of the input which lookaround does
+  // match, therefore having a size of input_size x lookaround_count. It is
+  // constructed before starting the search, by running each lookaround's
+  // automaton independently on the whole input. Since a lookaround may depend
+  // on others, it is imperative to run them in a correct order, starting from
+  // those not containing any other. This order is inferred from the order in
+  // which the lookarounds' automata appear in the bytecode. Once the table is
+  // completed, the interpreter runs the main expression's bytecode to find a
+  // match.
   //
   // The lookaround's automaton ends with the `WRITE_LOOKAROUND_TABLE`
   // instruction, setting the corresponding boolean of the lookaround table to
@@ -1267,9 +1279,9 @@ class NfaInterpreter {
     }
   }
 
-  // Creates an `InterpreterThread` at the given pc and allocates its
-  // arrays. The clocks' arrays are set to `nullptr` if irrelevant. All
-  // arrays are left uninitialized.
+  // Creates an `InterpreterThread` at the given pc and allocates its arrays.
+  // The clocks' arrays are set to `nullptr` if irrelevant. All arrays are left
+  // uninitialized.
   InterpreterThread NewUninitializedThread(int pc) {
     if (v8_flags.experimental_regexp_engine_capture_group_opt) {
       return InterpreterThread(
@@ -1333,14 +1345,14 @@ class NfaInterpreter {
   }
 
   // It is redundant to have two threads t, t0 execute at the same PC and
-  // consumed_since_last_quantifier values, because one of t, t0 matches iff
-  // the other does.  We can thus discard the one with lower priority.  We
-  // check whether a thread executed at some PC value by recording for every
-  // possible value of PC what the value of input_index_ was the last time a
-  // thread executed at PC. If a thread tries to continue execution at a PC
-  // value that we have seen before at the current input index, we abort it.
-  // (We execute threads with higher priority first, so the second thread is
-  // guaranteed to have lower priority.)
+  // consumed_since_last_quantifier values, because one of t, t0 matches iff the
+  // other does.  We can thus discard the one with lower priority.  We check
+  // whether a thread executed at some PC value by recording for every possible
+  // value of PC what the value of input_index_ was the last time a thread
+  // executed at PC. If a thread tries to continue execution at a PC value that
+  // we have seen before at the current input index, we abort it. (We execute
+  // threads with higher priority first, so the second thread is guaranteed to
+  // have lower priority.)
   //
   // Check whether we've seen an active thread with a given pc and
   // consumed_since_last_quantifier value since the last increment of
@@ -1393,8 +1405,8 @@ class NfaInterpreter {
   // Global clock counting the total of executed instructions.
   uint64_t clock;
 
-  // Stores the last input index at which a thread was activated for a given
-  // pc. Two values are stored, depending on the value
+  // Stores the last input index at which a thread was activated for a given pc.
+  // Two values are stored, depending on the value
   // consumed_since_last_quantifier of the thread.
   class LastInputIndex {
    public:
@@ -1423,8 +1435,8 @@ class NfaInterpreter {
   // `active_threads_`).
   ZoneList<InterpreterThread> blocked_threads_;
 
-  // RecyclingZoneAllocator maintains a linked list through freed
-  // allocations for reuse if possible.
+  // RecyclingZoneAllocator maintains a linked list through freed allocations
+  // for reuse if possible.
   RecyclingZoneAllocator<int> register_array_allocator_;
   std::optional<RecyclingZoneAllocator<int>>
       lookaround_match_index_array_allocator_;
