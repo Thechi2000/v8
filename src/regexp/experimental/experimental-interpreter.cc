@@ -203,6 +203,8 @@ class FilterGroups {
           if (!lookaround_clocks.has_value() ||
               lookaround_clocks->at(instr.payload.lookaround_id) >=
                   max_clock_) {
+            // TODO max_clock_ =
+            // lookaround_clocks->at(instr.payload.lookaround_id);
             IncrementPC();
           } else {
             // If the node should be discarded, all its children should be
@@ -365,6 +367,10 @@ class NfaInterpreter {
     DCHECK(!bytecode_.empty());
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
+
+    for (int i = 0; i < bytecode_.length(); ++i) {
+      std::cout << i << ": " << bytecode_[i] << std::endl;
+    }
 
     // Iterate over the bytecode to find the PC of the filtering
     // instructions and lookarounds, and the number of quantifiers.
@@ -841,17 +847,18 @@ class NfaInterpreter {
   // - If `t` executes ACCEPT, set `best_match` according to `t.match_begin` and
   //   the current input index. All remaining `active_threads_` are discarded.
   int RunActiveThread(InterpreterThread t) {
-    ++clock;
-
-    // Since the clock is a `uint64_t`, it is almost guaranteed
-    // not to overflow. An `uint64_t` being at least 64 bits, it
-    // would take at least a hundred years to overflow if the clock was
-    // incremented at each cycle of a 3 GHz processor.
-    DCHECK_GT(clock, 0);
-
     while (true) {
       SBXCHECK_GE(t.pc, 0);
       SBXCHECK_LT(t.pc, bytecode_.length());
+
+      ++clock;
+
+      // Since the clock is a `uint64_t`, it is almost guaranteed
+      // not to overflow. An `uint64_t` being at least 64 bits, it
+      // would take at least a hundred years to overflow if the clock was
+      // incremented at each cycle of a 3 GHz processor.
+      DCHECK_GT(clock, 0);
+
       if (IsPcProcessed(t.pc, t.consumed_since_last_quantifier)) {
         DestroyThread(t);
         return RegExp::kInternalRegExpSuccess;
@@ -1188,17 +1195,17 @@ class NfaInterpreter {
 
   int* NewLookaroundMatchIndexArray(int fill_value) {
     int* array_begin = NewLookaroundMatchIndexArrayUninitialized();
-    int* array_end = array_begin + register_count_per_match_;
+    int* array_end = array_begin + lookaround_table_->size();
     std::fill(array_begin, array_end, fill_value);
     return array_begin;
   }
 
-  void FreeNewGetLookaroundMatchIndexArray(
-      int* lookaround_match_index_array_begin) {
+  void FreeLookaroundMatchIndexArray(int* lookaround_match_index_array_begin) {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
     lookaround_match_index_array_allocator_->deallocate(
         lookaround_match_index_array_begin, lookaround_table_->size());
   }
+
   uint64_t* NewQuantifierClockArrayUninitialized() {
     DCHECK(v8_flags.experimental_regexp_engine_capture_group_opt);
     return quantifier_array_allocator_->allocate(quantifier_count_);
@@ -1338,8 +1345,7 @@ class NfaInterpreter {
 
       if (!only_captureless_lookbehinds_) {
         FreeLookaroundClockArray(t.lookaround_clock_array_begin);
-        FreeNewGetLookaroundMatchIndexArray(
-            t.lookaround_match_index_array_begin);
+        FreeLookaroundMatchIndexArray(t.lookaround_match_index_array_begin);
       }
     }
   }

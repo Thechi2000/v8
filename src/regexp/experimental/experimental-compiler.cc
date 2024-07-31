@@ -554,12 +554,6 @@ class CompileVisitor : private RegExpVisitor {
     compiler.assembler_.SetRegisterToCp(1);
     compiler.assembler_.Accept();
 
-    if (v8_flags.experimental_regexp_engine_capture_group_opt) {
-      FilterGroupsCompileVisitor::CompileFilter(
-          zone, tree, compiler.assembler_,
-          compiler.quantifier_id_remapping_.value());
-    }
-
     // Each lookaround is compiled as two different bytecode sections: a
     // reverse, captureless automaton and a capturing one. They are then
     // added at the end of the bytecode, respecting the order in which they
@@ -595,6 +589,12 @@ class CompileVisitor : private RegExpVisitor {
       auto node = compiler.lookarounds_.front();
       compiler.CompileLookaround(node);
       compiler.lookarounds_.pop_front();
+    }
+
+    if (v8_flags.experimental_regexp_engine_capture_group_opt) {
+      FilterGroupsCompileVisitor::CompileFilter(
+          zone, tree, compiler.assembler_,
+          compiler.quantifier_id_remapping_.value());
     }
 
     return std::move(compiler.assembler_).IntoCode();
