@@ -368,10 +368,6 @@ class NfaInterpreter {
     DCHECK_GE(input_index_, 0);
     DCHECK_LE(input_index_, input_.length());
 
-    for (int i = 0; i < bytecode_.length(); ++i) {
-      std::cout << i << ": " << bytecode_[i] << std::endl;
-    }
-
     // Iterate over the bytecode to find the PC of the filtering
     // instructions and lookarounds, and the number of quantifiers.
     std::optional<struct Lookaround> lookaround;
@@ -446,7 +442,7 @@ class NfaInterpreter {
       lookaround_match_index_array_allocator_.emplace(zone_);
 
       lookaround_table_.emplace(zone_);
-      for (int i = 0; i < lookarounds_.length(); ++i) {
+      for (int i = lookarounds_.length() - 1; i >= 0; --i) {
         lookaround_table_->emplace_back(input_.length() + 1, zone_);
       }
     }
@@ -583,7 +579,7 @@ class NfaInterpreter {
 
     int old_input_index = input_index_;
 
-    for (int i = 0; i < lookarounds_.length(); ++i) {
+    for (int i = lookarounds_.length() - 1; i >= 0; --i) {
       // Clean up left-over data from last iteration.
       for (InterpreterThread t : blocked_threads_) {
         DestroyThread(t);
@@ -622,14 +618,13 @@ class NfaInterpreter {
     // We need to capture the lookarounds from parents to childrens, since we
     // need the index on which the lookaround was matched, and those indexes are
     // computed when the parent expression is captured.
-    for (int lookaround_id = lookarounds_.length() - 1; lookaround_id >= 0;
-         --lookaround_id) {
-      if (GetLookaroundMatchIndexArray(main_thread)[lookaround_id] ==
+    for (int i = 0; i < lookarounds_.length(); ++i) {
+      if (GetLookaroundMatchIndexArray(main_thread)[i] ==
           kUndefinedMatchIndexValue) {
         continue;
       }
 
-      Lookaround& lookaround = lookarounds_[lookaround_id];
+      Lookaround& lookaround = lookarounds_[i];
 
       std::fill(pc_last_input_index_.begin(), pc_last_input_index_.end(),
                 LastInputIndex());
@@ -648,7 +643,7 @@ class NfaInterpreter {
       best_match_thread_ = std::nullopt;
 
       reverse_ = !lookaround.is_ahead;
-      input_index_ = GetLookaroundMatchIndexArray(main_thread)[lookaround_id];
+      input_index_ = GetLookaroundMatchIndexArray(main_thread)[i];
 
       // We reuse the same thread as initial thread, to avoid having to merge
       // the new `best_match_thread_` with the previous results.
@@ -827,7 +822,7 @@ class NfaInterpreter {
     active_threads_.Add(NewEmptyThread(0), zone_);
 
     if (only_captureless_lookbehinds_) {
-      for (int i = lookarounds_.length() - 1; i >= 0; --i) {
+      for (int i = 0; i < lookarounds_.length(); ++i) {
         active_threads_.Add(NewEmptyThread(lookarounds_.at(i).match_pc), zone_);
       }
     }
