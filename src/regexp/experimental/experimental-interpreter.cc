@@ -312,7 +312,7 @@ class NfaInterpreter {
   // instruction, setting the corresponding boolean of the lookaround table to
   // true. Since the compiler appends a /.*/ at the beginning of the
   // lookaround's automaton, the search starts with exactly one thread, and
-  // destroy those after reaching the write instruction. To work on lookaheads,
+  // destroys those after reaching the write instruction. To work on lookaheads,
   // they need to be ran in reverse, such that they end their match on the input
   // where they are required, and the compiler produces their automata reversed.
   //
@@ -1031,7 +1031,7 @@ class NfaInterpreter {
           // Destroy the thread if the corresponding lookaround did or did not
           // complete a match at the current position (depending on whether or
           // not the lookaround is positive). The lookaround priority list
-          // ensures that all the lookaround has already been run.
+          // ensures that all the relevant lookarounds has already been run.
 
           if (!only_captureless_lookbehinds_) {
             if ((*lookaround_table_)[inst.payload.read_lookaround
@@ -1260,10 +1260,9 @@ class NfaInterpreter {
                                                   lookaround_table_->size());
   }
 
-  // Creates an `InterpreterThread` at the given pc and allocates its
-  // arrays. The register array is initialized to `kUndefinedRegisterValue`.
-  // The clocks' arrays are set to `nullptr` if irrelevant, or initialized
-  // to 0.
+  // Creates an `InterpreterThread` at the given pc and allocates its arrays.
+  // The register array is initialized to `kUndefinedRegisterValue`. The clocks'
+  // arrays are set to `nullptr` if irrelevant, or initialized to 0.
   InterpreterThread NewEmptyThread(int pc) {
     if (v8_flags.experimental_regexp_engine_capture_group_opt) {
       return InterpreterThread(
@@ -1458,7 +1457,7 @@ class NfaInterpreter {
   // Stores the match pc, capture pc and direction of each lookaround,
   // mapped by lookaround id. Computed during the NFA instantiation (see the
   // constructor). It also serves as a priority list: the compilation ensures
-  // that a lookaround's bytecode can only before the bytecode of all the
+  // that a lookaround's bytecode appears before the bytecode of all the
   // lookarounds it contains. Thus lookarounds must be run from the last to the
   // first (regarding their appearance order) to never execute a lookaround
   // before one of its child.

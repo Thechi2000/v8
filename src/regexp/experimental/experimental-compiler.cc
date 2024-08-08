@@ -536,6 +536,9 @@ class FilterGroupsCompileVisitor final : private RegExpVisitor {
   bool can_compile_node_;
 
   const ZoneMap<int, int>& quantifier_id_remapping_;
+
+  // The lookarounds ids are remapped to be contiguous. This may not already be
+  // the case, since parts of the AST may be optimized out during parsing.
   const ZoneMap<int, int>& lookaround_id_remapping_;
 };
 
@@ -547,8 +550,8 @@ class CompileVisitor : private RegExpVisitor {
 
     if (!IsSticky(flags) && !tree->IsAnchoredAtStart()) {
       // The match is not anchored, i.e. may start at any input position, so we
-      // emit a preamble corresponding to /.*?/.  This skips an arbitrary prefix
-      // in the input non-greedily.
+      // emit a preamble corresponding to /.*?/.  This skips an arbitrary
+      // prefix in the input non-greedily.
       compiler.CompileNonGreedyStar(
           [&]() { compiler.assembler_.ConsumeAnyChar(); });
     }
