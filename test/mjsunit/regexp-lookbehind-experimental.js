@@ -25,7 +25,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
-// Flags: --allow-natives-syntax --default-to-experimental-regexp-engine --experimental_regexp_engine_capture_group_opt
+// Flags: --allow-natives-syntax --default-to-experimental-regexp-engine --experimental-regexp-engine-capture-group-opt
 
 // Tests captures in positive and negative look-ahead in regular expressions.
 
