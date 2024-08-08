@@ -203,7 +203,6 @@ class FilterGroups {
           if (!lookaround_clocks.has_value() ||
               lookaround_clocks->at(instr.payload.lookaround_id) >=
                   max_clock_) {
-            // TODO max_clock_ =
             // lookaround_clocks->at(instr.payload.lookaround_id);
             IncrementPC();
           } else {
