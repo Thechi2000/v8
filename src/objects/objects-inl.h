@@ -68,6 +68,8 @@ namespace internal {
 
 template <typename T>
 class Managed;
+template <typename T>
+class TrustedManaged;
 
 PropertyDetails::PropertyDetails(Tagged<Smi> smi) { value_ = smi.value(); }
 
@@ -266,6 +268,8 @@ struct CastTraits<FieldType> {
 
 template <typename T>
 struct CastTraits<Managed<T>> : public CastTraits<Foreign> {};
+template <typename T>
+struct CastTraits<TrustedManaged<T>> : public CastTraits<TrustedForeign> {};
 template <typename T>
 struct CastTraits<PodArray<T>> : public CastTraits<ByteArray> {};
 template <typename T>
@@ -661,12 +665,17 @@ double Object::NumberValue(Tagged<Smi> obj) {
 
 // static
 bool Object::SameNumberValue(double value1, double value2) {
-  // SameNumberValue(NaN, NaN) is true.
-  if (value1 != value2) {
-    return std::isnan(value1) && std::isnan(value2);
+  // Compare values bitwise, to cover -0 being different from 0 -- we'd need to
+  // look at sign bits anyway if we'd done a double comparison, so we may as
+  // well compare bitwise immediately.
+  uint64_t value1_bits = base::bit_cast<uint64_t>(value1);
+  uint64_t value2_bits = base::bit_cast<uint64_t>(value2);
+  if (value1_bits == value2_bits) {
+    return true;
   }
-  // SameNumberValue(0.0, -0.0) is false.
-  return (std::signbit(value1) == std::signbit(value2));
+  // SameNumberValue(NaN, NaN) is true even for NaNs with different bit
+  // representations.
+  return std::isnan(value1) && std::isnan(value2);
 }
 
 // static
@@ -971,43 +980,50 @@ void HeapObject::InitSelfIndirectPointerField(size_t offset,
 }
 
 template <IndirectPointerTag tag>
-Tagged<Object> HeapObject::ReadIndirectPointerField(
+Tagged<ExposedTrustedObject> HeapObject::ReadTrustedPointerField(
     size_t offset, IsolateForSandbox isolate) const {
-  return i::ReadIndirectPointerField<tag>(field_address(offset), isolate);
-}
-
-template <IndirectPointerTag tag>
-void HeapObject::WriteIndirectPointerField(size_t offset,
-                                           Tagged<ExposedTrustedObject> value) {
-  return i::WriteIndirectPointerField<tag>(field_address(offset), value);
+  // Currently, trusted pointer loads always use acquire semantics as the
+  // under-the-hood indirect pointer loads use acquire loads anyway.
+  return ReadTrustedPointerField<tag>(offset, isolate, kAcquireLoad);
 }
 
 template <IndirectPointerTag tag>
 Tagged<ExposedTrustedObject> HeapObject::ReadTrustedPointerField(
-    size_t offset, IsolateForSandbox isolate) const {
-#ifdef V8_ENABLE_SANDBOX
-  Tagged<Object> object = ReadIndirectPointerField<tag>(offset, isolate);
+    size_t offset, IsolateForSandbox isolate,
+    AcquireLoadTag acquire_load) const {
+  Tagged<Object> object =
+      ReadMaybeEmptyTrustedPointerField<tag>(offset, isolate, acquire_load);
   DCHECK(IsExposedTrustedObject(object));
   return Cast<ExposedTrustedObject>(object);
+}
+
+template <IndirectPointerTag tag>
+Tagged<Object> HeapObject::ReadMaybeEmptyTrustedPointerField(
+    size_t offset, IsolateForSandbox isolate,
+    AcquireLoadTag acquire_load) const {
+#ifdef V8_ENABLE_SANDBOX
+  return i::ReadIndirectPointerField<tag>(field_address(offset), isolate,
+                                          acquire_load);
 #else
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  return TaggedField<ExposedTrustedObject>::Acquire_Load(
-      cage_base, *this, static_cast<int>(offset));
+  return TaggedField<Object>::Acquire_Load(*this, static_cast<int>(offset));
 #endif
 }
 
 template <IndirectPointerTag tag>
 void HeapObject::WriteTrustedPointerField(size_t offset,
                                           Tagged<ExposedTrustedObject> value) {
+  // Currently, trusted pointer stores always use release semantics as the
+  // under-the-hood indirect pointer stores use release stores anyway.
 #ifdef V8_ENABLE_SANDBOX
-  WriteIndirectPointerField<tag>(offset, value);
+  i::WriteIndirectPointerField<tag>(field_address(offset), value,
+                                    kReleaseStore);
 #else
   TaggedField<ExposedTrustedObject>::Release_Store(
       *this, static_cast<int>(offset), value);
 #endif
 }
 
-bool HeapObject::IsTrustedPointerFieldCleared(size_t offset) const {
+bool HeapObject::IsTrustedPointerFieldEmpty(size_t offset) const {
 #ifdef V8_ENABLE_SANDBOX
   IndirectPointerHandle handle = ACQUIRE_READ_UINT32_FIELD(*this, offset);
   return handle == kNullIndirectPointerHandle;
@@ -1026,6 +1042,10 @@ void HeapObject::ClearTrustedPointerField(size_t offset) {
 #endif
 }
 
+void HeapObject::ClearTrustedPointerField(size_t offset, ReleaseStoreTag) {
+  return ClearTrustedPointerField(offset);
+}
+
 Tagged<Code> HeapObject::ReadCodePointerField(size_t offset,
                                               IsolateForSandbox isolate) const {
   return Cast<Code>(
@@ -1036,8 +1056,8 @@ void HeapObject::WriteCodePointerField(size_t offset, Tagged<Code> value) {
   WriteTrustedPointerField<kCodeIndirectPointerTag>(offset, value);
 }
 
-bool HeapObject::IsCodePointerFieldCleared(size_t offset) const {
-  return IsTrustedPointerFieldCleared(offset);
+bool HeapObject::IsCodePointerFieldEmpty(size_t offset) const {
+  return IsTrustedPointerFieldEmpty(offset);
 }
 
 void HeapObject::ClearCodePointerField(size_t offset) {
@@ -1053,6 +1073,26 @@ void HeapObject::WriteCodeEntrypointViaCodePointerField(size_t offset,
                                                         Address value,
                                                         CodeEntrypointTag tag) {
   i::WriteCodeEntrypointViaCodePointerField(field_address(offset), value, tag);
+}
+
+void HeapObject::InitJSDispatchHandleField(size_t offset,
+                                           IsolateForSandbox isolate,
+                                           uint16_t parameter_count) {
+#ifdef V8_ENABLE_LEAPTIERING
+  JSDispatchTable::Space* space =
+      isolate.GetJSDispatchTableSpaceFor(field_address(offset));
+  JSDispatchHandle handle =
+      GetProcessWideJSDispatchTable()->AllocateAndInitializeEntry(
+          space, parameter_count);
+
+  // Use a Release_Store to ensure that the store of the pointer into the table
+  // is not reordered after the store of the handle. Otherwise, other threads
+  // may access an uninitialized table entry and crash.
+  auto location = reinterpret_cast<JSDispatchHandle*>(field_address(offset));
+  base::AsAtomic32::Release_Store(location, handle);
+#else
+  UNREACHABLE();
+#endif  // V8_ENABLE_LEAPTIERING
 }
 
 ObjectSlot HeapObject::RawField(int byte_offset) const {

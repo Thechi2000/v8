@@ -6,7 +6,7 @@
 // Flags: --experimental-wasm-inlining --liftoff
 // Flags: --turboshaft-wasm-instruction-selection-staged
 // Flags: --wasm-inlining-ignore-call-counts --no-jit-fuzzing
-// Flags: --experimental-wasm-inlining-call-indirect
+// Flags: --wasm-inlining-call-indirect
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
@@ -81,19 +81,25 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
     // Tier up.
     %WasmTierUpFunction(fct);
     assertEquals(46, fct(12, 30, wasm.add));
-    assertTrue(%IsTurboFanFunction(fct));
+    if (%IsWasmTieringPredictable()) {
+      assertTrue(%IsTurboFanFunction(fct));
+    }
     // Cause deopt.
     assertEquals(14 * 32, fct(12, 30, wasm.mul));
     // Deopt happened.
-    assertFalse(%IsTurboFanFunction(fct));
+    if (%IsWasmTieringPredictable()) assertFalse(%IsTurboFanFunction(fct));
     assertEquals(46, fct(12, 30, wasm.add));
     // Trigger re-opt.
     %WasmTierUpFunction(fct);
     // Both call targets are used in the re-optimized function, so they don't
     // trigger new deopts.
     assertEquals(46, fct(12, 30, wasm.add));
-    assertTrue(%IsTurboFanFunction(fct));
+    if (%IsWasmTieringPredictable()) {
+      assertTrue(%IsTurboFanFunction(fct));
+    }
     assertEquals(14 * 32, fct(12, 30, wasm.mul));
-    assertTrue(%IsTurboFanFunction(fct));
+    if (%IsWasmTieringPredictable()) {
+      assertTrue(%IsTurboFanFunction(fct));
+    }
   }
 })();

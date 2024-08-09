@@ -4,10 +4,10 @@
 
 #include "src/profiler/heap-snapshot-generator.h"
 
+#include <optional>
 #include <utility>
 
 #include "src/api/api-inl.h"
-#include "src/base/optional.h"
 #include "src/base/vector.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/common/assert-scope.h"
@@ -49,8 +49,7 @@
 #include "src/wasm/wasm-objects.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-namespace v8 {
-namespace internal {
+namespace v8::internal {
 
 #ifdef V8_ENABLE_HEAP_SNAPSHOT_VERIFY
 class HeapEntryVerifier {
@@ -850,6 +849,41 @@ void V8HeapExplorer::ExtractLocationForJSFunction(HeapEntry* entry,
   snapshot_->AddLocation(entry, scriptId, info.line, info.column);
 }
 
+namespace {
+// Templatized struct to statically generate the string "system / Managed<Foo>"
+// from "kFooTag".
+template <const char kTagNameCStr[]>
+struct ManagedName {
+  static constexpr std::string_view kTagName = kTagNameCStr;
+  static_assert(kTagName.starts_with("k"));
+  static_assert(kTagName.ends_with("Tag"));
+
+  static constexpr std::string_view prefix = "system / Managed<";
+  static constexpr std::string_view suffix = ">";
+
+  // We strip four characters, but add prefix and suffix and null termination.
+  static constexpr size_t kManagedNameLength =
+      kTagName.size() - 4 + prefix.size() + suffix.size() + 1;
+
+  static constexpr auto str_arr =
+      base::make_array<kManagedNameLength>([](std::size_t i) {
+        if (i < prefix.size()) return prefix[i];
+        if (i == kManagedNameLength - 2) return suffix[0];
+        if (i == kManagedNameLength - 1) return '\0';
+        return kTagName[i - prefix.size() + 1];
+      });
+
+  // Ignore "kFirstManagedResourceTag".
+  static constexpr bool ignore_me = kTagName == "kFirstManagedResourceTag";
+};
+
+// A little inline test:
+constexpr const char kTagNameForTesting[] = "kFooTag";
+static_assert(std::string_view{
+                  ManagedName<kTagNameForTesting>::str_arr.data()} ==
+              std::string_view{"system / Managed<Foo>"});
+}  // namespace
+
 HeapEntry* V8HeapExplorer::AddEntry(Tagged<HeapObject> object) {
   PtrComprCageBase cage_base(isolate());
   InstanceType instance_type = object->map(cage_base)->instance_type();
@@ -924,11 +958,10 @@ HeapEntry* V8HeapExplorer::AddEntry(Tagged<HeapObject> object) {
 #if V8_ENABLE_WEBASSEMBLY
   if (InstanceTypeChecker::IsWasmObject(instance_type)) {
     Tagged<WasmTypeInfo> info = object->map()->wasm_type_info();
-    // The cast is safe; structs and arrays always have their instance defined.
-    wasm::NamesProvider* names = Cast<WasmInstanceObject>(info->instance())
-                                     ->module_object()
-                                     ->native_module()
-                                     ->GetNamesProvider();
+    // Getting the trusted data is safe; structs and arrays always have their
+    // trusted data defined.
+    wasm::NamesProvider* names =
+        info->trusted_data(isolate())->native_module()->GetNamesProvider();
     wasm::StringBuilder sb;
     names->PrintTypeName(sb, info->type_index());
     sb << " (wasm)" << '\0';
@@ -942,28 +975,54 @@ HeapEntry* V8HeapExplorer::AddEntry(Tagged<HeapObject> object) {
     // just over 64 KB) and mostly includes a guard region. We report it as
     // much smaller to avoid confusion.
     static constexpr size_t kSize = WasmNull::kHeaderSize;
-    HeapEntry::Type type = v8_flags.heap_profiler_show_hidden_objects
-                               ? HeapEntry::kNative
-                               : HeapEntry::kHidden;
-    return AddEntry(object.address(), type, "system / WasmNull", kSize);
+    return AddEntry(object.address(), HeapEntry::kHidden, "system / WasmNull",
+                    kSize);
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
+
+  if (InstanceTypeChecker::IsForeign(instance_type)) {
+    Tagged<Foreign> foreign = Cast<Foreign>(object);
+    ExternalPointerTag tag = foreign->GetTag();
+    if (tag >= kFirstManagedResourceTag && tag < kLastManagedResourceTag) {
+      // First handle special cases with more information.
+#if V8_ENABLE_WEBASSEMBLY
+      if (tag == kWasmNativeModuleTag) {
+        wasm::NativeModule* native_module =
+            Cast<Managed<wasm::NativeModule>>(foreign)->raw();
+        size_t size = native_module->EstimateCurrentMemoryConsumption();
+        return AddEntry(object.address(), HeapEntry::kHidden,
+                        "system / Managed<wasm::NativeModule>", size);
+      }
+#endif  // V8_ENABLE_WEBASSEMBLY
+#define MANAGED_TAG(name, ...)                                \
+  if (tag == name) {                                          \
+    static constexpr const char kTagName[] = #name;           \
+    if constexpr (!ManagedName<kTagName>::ignore_me) {        \
+      return AddEntry(object, HeapEntry::kHidden,             \
+                      ManagedName<kTagName>::str_arr.data()); \
+    }                                                         \
+  }
+      PER_ISOLATE_EXTERNAL_POINTER_TAGS(MANAGED_TAG)
+#undef MANAGED_TAG
+    }
+  }
+
   return AddEntry(object, GetSystemEntryType(object),
                   GetSystemEntryName(object));
 }
 
 HeapEntry* V8HeapExplorer::AddEntry(Tagged<HeapObject> object,
                                     HeapEntry::Type type, const char* name) {
-  if (v8_flags.heap_profiler_show_hidden_objects &&
-      type == HeapEntry::kHidden) {
-    type = HeapEntry::kNative;
-  }
   PtrComprCageBase cage_base(isolate());
   return AddEntry(object.address(), type, name, object->Size(cage_base));
 }
 
 HeapEntry* V8HeapExplorer::AddEntry(Address address, HeapEntry::Type type,
                                     const char* name, size_t size) {
+  if (v8_flags.heap_profiler_show_hidden_objects &&
+      type == HeapEntry::kHidden) {
+    type = HeapEntry::kNative;
+  }
   SnapshotObjectId object_id = heap_object_map_->FindOrAddEntry(
       address, static_cast<unsigned int>(size));
   unsigned trace_node_id = 0;
@@ -1246,6 +1305,12 @@ void V8HeapExplorer::ExtractReferences(HeapEntry* entry,
       ExtractJSGeneratorObjectReferences(entry, Cast<JSGeneratorObject>(obj));
     } else if (IsJSWeakRef(obj)) {
       ExtractJSWeakRefReferences(entry, Cast<JSWeakRef>(obj));
+#if V8_ENABLE_WEBASSEMBLY
+    } else if (IsWasmInstanceObject(obj)) {
+      ExtractWasmInstanceObjectReferences(Cast<WasmInstanceObject>(obj), entry);
+    } else if (IsWasmModuleObject(obj)) {
+      ExtractWasmModuleObjectReferences(Cast<WasmModuleObject>(obj), entry);
+#endif  // V8_ENABLE_WEBASSEMBLY
     }
     ExtractJSObjectReferences(entry, Cast<JSObject>(obj));
   } else if (IsString(obj)) {
@@ -1624,9 +1689,12 @@ void V8HeapExplorer::ExtractSharedFunctionInfoReferences(
                        SharedFunctionInfo::kNameOrScopeInfoOffset);
   SetInternalReference(entry, "script", shared->script(kAcquireLoad),
                        SharedFunctionInfo::kScriptOffset);
-  SetInternalReference(entry, "function_data",
-                       shared->function_data(kAcquireLoad),
-                       SharedFunctionInfo::kFunctionDataOffset);
+  SetInternalReference(entry, "trusted_function_data",
+                       shared->GetTrustedData(isolate()),
+                       SharedFunctionInfo::kTrustedFunctionDataOffset);
+  SetInternalReference(entry, "untrusted_function_data",
+                       shared->GetUntrustedData(),
+                       SharedFunctionInfo::kUntrustedFunctionDataOffset);
   SetInternalReference(
       entry, "raw_outer_scope_info_or_feedback_metadata",
       shared->raw_outer_scope_info_or_feedback_metadata(),
@@ -1643,10 +1711,23 @@ void V8HeapExplorer::ExtractScriptReferences(HeapEntry* entry,
   TagObject(script->line_ends(), "(script line ends)", HeapEntry::kCode);
   SetInternalReference(entry, "line_ends", script->line_ends(),
                        Script::kLineEndsOffset);
-  TagObject(script->shared_function_infos(), "(shared function infos)",
-            HeapEntry::kCode);
+  TagObject(script->infos(), "(infos)", HeapEntry::kCode);
   TagObject(script->host_defined_options(), "(host-defined options)",
             HeapEntry::kCode);
+#if V8_ENABLE_WEBASSEMBLY
+  if (script->type() == Script::Type::kWasm) {
+    // Wasm reuses some otherwise unused fields for wasm-specific information.
+    SetInternalReference(entry, "wasm_breakpoint_infos",
+                         script->wasm_breakpoint_infos(),
+                         Script::kEvalFromSharedOrWrappedArgumentsOffset);
+    SetInternalReference(entry, "wasm_managed_native_module",
+                         script->wasm_managed_native_module(),
+                         Script::kEvalFromPositionOffset);
+    SetInternalReference(entry, "wasm_weak_instance_list",
+                         script->wasm_weak_instance_list(),
+                         Script::kInfosOffset);
+  }
+#endif
 }
 
 void V8HeapExplorer::ExtractAccessorInfoReferences(
@@ -1791,7 +1872,7 @@ void V8HeapExplorer::ExtractArrayBoilerplateDescriptionReferences(
 
 void V8HeapExplorer::ExtractRegExpBoilerplateDescriptionReferences(
     HeapEntry* entry, Tagged<RegExpBoilerplateDescription> value) {
-  TagObject(value->data(), "(RegExp data)", HeapEntry::kCode);
+  TagObject(value->data(isolate()), "(RegExpData)", HeapEntry::kCode);
 }
 
 class JSArrayBufferDataEntryAllocator : public HeapEntriesAllocator {
@@ -2097,11 +2178,10 @@ void V8HeapExplorer::ExtractWasmStructReferences(Tagged<WasmStruct> obj,
                                                  HeapEntry* entry) {
   wasm::StructType* type = obj->type();
   Tagged<WasmTypeInfo> info = obj->map()->wasm_type_info();
-  // The cast is safe; structs always have their instance defined.
-  wasm::NamesProvider* names = Cast<WasmInstanceObject>(info->instance())
-                                   ->module_object()
-                                   ->native_module()
-                                   ->GetNamesProvider();
+  // Getting the trusted data is safe; structs always have their trusted data
+  // defined.
+  wasm::NamesProvider* names =
+      info->trusted_data(isolate())->native_module()->GetNamesProvider();
   Isolate* isolate = heap_->isolate();
   for (uint32_t i = 0; i < type->field_count(); i++) {
     wasm::StringBuilder sb;
@@ -2113,6 +2193,7 @@ void V8HeapExplorer::ExtractWasmStructReferences(Tagged<WasmStruct> obj,
       case wasm::kI16:
       case wasm::kI32:
       case wasm::kI64:
+      case wasm::kF16:
       case wasm::kF32:
       case wasm::kF64:
       case wasm::kS128: {
@@ -2176,7 +2257,57 @@ void V8HeapExplorer::ExtractWasmTrustedInstanceDataReferences(
         entry, WasmTrustedInstanceData::kTaggedFieldNames[i],
         TaggedField<Object>::load(cage_base, trusted_data, offset), offset);
   }
+  for (size_t i = 0; i < WasmTrustedInstanceData::kProtectedFieldNames.size();
+       i++) {
+    const uint16_t offset = WasmTrustedInstanceData::kProtectedFieldOffsets[i];
+    SetInternalReference(
+        entry, WasmTrustedInstanceData::kProtectedFieldNames[i],
+        trusted_data->RawProtectedPointerField(offset).load(heap_->isolate()),
+        offset);
+  }
 }
+
+#define ASSERT_FIRST_FIELD(Class, Field) \
+  static_assert(Class::Super::kHeaderSize == Class::k##Field##Offset)
+#define ASSERT_CONSECUTIVE_FIELDS(Class, Field, NextField) \
+  static_assert(Class::k##Field##OffsetEnd + 1 == Class::k##NextField##Offset)
+#define ASSERT_LAST_FIELD(Class, Field) \
+  static_assert(Class::k##Field##OffsetEnd + 1 == Class::kHeaderSize)
+
+void V8HeapExplorer::ExtractWasmInstanceObjectReferences(
+    Tagged<WasmInstanceObject> instance_object, HeapEntry* entry) {
+  // The static assertions verify that we do not miss any fields here when we
+  // update the class definition.
+  ASSERT_FIRST_FIELD(WasmInstanceObject, TrustedData);
+  SetInternalReference(entry, "trusted_data",
+                       instance_object->trusted_data(heap_->isolate()),
+                       WasmInstanceObject::kTrustedDataOffset);
+  ASSERT_CONSECUTIVE_FIELDS(WasmInstanceObject, TrustedData, ModuleObject);
+  SetInternalReference(entry, "module_object", instance_object->module_object(),
+                       WasmInstanceObject::kModuleObjectOffset);
+  ASSERT_CONSECUTIVE_FIELDS(WasmInstanceObject, ModuleObject, ExportsObject);
+  SetInternalReference(entry, "exports", instance_object->exports_object(),
+                       WasmInstanceObject::kExportsObjectOffset);
+  ASSERT_LAST_FIELD(WasmInstanceObject, ExportsObject);
+}
+
+void V8HeapExplorer::ExtractWasmModuleObjectReferences(
+    Tagged<WasmModuleObject> module_object, HeapEntry* entry) {
+  // The static assertions verify that we do not miss any fields here when we
+  // update the class definition.
+  ASSERT_FIRST_FIELD(WasmModuleObject, ManagedNativeModule);
+  SetInternalReference(entry, "managed_native_module",
+                       module_object->managed_native_module(),
+                       WasmModuleObject::kManagedNativeModuleOffset);
+  ASSERT_CONSECUTIVE_FIELDS(WasmModuleObject, ManagedNativeModule, Script);
+  SetInternalReference(entry, "script", module_object->script(),
+                       WasmModuleObject::kScriptOffset);
+  ASSERT_LAST_FIELD(WasmModuleObject, Script);
+}
+
+#undef ASSERT_FIRST_FIELD
+#undef ASSERT_CONSECUTIVE_FIELDS
+#undef ASSERT_LAST_FIELD
 
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -2221,7 +2352,7 @@ class RootsReferencesExtractor : public RootVisitor {
   void VisitRootPointer(Root root, const char* description,
                         FullObjectSlot p) override {
     Tagged<Object> object = *p;
-#ifdef V8_ENABLE_DIRECT_LOCAL
+#ifdef V8_ENABLE_DIRECT_HANDLE
     if (object.ptr() == kTaggedNullAddress) return;
 #endif
     if (root == Root::kBuiltins) {
@@ -2482,7 +2613,7 @@ void V8HeapExplorer::SetWeakReference(
 
 void V8HeapExplorer::SetWeakReference(HeapEntry* parent_entry, int index,
                                       Tagged<Object> child_obj,
-                                      base::Optional<int> field_offset) {
+                                      std::optional<int> field_offset) {
   if (!IsEssentialObject(child_obj)) {
     return;
   }
@@ -2609,7 +2740,7 @@ const char* V8HeapExplorer::GetStrongGcSubrootName(Tagged<HeapObject> object) {
 }
 
 void V8HeapExplorer::TagObject(Tagged<Object> obj, const char* tag,
-                               base::Optional<HeapEntry::Type> type,
+                               std::optional<HeapEntry::Type> type,
                                bool overwrite_existing_name) {
   if (IsEssentialObject(obj)) {
     HeapEntry* entry = GetEntry(obj);
@@ -3580,5 +3711,4 @@ void HeapSnapshotJSONSerializer::SerializeLocations() {
   }
 }
 
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal

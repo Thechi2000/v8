@@ -142,6 +142,9 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
   void VisitTrustedPointerTableEntry(Tagged<HeapObject> host,
                                      IndirectPointerSlot slot) final;
 
+  void VisitJSDispatchTableEntry(Tagged<HeapObject> host,
+                                 JSDispatchHandle handle) override;
+
   V8_INLINE void VisitProtectedPointer(Tagged<TrustedObject> host,
                                        ProtectedPointerSlot slot) final {
     VisitStrongPointerImpl(host, slot);
@@ -168,6 +171,9 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
   V8_INLINE static constexpr bool CanEncounterFillerOrFreeSpace() {
     return false;
   }
+
+  V8_INLINE static constexpr bool IsTrivialWeakReferenceValue(
+      Tagged<HeapObject> host, Tagged<HeapObject> heap_object);
 
  protected:
   using ConcurrentHeapVisitor<int, ConcreteVisitor>::concrete_visitor;

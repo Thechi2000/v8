@@ -24,8 +24,8 @@ class FastApiCallLoweringReducer : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE(FastApiCallLowering)
 
-  OpIndex REDUCE(FastApiCall)(V<FrameState> frame_state, OpIndex data_argument,
-                              V<Context> context,
+  OpIndex REDUCE(FastApiCall)(V<FrameState> frame_state,
+                              V<Object> data_argument, V<Context> context,
                               base::Vector<const OpIndex> arguments,
                               const FastApiCallParameters* parameters) {
     const auto& c_functions = parameters->c_functions;
@@ -87,28 +87,20 @@ class FastApiCallLoweringReducer : public Next {
         // If this check fails, you've probably added new fields to
         // v8::FastApiCallbackOptions, which means you'll need to write code
         // that initializes and reads from them too.
-        static_assert(kSize == sizeof(uintptr_t) * 4);
+        static_assert(kSize == sizeof(uintptr_t) * 2);
         stack_slot = __ StackSlot(kSize, kAlign);
 
         // isolate
         __ StoreOffHeap(
             stack_slot,
-            __ ExternalConstant(ExternalReference::isolate_address(isolate_)),
+            __ ExternalConstant(ExternalReference::isolate_address()),
             MemoryRepresentation::UintPtr(),
             offsetof(v8::FastApiCallbackOptions, isolate));
-        // fallback = 0
-        __ StoreOffHeap(stack_slot, __ Word32Constant(0),
-                        MemoryRepresentation::Int32(),
-                        offsetof(v8::FastApiCallbackOptions, fallback));
         // data = data_argument
         OpIndex data_argument_to_pass = __ AdaptLocalArgument(data_argument);
         __ StoreOffHeap(stack_slot, data_argument_to_pass,
                         MemoryRepresentation::UintPtr(),
                         offsetof(v8::FastApiCallbackOptions, data));
-        // wasm_memory = 0
-        __ StoreOffHeap(stack_slot, __ IntPtrConstant(0),
-                        MemoryRepresentation::UintPtr(),
-                        offsetof(v8::FastApiCallbackOptions, wasm_memory));
 
         args.push_back(stack_slot);
         builder.AddParam(MachineType::Pointer());
@@ -136,13 +128,6 @@ class FastApiCallLoweringReducer : public Next {
       V<Object> fast_call_result =
           ConvertReturnValue(c_signature, c_call_result);
 
-      if (c_signature->HasOptions()) {
-        DCHECK(stack_slot.valid());
-        V<Word32> error = __ LoadOffHeap(
-            stack_slot, offsetof(v8::FastApiCallbackOptions, fallback),
-            MemoryRepresentation::Int32());
-        GOTO_IF(error, handle_error);
-      }
       GOTO(done, FastApiCallOp::kSuccessValue, fast_call_result);
       BIND(trigger_exception);
       __ template CallRuntime<
@@ -474,6 +459,7 @@ class FastApiCallLoweringReducer : public Next {
 
     // We hard-code int32_t here, because all specializations of
     // FastApiTypedArray have the same size.
+    START_ALLOW_USE_DEPRECATED()
     constexpr int kAlign = alignof(FastApiTypedArray<int32_t>);
     constexpr int kSize = sizeof(FastApiTypedArray<int32_t>);
     static_assert(kAlign == alignof(FastApiTypedArray<double>),
@@ -482,6 +468,7 @@ class FastApiCallLoweringReducer : public Next {
     static_assert(kSize == sizeof(FastApiTypedArray<double>),
                   "Size mismatch between different specializations of "
                   "FastApiTypedArray");
+    END_ALLOW_USE_DEPRECATED()
     static_assert(
         kSize == sizeof(uintptr_t) + sizeof(size_t),
         "The size of "
@@ -589,7 +576,7 @@ class FastApiCallLoweringReducer : public Next {
 
 #ifdef V8_ENABLE_SANDBOX
     OpIndex isolate_ptr =
-        __ ExternalConstant(ExternalReference::isolate_address(isolate_));
+        __ ExternalConstant(ExternalReference::isolate_address());
     MachineSignature::Builder builder(__ graph_zone(), 1, 2);
     builder.AddReturn(MachineType::Uint32());
     builder.AddParam(MachineType::Pointer());
@@ -621,8 +608,8 @@ class FastApiCallLoweringReducer : public Next {
                        V<FrameState> frame_state, V<Context> context,
                        base::Vector<const OpIndex> arguments) {
     // CPU profiler support.
-    OpIndex target_address = __ ExternalConstant(
-        ExternalReference::fast_api_call_target_address(isolate_));
+    OpIndex target_address =
+        __ IsolateField(IsolateFieldId::kFastApiCallTarget);
     __ StoreOffHeap(target_address, __ BitcastHeapObjectToWordPtr(callee),
                     MemoryRepresentation::UintPtr());
 

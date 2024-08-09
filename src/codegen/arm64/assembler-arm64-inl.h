@@ -219,7 +219,7 @@ struct ImmediateInitializer<ExternalReference> {
     return RelocInfo::EXTERNAL_REFERENCE;
   }
   static inline int64_t immediate_for(ExternalReference t) {
-    return static_cast<int64_t>(t.address());
+    return static_cast<int64_t>(t.raw());
   }
 };
 
@@ -734,6 +734,21 @@ Builtin RelocInfo::target_builtin_at(Assembler* origin) {
 Address RelocInfo::target_off_heap_target() {
   DCHECK(IsOffHeapTarget(rmode_));
   return Assembler::target_address_at(pc_, constant_pool_);
+}
+
+uint32_t Assembler::uint32_constant_at(Address pc, Address constant_pool) {
+  Instruction* instr = reinterpret_cast<Instruction*>(pc);
+  CHECK(instr->IsLdrLiteralW());
+  return ReadUnalignedValue<uint32_t>(target_pointer_address_at(pc));
+}
+
+void Assembler::set_uint32_constant_at(Address pc, Address constant_pool,
+                                       uint32_t new_constant,
+                                       ICacheFlushMode icache_flush_mode) {
+  Instruction* instr = reinterpret_cast<Instruction*>(pc);
+  CHECK(instr->IsLdrLiteralW());
+  WriteUnalignedValue<uint32_t>(target_pointer_address_at(pc), new_constant);
+  // Icache flushing not needed for Ldr via the constant pool.
 }
 
 LoadStoreOp Assembler::LoadOpFor(const CPURegister& rt) {

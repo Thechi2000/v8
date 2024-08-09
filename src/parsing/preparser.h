@@ -581,10 +581,9 @@ class PreParserFactory {
   }
   PreParserExpression NewCall(PreParserExpression expression,
                               const PreParserExpressionList& arguments, int pos,
-                              bool has_spread,
-                              Call::PossiblyEval possibly_eval = Call::NOT_EVAL,
+                              bool has_spread, int eval_scope_info_index = 0,
                               bool optional_chain = false) {
-    if (possibly_eval == Call::IS_POSSIBLY_EVAL) {
+    if (eval_scope_info_index > 0) {
       DCHECK(expression.IsIdentifier() && expression.AsIdentifier().IsEval());
       DCHECK(!optional_chain);
       return PreParserExpression::CallEval();
@@ -714,12 +713,13 @@ class PreParserFactory {
   }
 
   PreParserExpression NewImportCallExpression(const PreParserExpression& args,
+                                              const ModuleImportPhase phase,
                                               int pos) {
     return PreParserExpression::Default();
   }
 
   PreParserExpression NewImportCallExpression(
-      const PreParserExpression& specifier,
+      const PreParserExpression& specifier, const ModuleImportPhase phase,
       const PreParserExpression& import_options, int pos) {
     return PreParserExpression::Default();
   }
@@ -1159,7 +1159,7 @@ class PreParser : public ParserBase<PreParser> {
 
   V8_INLINE PreParserExpression
   RewriteClassLiteral(ClassScope* scope, const PreParserIdentifier& name,
-                      ClassInfo* class_info, int pos, int end_pos) {
+                      ClassInfo* class_info, int pos) {
     bool has_default_constructor = !class_info->has_seen_constructor;
     // Account for the default constructor.
     if (has_default_constructor) {
@@ -1176,7 +1176,7 @@ class PreParser : public ParserBase<PreParser> {
       function_scope->set_start_position(pos);
       function_scope->set_end_position(pos);
       FunctionState function_state(&function_state_, &scope_, function_scope);
-      GetNextFunctionLiteralId();
+      GetNextInfoId();
     }
     return PreParserExpression::Default();
   }
@@ -1278,9 +1278,9 @@ class PreParser : public ParserBase<PreParser> {
   V8_INLINE static void CheckAssigningFunctionLiteralToProperty(
       const PreParserExpression& left, const PreParserExpression& right) {}
 
-  V8_INLINE bool ShortcutNumericLiteralBinaryExpression(
-      PreParserExpression* x, const PreParserExpression& y, Token::Value op,
-      int pos) {
+  V8_INLINE bool ShortcutLiteralBinaryExpression(PreParserExpression* x,
+                                                 const PreParserExpression& y,
+                                                 Token::Value op, int pos) {
     return false;
   }
 

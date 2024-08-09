@@ -89,6 +89,10 @@ MaybeHandle<Object> DebugEvaluate::Local(Isolate* isolate,
   DebuggableStackFrameIterator it(isolate, frame_id);
 #if V8_ENABLE_WEBASSEMBLY
   if (it.is_wasm()) {
+#if V8_ENABLE_DRUMBRAKE
+    // TODO(paolosev@microsoft.com) - Not supported by Wasm interpreter.
+    if (it.is_wasm_interpreter_entry()) return {};
+#endif  // V8_ENABLE_DRUMBRAKE
     WasmFrame* frame = WasmFrame::cast(it.frame());
     Handle<SharedFunctionInfo> outer_info(
         isolate->native_context()->empty_function()->shared(), isolate);
@@ -175,10 +179,10 @@ MaybeHandle<Object> DebugEvaluate::Evaluate(
   Handle<JSFunction> eval_fun;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, eval_fun,
-      Compiler::GetFunctionFromEval(
-          source, outer_info, context, LanguageMode::kSloppy,
-          NO_PARSE_RESTRICTION, kNoSourcePosition, kNoSourcePosition,
-          kNoSourcePosition, ParsingWhileDebugging::kYes));
+      Compiler::GetFunctionFromEval(source, outer_info, context,
+                                    LanguageMode::kSloppy, NO_PARSE_RESTRICTION,
+                                    kNoSourcePosition, kNoSourcePosition,
+                                    ParsingWhileDebugging::kYes));
 
   Handle<Object> result;
   bool success = false;
@@ -794,13 +798,20 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kStringPrototypeIsWellFormed:
     case Builtin::kStringPrototypeItalics:
     case Builtin::kStringPrototypeLastIndexOf:
+    case Builtin::kStringPrototypeLocaleCompare:
     case Builtin::kStringPrototypeLink:
+    case Builtin::kStringPrototypeMatch:
     case Builtin::kStringPrototypeMatchAll:
+
     case Builtin::kStringPrototypePadEnd:
     case Builtin::kStringPrototypePadStart:
     case Builtin::kStringPrototypeRepeat:
+    case Builtin::kStringPrototypeReplace:
+    case Builtin::kStringPrototypeReplaceAll:
+    case Builtin::kStringPrototypeSearch:
     case Builtin::kStringPrototypeSlice:
     case Builtin::kStringPrototypeSmall:
+    case Builtin::kStringPrototypeSplit:
     case Builtin::kStringPrototypeStartsWith:
     case Builtin::kStringSlowFlatten:
     case Builtin::kStringPrototypeStrike:
@@ -809,9 +820,17 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kStringPrototypeSubstring:
     case Builtin::kStringPrototypeSup:
     case Builtin::kStringPrototypeToString:
-#ifndef V8_INTL_SUPPORT
+    case Builtin::kStringPrototypeToLocaleLowerCase:
+    case Builtin::kStringPrototypeToLocaleUpperCase:
+#ifdef V8_INTL_SUPPORT
+    case Builtin::kStringToLowerCaseIntl:
+    case Builtin::kStringPrototypeToLowerCaseIntl:
+    case Builtin::kStringPrototypeToUpperCaseIntl:
+    case Builtin::kStringPrototypeNormalizeIntl:
+#else
     case Builtin::kStringPrototypeToLowerCase:
     case Builtin::kStringPrototypeToUpperCase:
+    case Builtin::kStringPrototypeNormalize:
 #endif
     case Builtin::kStringPrototypeToWellFormed:
     case Builtin::kStringPrototypeTrim:
@@ -864,6 +883,13 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kConstructWithArrayLike:
     case Builtin::kGetOwnPropertyDescriptor:
     case Builtin::kOrdinaryGetOwnPropertyDescriptor:
+#if V8_ENABLE_WEBASSEMBLY
+    case Builtin::kWasmAllocateInYoungGeneration:
+    case Builtin::kWasmAllocateInOldGeneration:
+#endif  // V8_ENABLE_WEBASSEMBLY
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+    case Builtin::kGetContinuationPreservedEmbedderData:
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
       return DebugInfo::kHasNoSideEffect;
 
 #ifdef V8_INTL_SUPPORT
@@ -903,6 +929,7 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kLocalePrototypeCaseFirst:
     case Builtin::kLocalePrototypeCollation:
     case Builtin::kLocalePrototypeCollations:
+    case Builtin::kLocalePrototypeFirstDayOfWeek:
     case Builtin::kLocalePrototypeGetCalendars:
     case Builtin::kLocalePrototypeGetCollations:
     case Builtin::kLocalePrototypeGetHourCycles:
@@ -997,12 +1024,21 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kRegExpPrototypeGlobalGetter:
     case Builtin::kRegExpPrototypeHasIndicesGetter:
     case Builtin::kRegExpPrototypeIgnoreCaseGetter:
+    case Builtin::kRegExpPrototypeMatch:
     case Builtin::kRegExpPrototypeMatchAll:
     case Builtin::kRegExpPrototypeMultilineGetter:
     case Builtin::kRegExpPrototypeDotAllGetter:
     case Builtin::kRegExpPrototypeUnicodeGetter:
+    case Builtin::kRegExpPrototypeUnicodeSetsGetter:
     case Builtin::kRegExpPrototypeStickyGetter:
+    case Builtin::kRegExpPrototypeReplace:
+    case Builtin::kRegExpPrototypeSearch:
       return DebugInfo::kRequiresRuntimeChecks;
+
+    // Debugging builtins.
+    case Builtin::kDebugPrintFloat64:
+    case Builtin::kDebugPrintWordPtr:
+      return DebugInfo::kHasNoSideEffect;
 
     default:
       if (v8_flags.trace_side_effect_free_debug_evaluate) {
@@ -1233,6 +1269,22 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
         default:
           return false;
       }
+    case Builtin::kRegExpMatchFast:
+      // This is not a problem. We force String.prototype.match to take the
+      // slow path so that this call is not made.
+      return caller == Builtin::kStringPrototypeMatch;
+    case Builtin::kRegExpReplace:
+      // This is not a problem. We force String.prototype.replace to take the
+      // slow path so that this call is not made.
+      return caller == Builtin::kStringPrototypeReplace;
+    case Builtin::kRegExpSplit:
+      // This is not a problem. We force String.prototype.split to take the
+      // slow path so that this call is not made.
+      return caller == Builtin::kStringPrototypeSplit;
+    case Builtin::kRegExpSearchFast:
+      // This is not a problem. We force String.prototype.split to take the
+      // slow path so that this call is not made.
+      return caller == Builtin::kStringPrototypeSearch;
     default:
       return false;
   }

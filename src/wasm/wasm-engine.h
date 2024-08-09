@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -21,6 +22,7 @@
 #include "src/tasks/cancelable-task.h"
 #include "src/tasks/operations-barrier.h"
 #include "src/wasm/canonical-types.h"
+#include "src/wasm/stacks.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-tier.h"
 #include "src/zone/accounting-allocator.h"
@@ -69,6 +71,12 @@ class V8_EXPORT_PRIVATE InstantiationResultResolver {
 class NativeModuleCache {
  public:
   struct Key {
+    Key(size_t prefix_hash, CompileTimeImports compile_imports,
+        const base::Vector<const uint8_t>& bytes)
+        : prefix_hash(prefix_hash),
+          compile_imports(std::move(compile_imports)),
+          bytes(bytes) {}
+
     // Store the prefix hash as part of the key for faster lookup, and to
     // quickly check existing prefixes for streaming compilation.
     size_t prefix_hash;
@@ -76,8 +84,8 @@ class NativeModuleCache {
     base::Vector<const uint8_t> bytes;
 
     bool operator==(const Key& other) const {
-      bool eq =
-          bytes == other.bytes && compile_imports == other.compile_imports;
+      bool eq = bytes == other.bytes &&
+                compile_imports.compare(other.compile_imports) == 0;
       DCHECK_IMPLIES(eq, prefix_hash == other.prefix_hash);
       return eq;
     }
@@ -88,12 +96,11 @@ class NativeModuleCache {
                        bytes != other.bytes);
         return prefix_hash < other.prefix_hash;
       }
-      if (compile_imports != other.compile_imports) {
-        return compile_imports.ToIntegral() <
-               other.compile_imports.ToIntegral();
-      }
       if (bytes.size() != other.bytes.size()) {
         return bytes.size() < other.bytes.size();
+      }
+      if (int cmp = compile_imports.compare(other.compile_imports)) {
+        return cmp < 0;
       }
       // Fast path when the base pointers are the same.
       // Also handles the {nullptr} case which would be UB for memcmp.
@@ -109,11 +116,11 @@ class NativeModuleCache {
 
   std::shared_ptr<NativeModule> MaybeGetNativeModule(
       ModuleOrigin origin, base::Vector<const uint8_t> wire_bytes,
-      CompileTimeImports compile_imports);
-  bool GetStreamingCompilationOwnership(size_t prefix_hash,
-                                        CompileTimeImports compile_imports);
+      const CompileTimeImports& compile_imports);
+  bool GetStreamingCompilationOwnership(
+      size_t prefix_hash, const CompileTimeImports& compile_imports);
   void StreamingCompilationFailed(size_t prefix_hash,
-                                  CompileTimeImports compile_imports);
+                                  const CompileTimeImports& compile_imports);
   std::shared_ptr<NativeModule> Update(
       std::shared_ptr<NativeModule> native_module, bool error);
   void Erase(NativeModule* native_module);
@@ -138,7 +145,7 @@ class NativeModuleCache {
   // before trying to get it from the cache.
   // By contrast, an expired {weak_ptr} indicates that the native module died
   // and will soon be cleaned up from the cache.
-  std::map<Key, base::Optional<std::weak_ptr<NativeModule>>> map_;
+  std::map<Key, std::optional<std::weak_ptr<NativeModule>>> map_;
 
   base::Mutex mutex_;
 
@@ -151,6 +158,8 @@ class NativeModuleCache {
 // The central data structure that represents an engine instance capable of
 // loading, instantiating, and executing Wasm code.
 class V8_EXPORT_PRIVATE WasmEngine {
+  class LogCodesTask;
+
  public:
   WasmEngine();
   WasmEngine(const WasmEngine&) = delete;
@@ -227,10 +236,12 @@ class V8_EXPORT_PRIVATE WasmEngine {
       Isolate* isolate, std::shared_ptr<NativeModule> shared_module,
       base::Vector<const char> source_url);
 
-  void FlushCode();
+  // Flushes all Liftoff code and returns the sizes of the removed
+  // (executable) code and the removed metadata.
+  std::pair<size_t, size_t> FlushLiftoffCode();
 
   // Returns the code size of all Liftoff compiled functions in all modules.
-  size_t GetLiftoffCodeSize();
+  size_t GetLiftoffCodeSizeForTesting();
 
   AccountingAllocator* allocator() { return &allocator_; }
 
@@ -312,7 +323,7 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // NativeModule later.
   std::shared_ptr<NativeModule> MaybeGetNativeModule(
       ModuleOrigin origin, base::Vector<const uint8_t> wire_bytes,
-      CompileTimeImports compile_imports, Isolate* isolate);
+      const CompileTimeImports& compile_imports, Isolate* isolate);
 
   // Replace the temporary {nullopt} with the new native module, or
   // erase it if any error occurred. Wake up blocked threads waiting for this
@@ -335,13 +346,13 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // prepared a module with the same prefix hash. The caller should wait until
   // the stream is finished and call {MaybeGetNativeModule} to either get the
   // module from the cache or get ownership for the compilation of these bytes.
-  bool GetStreamingCompilationOwnership(size_t prefix_hash,
-                                        CompileTimeImports compile_imports);
+  bool GetStreamingCompilationOwnership(
+      size_t prefix_hash, const CompileTimeImports& compile_imports);
 
   // Remove the prefix hash from the cache when compilation failed. If
   // compilation succeeded, {UpdateNativeModuleCache} should be called instead.
   void StreamingCompilationFailed(size_t prefix_hash,
-                                  CompileTimeImports compile_imports);
+                                  const CompileTimeImports& compile_imports);
 
   void FreeNativeModule(NativeModule*);
   void ClearWeakScriptHandle(Isolate* isolate,

@@ -113,6 +113,9 @@ class PropertyCallbackArguments final
 
   // -------------------------------------------------------------------------
   // Named Interceptor Callbacks
+
+  // Empty handle means that the request was not intercepted.
+  // Pending exception handling should be done by the caller.
   inline Handle<Object> CallNamedQuery(Handle<InterceptorInfo> interceptor,
                                        Handle<Name> name);
   inline Handle<JSAny> CallNamedGetter(Handle<InterceptorInfo> interceptor,
@@ -131,6 +134,8 @@ class PropertyCallbackArguments final
   inline v8::Intercepted CallNamedDeleter(
       DirectHandle<InterceptorInfo> interceptor, Handle<Name> name);
 
+  // Empty handle means that the request was not intercepted.
+  // Pending exception handling should be done by the caller.
   inline Handle<JSAny> CallNamedDescriptor(Handle<InterceptorInfo> interceptor,
                                            Handle<Name> name);
   // Returns JSArray-like object with property names or undefined.
@@ -139,6 +144,9 @@ class PropertyCallbackArguments final
 
   // -------------------------------------------------------------------------
   // Indexed Interceptor Callbacks
+
+  // Empty handle means that the request was not intercepted.
+  // Pending exception handling should be done by the caller.
   inline Handle<Object> CallIndexedQuery(Handle<InterceptorInfo> interceptor,
                                          uint32_t index);
   inline Handle<JSAny> CallIndexedGetter(Handle<InterceptorInfo> interceptor,
@@ -157,6 +165,8 @@ class PropertyCallbackArguments final
   inline v8::Intercepted CallIndexedDeleter(Handle<InterceptorInfo> interceptor,
                                             uint32_t index);
 
+  // Empty handle means that the request was not intercepted.
+  // Pending exception handling should be done by the caller.
   inline Handle<JSAny> CallIndexedDescriptor(
       Handle<InterceptorInfo> interceptor, uint32_t index);
   // Returns JSArray-like object with property names or undefined.
@@ -204,6 +214,22 @@ class PropertyCallbackArguments final
     return Handle<Object>(&info.args_[kPropertyKeyIndex]);
   }
 
+  // Returns index value passed to CallIndexedXXX(). This works as long as
+  // all the calls to indexed interceptor callbacks are done via
+  // PropertyCallbackArguments.
+  template <typename T>
+  static uint32_t GetPropertyIndex(const PropertyCallbackInfo<T>& info) {
+    // Currently all indexed interceptor callbacks are called via
+    // PropertyCallbackArguments, so it's guaranteed that
+    // v8::PropertyCallbackInfo<T>::args_ array IS the
+    // PropertyCallbackArguments::values_ array. As a result we can restore
+    // pointer to PropertyCallbackArguments object from the former.
+    Address ptr = reinterpret_cast<Address>(&info.args_) -
+                  offsetof(PropertyCallbackArguments, values_);
+    auto pca = reinterpret_cast<const PropertyCallbackArguments*>(ptr);
+    return pca->index_;
+  }
+
  private:
   // Returns JSArray-like object with property names or undefined.
   inline Handle<JSObjectOrUndefined> CallPropertyEnumerator(
@@ -211,6 +237,10 @@ class PropertyCallbackArguments final
 
   inline Tagged<JSObject> holder() const;
   inline Tagged<Object> receiver() const;
+
+  // This field is used for propagating index value from CallIndexedXXX()
+  // to ExceptionPropagationCallback.
+  uint32_t index_ = kMaxUInt32;
 
 #ifdef DEBUG
   // This stores current value of Isolate::javascript_execution_counter().

@@ -470,8 +470,9 @@ void StoreImpl::SetHostInfo(i::Handle<i::Object> object, void* info,
   // but all we get from the embedder is a {void*}, so our best estimate
   // is the size of the metadata.
   size_t estimated_size = sizeof(ManagedData);
-  i::DirectHandle<i::Object> wrapper = i::Managed<ManagedData>::FromRawPtr(
-      i_isolate(), estimated_size, new ManagedData(info, finalizer));
+  i::DirectHandle<i::Object> wrapper = i::Managed<ManagedData>::From(
+      i_isolate(), estimated_size,
+      std::make_shared<ManagedData>(info, finalizer));
   int32_t hash = i::Object::GetOrCreateHash(*object, i_isolate()).value();
   i::JSWeakCollection::Set(host_info_map_, object, wrapper, hash);
 }
@@ -1163,8 +1164,8 @@ auto Module::validate(Store* store_abs, const vec<byte_t>& binary) -> bool {
   i::wasm::WasmEnabledFeatures features =
       i::wasm::WasmEnabledFeatures::FromIsolate(isolate);
   i::wasm::CompileTimeImports imports;
-  return i::wasm::GetWasmEngine()->SyncValidate(isolate, features, imports,
-                                                bytes);
+  return i::wasm::GetWasmEngine()->SyncValidate(isolate, features,
+                                                std::move(imports), bytes);
 }
 
 auto Module::make(Store* store_abs, const vec<byte_t>& binary) -> own<Module> {
@@ -1181,7 +1182,7 @@ auto Module::make(Store* store_abs, const vec<byte_t>& binary) -> own<Module> {
   i::wasm::ErrorThrower thrower(isolate, "ignored");
   i::Handle<i::WasmModuleObject> module;
   if (!i::wasm::GetWasmEngine()
-           ->SyncCompile(isolate, features, imports, &thrower, bytes)
+           ->SyncCompile(isolate, features, std::move(imports), &thrower, bytes)
            .ToHandle(&module)) {
     thrower.Reset();  // The API provides no way to expose the error.
     return nullptr;
@@ -1280,11 +1281,12 @@ auto Module::deserialize(Store* store_abs, const vec<byte_t>& serialized)
   i::Handle<i::WasmModuleObject> module_obj;
   if (serial_size > 0) {
     size_t data_size = static_cast<size_t>(binary_size);
+    i::wasm::CompileTimeImports compile_imports{};
     if (!i::wasm::DeserializeNativeModule(
              isolate,
              {reinterpret_cast<const uint8_t*>(ptr + data_size), serial_size},
              {reinterpret_cast<const uint8_t*>(ptr), data_size},
-             i::wasm::CompileTimeImports{}, {})
+             compile_imports, {})
              .ToHandle(&module_obj)) {
       // We were given a serialized module, but failed to deserialize. Report
       // this as an error.
@@ -1500,14 +1502,14 @@ class SignatureHelper : public i::AllStatic {
 #endif
 };
 
-auto make_func(Store* store_abs, FuncData* data) -> own<Func> {
+auto make_func(Store* store_abs, std::shared_ptr<FuncData> data) -> own<Func> {
   auto store = impl(store_abs);
   i::Isolate* isolate = store->i_isolate();
   v8::Isolate::Scope isolate_scope(store->isolate());
   i::HandleScope handle_scope(isolate);
   CheckAndHandleInterrupts(isolate);
   i::DirectHandle<i::Managed<FuncData>> embedder_data =
-      i::Managed<FuncData>::FromRawPtr(isolate, sizeof(FuncData), data);
+      i::Managed<FuncData>::From(isolate, sizeof(FuncData), data);
 #if V8_ENABLE_SANDBOX
   uint64_t signature_hash = SignatureHelper::Hash(data->type.get());
 #else
@@ -1517,8 +1519,8 @@ auto make_func(Store* store_abs, FuncData* data) -> own<Func> {
       isolate, reinterpret_cast<i::Address>(&FuncData::v8_callback),
       embedder_data, SignatureHelper::Serialize(isolate, data->type.get()),
       signature_hash);
-  i::Cast<i::WasmApiFunctionRef>(
-      function->shared()->wasm_capi_function_data()->internal()->ref())
+  i::Cast<i::WasmImportData>(
+      function->shared()->wasm_capi_function_data()->internal()->implicit_arg())
       ->set_callable(*function);
   auto func = implement<Func>::type::make(store, function);
   return func;
@@ -1528,14 +1530,15 @@ auto make_func(Store* store_abs, FuncData* data) -> own<Func> {
 
 auto Func::make(Store* store, const FuncType* type, Func::callback callback)
     -> own<Func> {
-  auto data = new FuncData(store, type, FuncData::kCallback);
+  auto data = std::make_shared<FuncData>(store, type, FuncData::kCallback);
   data->callback = callback;
   return make_func(store, data);
 }
 
 auto Func::make(Store* store, const FuncType* type, callback_with_env callback,
                 void* env, void (*finalizer)(void*)) -> own<Func> {
-  auto data = new FuncData(store, type, FuncData::kCallbackWithEnv);
+  auto data =
+      std::make_shared<FuncData>(store, type, FuncData::kCallbackWithEnv);
   data->callback_with_env = callback;
   data->env = env;
   data->finalizer = finalizer;
@@ -1550,10 +1553,9 @@ auto Func::type() const -> own<FuncType> {
   }
   DCHECK(i::WasmExportedFunction::IsWasmExportedFunction(*func));
   auto function = i::Cast<i::WasmExportedFunction>(func);
-  return FunctionSigToFuncType(function->instance_data()
-                                   ->module()
-                                   ->functions[function->function_index()]
-                                   .sig);
+  auto data = function->shared()->wasm_exported_function_data();
+  return FunctionSigToFuncType(
+      data->instance_data()->module()->functions[data->function_index()].sig);
 }
 
 auto Func::param_arity() const -> size_t {
@@ -1565,10 +1567,9 @@ auto Func::param_arity() const -> size_t {
   }
   DCHECK(i::WasmExportedFunction::IsWasmExportedFunction(*func));
   auto function = i::Cast<i::WasmExportedFunction>(func);
-  const i::wasm::FunctionSig* sig = function->instance_data()
-                                        ->module()
-                                        ->functions[function->function_index()]
-                                        .sig;
+  auto data = function->shared()->wasm_exported_function_data();
+  const i::wasm::FunctionSig* sig =
+      data->instance_data()->module()->functions[data->function_index()].sig;
   return sig->parameter_count();
 }
 
@@ -1581,10 +1582,9 @@ auto Func::result_arity() const -> size_t {
   }
   DCHECK(i::WasmExportedFunction::IsWasmExportedFunction(*func));
   auto function = i::Cast<i::WasmExportedFunction>(func);
-  const i::wasm::FunctionSig* sig = function->instance_data()
-                                        ->module()
-                                        ->functions[function->function_index()]
-                                        .sig;
+  auto data = function->shared()->wasm_exported_function_data();
+  const i::wasm::FunctionSig* sig =
+      data->instance_data()->module()->functions[data->function_index()].sig;
   return sig->return_count();
 }
 
@@ -1649,6 +1649,7 @@ void PushArgs(const i::wasm::FunctionSig* sig, const Val args[],
       case i::wasm::kRtt:
       case i::wasm::kI8:
       case i::wasm::kI16:
+      case i::wasm::kF16:
       case i::wasm::kVoid:
       case i::wasm::kBottom:
         UNREACHABLE();
@@ -1688,6 +1689,7 @@ void PopArgs(const i::wasm::FunctionSig* sig, Val results[],
       case i::wasm::kRtt:
       case i::wasm::kI8:
       case i::wasm::kI16:
+      case i::wasm::kF16:
       case i::wasm::kVoid:
       case i::wasm::kBottom:
         UNREACHABLE();
@@ -1739,7 +1741,7 @@ auto Func::call(const Val args[], Val results[]) const -> own<Trap> {
   v8::Isolate::Scope isolate_scope(store->isolate());
   i::HandleScope handle_scope(isolate);
   i::Tagged<i::Object> raw_function_data =
-      func->v8_object()->shared()->GetData(isolate);
+      func->v8_object()->shared()->GetTrustedData(isolate);
 
   // WasmCapiFunctions can be called directly.
   if (IsWasmCapiFunctionData(raw_function_data)) {
@@ -1747,7 +1749,7 @@ auto Func::call(const Val args[], Val results[]) const -> own<Trap> {
         i::Cast<i::WasmCapiFunctionData>(raw_function_data), args, results);
   }
 
-  DCHECK(IsWasmExportedFunctionData(raw_function_data));
+  SBXCHECK(IsWasmExportedFunctionData(raw_function_data));
   i::DirectHandle<i::WasmExportedFunctionData> function_data{
       i::Cast<i::WasmExportedFunctionData>(raw_function_data), isolate};
   i::DirectHandle<i::WasmTrustedInstanceData> instance_data{
@@ -1766,13 +1768,14 @@ auto Func::call(const Val args[], Val results[]) const -> own<Trap> {
 
   i::Handle<i::Object> object_ref;
   if (function_index < static_cast<int>(module->num_imported_functions)) {
-    object_ref = i::handle(
-        instance_data->dispatch_table_for_imports()->ref(function_index),
-        isolate);
-    if (IsWasmApiFunctionRef(*object_ref)) {
+    object_ref =
+        i::handle(instance_data->dispatch_table_for_imports()->implicit_arg(
+                      function_index),
+                  isolate);
+    if (IsWasmImportData(*object_ref)) {
       i::Tagged<i::JSFunction> jsfunc = i::Cast<i::JSFunction>(
-          i::Cast<i::WasmApiFunctionRef>(*object_ref)->callable());
-      i::Tagged<i::Object> data = jsfunc->shared()->GetData(isolate);
+          i::Cast<i::WasmImportData>(*object_ref)->callable());
+      i::Tagged<i::Object> data = jsfunc->shared()->GetTrustedData(isolate);
       if (IsWasmCapiFunctionData(data)) {
         return CallWasmCapiFunction(i::Cast<i::WasmCapiFunctionData>(data),
                                     args, results);
@@ -1786,6 +1789,8 @@ auto Func::call(const Val args[], Val results[]) const -> own<Trap> {
       DCHECK(IsWasmInstanceObject(*object_ref));
     }
   } else {
+    // TODO(42204563): Avoid crashing if the instance object is not available.
+    CHECK(instance_data->has_instance_object());
     object_ref = handle(instance_data->instance_object(), isolate);
   }
 
@@ -1923,7 +1928,7 @@ auto Global::make(Store* store_abs, const GlobalType* type, const Val& val)
   bool is_mutable = (type->mutability() == VAR);
   const int32_t offset = 0;
   i::Handle<i::WasmGlobalObject> obj =
-      i::WasmGlobalObject::New(isolate, i::Handle<i::WasmInstanceObject>(),
+      i::WasmGlobalObject::New(isolate, i::Handle<i::WasmTrustedInstanceData>(),
                                i::MaybeHandle<i::JSArrayBuffer>(),
                                i::MaybeHandle<i::FixedArray>(), i_type, offset,
                                is_mutable)
@@ -1977,6 +1982,7 @@ auto Global::get() const -> Val {
     case i::wasm::kRtt:
     case i::wasm::kI8:
     case i::wasm::kI16:
+    case i::wasm::kF16:
     case i::wasm::kVoid:
     case i::wasm::kBottom:
       UNREACHABLE();

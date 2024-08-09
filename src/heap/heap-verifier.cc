@@ -4,6 +4,8 @@
 
 #include "src/heap/heap-verifier.h"
 
+#include <optional>
+
 #include "include/v8-locker.h"
 #include "src/base/logging.h"
 #include "src/codegen/assembler-inl.h"
@@ -157,7 +159,7 @@ template <typename TSlot>
 void VerifyPointersVisitor::VerifyPointersImpl(TSlot start, TSlot end) {
   for (TSlot slot = start; slot < end; ++slot) {
     typename TSlot::TObject object = slot.load(cage_base());
-#ifdef V8_ENABLE_DIRECT_LOCAL
+#ifdef V8_ENABLE_DIRECT_HANDLE
     if (object.ptr() == kTaggedNullAddress) continue;
 #endif
     Tagged<HeapObject> heap_object;
@@ -311,8 +313,8 @@ class HeapVerification final : public SpaceVerificationVisitor {
   Heap* const heap_;
   Isolate* const isolate_;
   const PtrComprCageBase cage_base_;
-  base::Optional<AllocationSpace> current_space_identity_;
-  base::Optional<const MemoryChunkMetadata*> current_chunk_;
+  std::optional<AllocationSpace> current_space_identity_;
+  std::optional<const MemoryChunkMetadata*> current_chunk_;
 };
 
 void HeapVerification::Verify() {

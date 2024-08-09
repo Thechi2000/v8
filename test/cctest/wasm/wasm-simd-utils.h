@@ -177,6 +177,9 @@ using Int32ShiftOp = int32_t (*)(int32_t, int);
 using Int64UnOp = int64_t (*)(int64_t);
 using Int64BinOp = int64_t (*)(int64_t, int64_t);
 using Int64ShiftOp = int64_t (*)(int64_t, int);
+using HalfUnOp = uint16_t (*)(uint16_t);
+using HalfBinOp = uint16_t (*)(uint16_t, uint16_t);
+using HalfCompareOp = int16_t (*)(uint16_t, uint16_t);
 using FloatUnOp = float (*)(float);
 using FloatBinOp = float (*)(float, float);
 using FloatCompareOp = int32_t (*)(float, float);
@@ -293,17 +296,30 @@ bool PlatformCanRepresent(T x) {
 #endif
 }
 
+bool isnan(uint16_t f);
+bool IsCanonical(uint16_t actual);
 // Returns true for very small and very large numbers. We skip these test
 // values for the approximation instructions, which don't work at the extremes.
 bool IsExtreme(float x);
 bool IsCanonical(float actual);
 void CheckFloatResult(float x, float y, float expected, float actual,
                       bool exact = true);
+void CheckFloat16LaneResult(float x, float y, float z, uint16_t expected,
+                            uint16_t actual, bool exact = true);
+void CheckFloat16LaneResult(float x, float y, uint16_t expected,
+                            uint16_t actual, bool exact = true);
 
 bool IsExtreme(double x);
 bool IsCanonical(double actual);
 void CheckDoubleResult(double x, double y, double expected, double actual,
                        bool exact = true);
+
+void RunF16x8UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
+                      HalfUnOp expected_op, bool exact = true);
+void RunF16x8BinOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
+                       HalfBinOp expected_op);
+void RunF16x8CompareOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
+                           HalfCompareOp expected_op);
 
 void RunF32x4UnOpTest(TestExecutionTier execution_tier, WasmOpcode opcode,
                       FloatUnOp expected_op, bool exact = true);

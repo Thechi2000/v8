@@ -19,13 +19,15 @@
 
 // This has to come after windows.h.
 #include <VersionHelpers.h>
-#include <dbghelp.h>  // For SymLoadModule64 and al.
-#include <malloc.h>   // For _msize()
-#include <mmsystem.h>  // For timeGetTime().
-#include <psapi.h>     // For GetProcessmMemoryInfo().
-#include <tlhelp32.h>  // For Module32First and al.
+#include <dbghelp.h>            // For SymLoadModule64 and al.
+#include <malloc.h>             // For _msize()
+#include <mmsystem.h>           // For timeGetTime().
+#include <processthreadsapi.h>  // For GetProcessMitigationPolicy().
+#include <psapi.h>              // For GetProcessMemoryInfo().
+#include <tlhelp32.h>           // For Module32First and al.
 
 #include <limits>
+#include <optional>
 
 #include "src/base/bits.h"
 #include "src/base/lazy-instance.h"
@@ -135,10 +137,6 @@ int strncpy_s(char* dest, size_t dest_size, const char* source, size_t count) {
 
 namespace v8 {
 namespace base {
-
-namespace {
-
-}  // namespace
 
 class WindowsTimezoneCache : public TimezoneCache {
  public:
@@ -752,6 +750,38 @@ DEFINE_LAZY_LEAKY_OBJECT_GETTER(RandomNumberGenerator,
                                 GetPlatformRandomNumberGenerator)
 static LazyMutex rng_mutex = LAZY_MUTEX_INITIALIZER;
 
+namespace {
+
+bool UserShadowStackEnabled() {
+  auto is_user_cet_available_in_environment =
+      reinterpret_cast<decltype(&IsUserCetAvailableInEnvironment)>(
+          ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"),
+                           "IsUserCetAvailableInEnvironment"));
+  auto get_process_mitigation_policy =
+      reinterpret_cast<decltype(&GetProcessMitigationPolicy)>(::GetProcAddress(
+          ::GetModuleHandle(L"Kernel32.dll"), "GetProcessMitigationPolicy"));
+
+  if (!is_user_cet_available_in_environment || !get_process_mitigation_policy) {
+    return false;
+  }
+
+  if (!is_user_cet_available_in_environment(
+          USER_CET_ENVIRONMENT_WIN32_PROCESS)) {
+    return false;
+  }
+
+  PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY uss_policy;
+  if (!get_process_mitigation_policy(GetCurrentProcess(),
+                                     ProcessUserShadowStackPolicy, &uss_policy,
+                                     sizeof(uss_policy))) {
+    return false;
+  }
+
+  return uss_policy.EnableUserShadowStack;
+}
+
+}  // namespace
+
 void OS::Initialize(AbortMode abort_mode, const char* const gc_fake_mmap) {
   g_abort_mode = abort_mode;
 }
@@ -782,6 +812,12 @@ void OS::EnsureWin32MemoryAPILoaded() {
 
     loaded = true;
   }
+}
+
+// static
+bool OS::IsHardwareEnforcedShadowStacksEnabled() {
+  static bool cet_enabled = UserShadowStackEnabled();
+  return cet_enabled;
 }
 
 // static
@@ -1092,7 +1128,7 @@ bool OS::CanReserveAddressSpace() {
 }
 
 // static
-Optional<AddressSpaceReservation> OS::CreateAddressSpaceReservation(
+std::optional<AddressSpaceReservation> OS::CreateAddressSpaceReservation(
     void* hint, size_t size, size_t alignment,
     MemoryPermission max_permission) {
   CHECK(CanReserveAddressSpace());
@@ -1314,7 +1350,8 @@ Win32MemoryMappedFile::~Win32MemoryMappedFile() {
   CloseHandle(file_);
 }
 
-Optional<AddressSpaceReservation> AddressSpaceReservation::CreateSubReservation(
+std::optional<AddressSpaceReservation>
+AddressSpaceReservation::CreateSubReservation(
     void* address, size_t size, OS::MemoryPermission max_permission) {
   // Nothing to do, the sub reservation must already have been split by now.
   DCHECK(Contains(address, size));

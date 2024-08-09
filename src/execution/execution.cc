@@ -375,8 +375,9 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
     Handle<NativeContext> context = isolate->native_context();
     if (!IsUndefined(context->script_execution_callback(), isolate)) {
       v8::Context::AbortScriptExecutionCallback callback =
-          v8::ToCData<v8::Context::AbortScriptExecutionCallback>(
-              context->script_execution_callback());
+          v8::ToCData<v8::Context::AbortScriptExecutionCallback,
+                      kApiAbortScriptExecutionCallbackTag>(
+              isolate, context->script_execution_callback());
       v8::Isolate* api_isolate = reinterpret_cast<v8::Isolate*>(isolate);
       v8::Local<v8::Context> api_context = v8::Utils::ToLocal(context);
       callback(api_isolate, api_context);

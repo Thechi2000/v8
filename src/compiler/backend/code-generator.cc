@@ -4,6 +4,9 @@
 
 #include "src/compiler/backend/code-generator.h"
 
+#include <optional>
+
+#include "src/base/bounds.h"
 #include "src/base/iterator.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/macro-assembler-inl.h"
@@ -50,7 +53,7 @@ class CodeGenerator::JumpTable final : public ZoneObject {
 CodeGenerator::CodeGenerator(Zone* codegen_zone, Frame* frame, Linkage* linkage,
                              InstructionSequence* instructions,
                              OptimizedCompilationInfo* info, Isolate* isolate,
-                             base::Optional<OsrHelper> osr_helper,
+                             std::optional<OsrHelper> osr_helper,
                              int start_source_position,
                              JumpOptimizationInfo* jump_opt,
                              const AssemblerOptions& options, Builtin builtin,
@@ -537,7 +540,8 @@ MaybeHandle<Code> CodeGenerator::FinalizeCode() {
 
   if (CodeKindUsesDeoptimizationData(info()->code_kind())) {
     builder.set_deoptimization_data(GenerateDeoptimizationData());
-    DCHECK(info()->has_bytecode_array());
+    DCHECK(info()->has_bytecode_array() ||
+           info()->code_kind() == CodeKind::WASM_FUNCTION);
   }
 
   MaybeHandle<Code> maybe_code = builder.TryBuild();
@@ -1167,6 +1171,8 @@ void CodeGenerator::TranslateStateValueDescriptor(
     translations_.ArgumentsElements(desc->arguments_type());
   } else if (desc->IsArgumentsLength()) {
     translations_.ArgumentsLength();
+  } else if (desc->IsRestLength()) {
+    translations_.RestLength();
   } else if (desc->IsDuplicate()) {
     translations_.DuplicateObject(static_cast<int>(desc->id()));
   } else if (desc->IsPlain()) {
@@ -1358,11 +1364,17 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
     }
   } else if (op->IsFPStackSlot()) {
     switch (type.representation()) {
-      case MachineRepresentation::kFloat64:
-        translations_.StoreDoubleStackSlot(LocationOperand::cast(op)->index());
-        break;
       case MachineRepresentation::kFloat32:
         translations_.StoreFloatStackSlot(LocationOperand::cast(op)->index());
+        break;
+      case MachineRepresentation::kFloat64:
+        if (type.semantic() == MachineSemantic::kHoleyFloat64) {
+          translations_.StoreHoleyDoubleStackSlot(
+              LocationOperand::cast(op)->index());
+        } else {
+          translations_.StoreDoubleStackSlot(
+              LocationOperand::cast(op)->index());
+        }
         break;
       case MachineRepresentation::kSimd128:
         translations_.StoreSimd128StackSlot(LocationOperand::cast(op)->index());
@@ -1402,7 +1414,12 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
         translations_.StoreFloatRegister(converter.ToFloatRegister(op));
         break;
       case MachineRepresentation::kFloat64:
-        translations_.StoreDoubleRegister(converter.ToDoubleRegister(op));
+        if (type.semantic() == MachineSemantic::kHoleyFloat64) {
+          translations_.StoreHoleyDoubleRegister(
+              converter.ToDoubleRegister(op));
+        } else {
+          translations_.StoreDoubleRegister(converter.ToDoubleRegister(op));
+        }
         break;
       case MachineRepresentation::kSimd128:
         translations_.StoreSimd128Register(converter.ToSimd128Register(op));
@@ -1432,7 +1449,9 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
           literal = DeoptimizationLiteral(Float64(constant.ToFloat64()));
           break;
         case MachineRepresentation::kTagged: {
-          Tagged<Smi> smi(static_cast<Address>(constant.ToInt32()));
+          DCHECK(!PointerCompressionIsEnabled() ||
+                 base::IsInRange(constant.ToInt64(), 0u, UINT32_MAX));
+          Tagged<Smi> smi(static_cast<Address>(constant.ToInt64()));
           DCHECK(IsSmi(smi));
           literal = DeoptimizationLiteral(smi);
           break;
@@ -1514,7 +1533,12 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
       case Constant::kFloat64:
         DCHECK(type.representation() == MachineRepresentation::kFloat64 ||
                type.representation() == MachineRepresentation::kTagged);
-        literal = DeoptimizationLiteral(constant.ToFloat64().value());
+        if (type == MachineType::HoleyFloat64() &&
+            constant.ToFloat64().AsUint64() == kHoleNanInt64) {
+          literal = DeoptimizationLiteral::HoleNaN();
+        } else {
+          literal = DeoptimizationLiteral(constant.ToFloat64().value());
+        }
         break;
       case Constant::kHeapObject:
         DCHECK_EQ(MachineRepresentation::kTagged, type.representation());

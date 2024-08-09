@@ -4,7 +4,10 @@
 
 #include "src/deoptimizer/translated-state.h"
 
+#include <inttypes.h>
+
 #include <iomanip>
+#include <optional>
 
 #include "src/base/memory.h"
 #include "src/common/assert-scope.h"
@@ -858,7 +861,7 @@ TranslatedFrame TranslatedFrame::WasmInlinedIntoJSFrame(
 
 TranslatedFrame TranslatedFrame::JSToWasmBuiltinContinuationFrame(
     BytecodeOffset bytecode_offset, Tagged<SharedFunctionInfo> shared_info,
-    int height, base::Optional<wasm::ValueKind> return_kind) {
+    int height, std::optional<wasm::ValueKind> return_kind) {
   TranslatedFrame frame(kJSToWasmBuiltinContinuation, shared_info, height);
   frame.bytecode_offset_ = bytecode_offset;
   frame.return_kind_ = return_kind;
@@ -971,7 +974,6 @@ TranslatedValue DeoptimizationLiteralProvider::Get(TranslatedState* container,
   CHECK(v8_flags.wasm_deopt);
   CHECK_LT(literal_index, literals_off_heap_.size());
   const DeoptimizationLiteral& literal = literals_off_heap_[literal_index];
-  // TODO(mliedtke): We also need to support simd literals.
   switch (literal.kind()) {
     case DeoptimizationLiteralKind::kWasmInt32:
       return TranslatedValue::NewInt32(container, literal.GetInt32());
@@ -1100,7 +1102,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       int return_kind_code = iterator->NextOperand();
-      base::Optional<wasm::ValueKind> return_kind;
+      std::optional<wasm::ValueKind> return_kind;
       if (return_kind_code != kNoWasmReturnKind) {
         return_kind = static_cast<wasm::ValueKind>(return_kind_code);
       }
@@ -1753,16 +1755,28 @@ int TranslatedState::CreateNextTranslatedValue(
         } else {
           switch (translated_value.kind()) {
             case TranslatedValue::Kind::kDouble:
-              PrintF(trace_file, "(wasm double literal %f)",
-                     translated_value.double_value().get_scalar());
+              if (translated_value.double_value().is_nan()) {
+                PrintF(trace_file, "(wasm double literal %f 0x%" PRIx64 ")",
+                       translated_value.double_value().get_scalar(),
+                       translated_value.double_value().get_bits());
+              } else {
+                PrintF(trace_file, "(wasm double literal %f)",
+                       translated_value.double_value().get_scalar());
+              }
               break;
             case TranslatedValue::Kind::kFloat:
-              PrintF(trace_file, "(wasm float literal %f)",
-                     translated_value.float_value().get_scalar());
+              if (translated_value.float_value().is_nan()) {
+                PrintF(trace_file, "(wasm float literal %f 0x%x)",
+                       translated_value.float_value().get_scalar(),
+                       translated_value.float_value().get_bits());
+              } else {
+                PrintF(trace_file, "(wasm float literal %f)",
+                       translated_value.float_value().get_scalar());
+              }
               break;
             case TranslatedValue::Kind::kInt64:
-              PrintF(trace_file, "(wasm int64 literal %lld)",
-                     static_cast<long long>(translated_value.int64_value()));
+              PrintF(trace_file, "(wasm int64 literal %" PRId64 ")",
+                     translated_value.int64_value());
               break;
             case TranslatedValue::Kind::kInt32:
               PrintF(trace_file, "(wasm int32 literal %d)",
@@ -2429,6 +2443,29 @@ void TranslatedState::InitializeJSObjectAt(
           .Relaxed_Store(value);
       INDIRECT_POINTER_WRITE_BARRIER(*object_storage, offset,
                                      kCodeIndirectPointerTag, value);
+#ifdef V8_ENABLE_LEAPTIERING
+    } else if (InstanceTypeChecker::IsJSFunction(map->instance_type()) &&
+               offset == JSFunction::kDispatchHandleOffset) {
+      // The JSDispatchHandle will be materialized as a number, but we need
+      // the raw value here. TODO(saelo): can we implement "proper" support
+      // for JSDispatchHandles in the deoptimizer?
+      DirectHandle<Object> field_value = slot->GetValue();
+      CHECK(IsNumber(*field_value));
+      JSDispatchHandle handle = Object::NumberValue(Cast<Number>(*field_value));
+      object_storage->WriteField<JSDispatchHandle>(
+          JSFunction::kDispatchHandleOffset, handle);
+#endif  // V8_ENABLE_LEAPTIERING
+    } else if (InstanceTypeChecker::IsJSRegExp(map->instance_type()) &&
+               offset == JSRegExp::kDataOffset) {
+      DirectHandle<HeapObject> field_value = slot->storage();
+      CHECK(IsRegExpDataWrapper(*field_value));
+      Tagged<RegExpData> value =
+          Cast<RegExpDataWrapper>(*field_value)->data(isolate());
+      object_storage
+          ->RawIndirectPointerField(offset, kRegExpDataIndirectPointerTag)
+          .Relaxed_Store(value);
+      INDIRECT_POINTER_WRITE_BARRIER(*object_storage, offset,
+                                     kRegExpDataIndirectPointerTag, value);
     } else if (marker == kStoreHeapObject) {
 #else
     if (marker == kStoreHeapObject) {
@@ -2693,7 +2730,7 @@ bool TranslatedState::DoUpdateFeedback() {
   if (!feedback_vector_handle_.is_null()) {
     CHECK(!feedback_slot_.IsInvalid());
     isolate()->CountUsage(v8::Isolate::kDeoptimizerDisableSpeculation);
-    FeedbackNexus nexus(feedback_vector_handle_, feedback_slot_);
+    FeedbackNexus nexus(isolate(), feedback_vector_handle_, feedback_slot_);
     nexus.SetSpeculationMode(SpeculationMode::kDisallowSpeculation);
     return true;
   }

@@ -4,8 +4,9 @@
 
 #include "src/ic/accessor-assembler.h"
 
+#include <optional>
+
 #include "src/ast/ast.h"
-#include "src/base/optional.h"
 #include "src/builtins/builtins-constructor-gen.h"
 #include "src/builtins/builtins-inl.h"
 #include "src/codegen/code-stub-assembler-inl.h"
@@ -215,8 +216,7 @@ void AccessorAssembler::TryEnumeratedKeyedLoad(
   TNode<FixedArray> enum_keys =
       LoadObjectField<FixedArray>(enum_cache, EnumCache::kKeysOffset);
   // |p->enum_index()| comes from the outer loop's ForIn state.
-  TNode<Object> key =
-      LoadFixedArrayElement(enum_keys, TaggedIndexToSmi(p->enum_index()));
+  TNode<Object> key = LoadFixedArrayElement(enum_keys, p->enum_index());
   // Check if |p->name()| matches the key in enum cache. |p->name()| is the
   // "each" variable of a for-in loop, but it can be modified by debugger or
   // other bytecodes.
@@ -225,8 +225,8 @@ void AccessorAssembler::TryEnumeratedKeyedLoad(
       LoadObjectField<FixedArray>(enum_cache, EnumCache::kIndicesOffset);
   // Check if we have enum indices available.
   GotoIf(IsEmptyFixedArray(enum_indices), &no_enum_cache);
-  TNode<Int32T> field_index = SmiToInt32(CAST(
-      LoadFixedArrayElement(enum_indices, TaggedIndexToSmi(p->enum_index()))));
+  TNode<Int32T> field_index =
+      SmiToInt32(CAST(LoadFixedArrayElement(enum_indices, p->enum_index())));
 
   TVARIABLE(Object, result);
   Label if_double(this, Label::kDeferred), done(this, &result);
@@ -416,8 +416,8 @@ void AccessorAssembler::HandleLoadAccessor(
   TNode<MaybeObject> maybe_context = Select<MaybeObject>(
       IsSetWord32<LoadHandler::DoAccessCheckOnLookupStartObjectBits>(
           handler_word),
-      [=] { return LoadHandlerDataField(handler, 3); },
-      [=] { return LoadHandlerDataField(handler, 2); });
+      [=, this] { return LoadHandlerDataField(handler, 3); },
+      [=, this] { return LoadHandlerDataField(handler, 2); });
 
   CSA_DCHECK(this, IsWeakOrCleared(maybe_context));
   CSA_CHECK(this, IsNotCleared(maybe_context));
@@ -1220,7 +1220,8 @@ void AccessorAssembler::HandleLoadICProtoHandler(
       // Code sub-handlers are not expected in LoadICs, so no |on_code_handler|.
       nullptr,
       // on_found_on_lookup_start_object
-      [=](TNode<PropertyDictionary> properties, TNode<IntPtrT> name_index) {
+      [=, this](TNode<PropertyDictionary> properties,
+                TNode<IntPtrT> name_index) {
         if (access_mode == LoadAccessMode::kHas) {
           exit_point->Return(TrueConstant());
         } else {
@@ -1936,7 +1937,7 @@ void AccessorAssembler::HandleStoreICProtoHandler(
   OnCodeHandler on_code_handler;
   if (support_elements == kSupportElements) {
     // Code sub-handlers are expected only in KeyedStoreICs.
-    on_code_handler = [=](TNode<Code> code_handler) {
+    on_code_handler = [=, this](TNode<Code> code_handler) {
       // This is either element store or transitioning element store.
       Label if_element_store(this), if_transitioning_element_store(this);
       Branch(IsStoreHandler0Map(LoadMap(handler)), &if_element_store,
@@ -1967,7 +1968,8 @@ void AccessorAssembler::HandleStoreICProtoHandler(
   TNode<Object> smi_handler = HandleProtoHandler<StoreHandler>(
       p, handler, on_code_handler,
       // on_found_on_lookup_start_object
-      [=](TNode<PropertyDictionary> properties, TNode<IntPtrT> name_index) {
+      [=, this](TNode<PropertyDictionary> properties,
+                TNode<IntPtrT> name_index) {
         TNode<Uint32T> details = LoadDetailsByKeyIndex(properties, name_index);
         // Check that the property is a writable data property (no accessor).
         const int kTypeAndReadOnlyMask =
@@ -2066,13 +2068,13 @@ void AccessorAssembler::HandleStoreICProtoHandler(
       TNode<MaybeObject> maybe_context = Select<MaybeObject>(
           IsSetWord32<StoreHandler::DoAccessCheckOnLookupStartObjectBits>(
               handler_word),
-          [=] { return LoadHandlerDataField(handler, 3); },
-          [=] { return LoadHandlerDataField(handler, 2); });
+          [=, this] { return LoadHandlerDataField(handler, 3); },
+          [=, this] { return LoadHandlerDataField(handler, 2); });
 
       CSA_DCHECK(this, IsWeakOrCleared(maybe_context));
       TNode<Object> context = Select<Object>(
-          IsCleared(maybe_context), [=] { return SmiConstant(0); },
-          [=] { return GetHeapObjectAssumeWeak(maybe_context); });
+          IsCleared(maybe_context), [=, this] { return SmiConstant(0); },
+          [=, this] { return GetHeapObjectAssumeWeak(maybe_context); });
 
       TVARIABLE(Object, api_holder, p->receiver());
       Label store(this);
@@ -2169,7 +2171,7 @@ void AccessorAssembler::HandleStoreICSmiHandlerCase(TNode<Word32T> handler_word,
   BIND(&if_tagged_field);
   {
     Comment("store tagged field");
-    HandleStoreFieldAndReturn(handler_word, holder, value, base::nullopt,
+    HandleStoreFieldAndReturn(handler_word, holder, value, std::nullopt,
                               Representation::Tagged(), miss);
   }
 
@@ -2179,7 +2181,7 @@ void AccessorAssembler::HandleStoreICSmiHandlerCase(TNode<Word32T> handler_word,
     CheckHeapObjectTypeMatchesDescriptor(handler_word, holder, value, miss);
 
     Comment("store heap object field");
-    HandleStoreFieldAndReturn(handler_word, holder, value, base::nullopt,
+    HandleStoreFieldAndReturn(handler_word, holder, value, std::nullopt,
                               Representation::HeapObject(), miss);
   }
 
@@ -2189,7 +2191,7 @@ void AccessorAssembler::HandleStoreICSmiHandlerCase(TNode<Word32T> handler_word,
     GotoIfNot(TaggedIsSmi(value), miss);
 
     Comment("store smi field");
-    HandleStoreFieldAndReturn(handler_word, holder, value, base::nullopt,
+    HandleStoreFieldAndReturn(handler_word, holder, value, std::nullopt,
                               Representation::Smi(), miss);
   }
 
@@ -2284,7 +2286,7 @@ void AccessorAssembler::GotoIfNotSameNumberBitPattern(TNode<Float64T> left,
 
 void AccessorAssembler::HandleStoreFieldAndReturn(
     TNode<Word32T> handler_word, TNode<JSObject> holder, TNode<Object> value,
-    base::Optional<TNode<Float64T>> double_value, Representation representation,
+    std::optional<TNode<Float64T>> double_value, Representation representation,
     Label* miss) {
   bool store_value_as_double = representation.IsDouble();
 
@@ -2741,7 +2743,7 @@ void AccessorAssembler::EmitElementLoad(
 }
 
 void AccessorAssembler::InvalidateValidityCellIfPrototype(
-    TNode<Map> map, base::Optional<TNode<Uint32T>> maybe_bitfield3) {
+    TNode<Map> map, std::optional<TNode<Uint32T>> maybe_bitfield3) {
   Label is_prototype(this), cont(this);
   TNode<Uint32T> bitfield3;
   if (maybe_bitfield3) {
@@ -3951,7 +3953,7 @@ void AccessorAssembler::StoreGlobalIC(const StoreICParameters* pp) {
       StoreICParameters p(
           pp->context(),
           LoadContextElement(native_context, Context::GLOBAL_PROXY_INDEX),
-          pp->name(), pp->value(), base::nullopt, pp->slot(), pp->vector(),
+          pp->name(), pp->value(), std::nullopt, pp->slot(), pp->vector(),
           StoreICMode::kDefault);
 
       HandleStoreICHandlerCase(&p, handler, &miss, ICMode::kGlobalIC);
@@ -4666,12 +4668,12 @@ void AccessorAssembler::GenerateEnumeratedKeyedLoadIC() {
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
-  auto enum_index = Parameter<TaggedIndex>(Descriptor::kEnumIndex);
+  auto enum_index = Parameter<Smi>(Descriptor::kEnumIndex);
   auto cache_type = Parameter<Object>(Descriptor::kCacheType);
   auto slot = Parameter<TaggedIndex>(Descriptor::kSlot);
   auto vector = Parameter<HeapObject>(Descriptor::kVector);
   auto context = Parameter<Context>(Descriptor::kContext);
-  auto lookup_start_object = base::nullopt;
+  auto lookup_start_object = std::nullopt;
 
   LoadICParameters p(context, receiver, name, slot, vector, lookup_start_object,
                      enum_index, cache_type);
@@ -4720,7 +4722,7 @@ void AccessorAssembler::GenerateEnumeratedKeyedLoadICBaseline() {
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
-  auto enum_index = Parameter<TaggedIndex>(Descriptor::kEnumIndex);
+  auto enum_index = Parameter<Smi>(Descriptor::kEnumIndex);
   auto cache_type = Parameter<Object>(Descriptor::kCacheType);
   auto slot = Parameter<TaggedIndex>(Descriptor::kSlot);
   TNode<FeedbackVector> vector = LoadFeedbackVectorFromBaseline();
@@ -4762,11 +4764,11 @@ void AccessorAssembler::GenerateStoreGlobalIC() {
   auto name = Parameter<Object>(Descriptor::kName);
   auto value = Parameter<Object>(Descriptor::kValue);
   auto slot = Parameter<TaggedIndex>(Descriptor::kSlot);
-  auto flags = base::nullopt;
+  auto flags = std::nullopt;
   auto vector = Parameter<HeapObject>(Descriptor::kVector);
   auto context = Parameter<Context>(Descriptor::kContext);
 
-  StoreICParameters p(context, base::nullopt, name, value, flags, slot, vector,
+  StoreICParameters p(context, std::nullopt, name, value, flags, slot, vector,
                       StoreICMode::kDefault);
   StoreGlobalIC(&p);
 }
@@ -4801,7 +4803,7 @@ void AccessorAssembler::GenerateStoreIC() {
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
   auto value = Parameter<Object>(Descriptor::kValue);
-  auto flags = base::nullopt;
+  auto flags = std::nullopt;
   auto slot = Parameter<TaggedIndex>(Descriptor::kSlot);
   auto vector = Parameter<HeapObject>(Descriptor::kVector);
   auto context = Parameter<Context>(Descriptor::kContext);
@@ -4817,7 +4819,7 @@ void AccessorAssembler::GenerateStoreIC_Megamorphic() {
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
   auto value = Parameter<Object>(Descriptor::kValue);
-  auto flags = base::nullopt;
+  auto flags = std::nullopt;
   auto slot = Parameter<TaggedIndex>(Descriptor::kSlot);
   auto vector = Parameter<HeapObject>(Descriptor::kVector);
   auto context = Parameter<Context>(Descriptor::kContext);
@@ -4895,7 +4897,7 @@ void AccessorAssembler::GenerateDefineNamedOwnIC() {
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
   auto value = Parameter<Object>(Descriptor::kValue);
-  auto flags = base::nullopt;
+  auto flags = std::nullopt;
   auto slot = Parameter<TaggedIndex>(Descriptor::kSlot);
   auto vector = Parameter<HeapObject>(Descriptor::kVector);
   auto context = Parameter<Context>(Descriptor::kContext);
@@ -4941,7 +4943,7 @@ void AccessorAssembler::GenerateKeyedStoreIC() {
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
   auto value = Parameter<Object>(Descriptor::kValue);
-  auto flags = base::nullopt;
+  auto flags = std::nullopt;
   auto slot = Parameter<TaggedIndex>(Descriptor::kSlot);
   auto vector = Parameter<HeapObject>(Descriptor::kVector);
   auto context = Parameter<Context>(Descriptor::kContext);
@@ -5045,7 +5047,7 @@ void AccessorAssembler::GenerateStoreInArrayLiteralIC() {
   auto array = Parameter<Object>(Descriptor::kReceiver);
   auto index = Parameter<Object>(Descriptor::kName);
   auto value = Parameter<Object>(Descriptor::kValue);
-  auto flags = base::nullopt;
+  auto flags = std::nullopt;
   auto slot = Parameter<TaggedIndex>(Descriptor::kSlot);
   auto vector = Parameter<HeapObject>(Descriptor::kVector);
   auto context = Parameter<Context>(Descriptor::kContext);
@@ -5142,7 +5144,7 @@ void AccessorAssembler::GenerateCloneObjectIC_Slow() {
   // similar here?
   ForEachEnumerableOwnProperty(
       context, source_map, CAST(source), kPropertyAdditionOrder,
-      [=](TNode<Name> key, LazyNode<Object> value) {
+      [=, this](TNode<Name> key, LazyNode<Object> value) {
         CreateDataProperty(context, result, key, value());
       },
       &runtime_copy);
@@ -5241,103 +5243,15 @@ void AccessorAssembler::GenerateCloneObjectIC() {
     BIND(&if_result_map);
     Comment("CloneObjectIC_if_result_map");
 
-    // Next to the trivial case above the IC supports only JSObjects.
-    // TODO(olivf): To support JSObjects other than JS_OBJECT_TYPE we need to
-    // initialize the the in-object properties below in
-    // `AllocateJSObjectFromMap`.
-    CSA_DCHECK(this, InstanceTypeEqual(LoadMapInstanceType(source_map),
-                                       JS_OBJECT_TYPE));
-    CSA_DCHECK(this, IsStrong(TNode<MaybeObject>(result_map.value())));
-    CSA_DCHECK(this, InstanceTypeEqual(LoadMapInstanceType(result_map.value()),
-                                       JS_OBJECT_TYPE));
-
-    TVARIABLE(HeapObject, var_properties, EmptyFixedArrayConstant());
-    TVARIABLE(FixedArray, var_elements, EmptyFixedArrayConstant());
-
-    // The IC fast case should only be taken if the result map a compatible
-    // elements kind with the source object.
-    TNode<FixedArrayBase> source_elements = LoadElements(CAST(source));
-
-    auto flag = ExtractFixedArrayFlag::kAllFixedArraysDontCopyCOW;
-    var_elements = CAST(CloneFixedArray(source_elements, flag));
-
-    Label allocate_object(this);
-    // Copy the PropertyArray backing store. The source PropertyArray must be
-    // either an Smi, or a PropertyArray.
-    // FIXME: Make a CSA macro for this
-    TNode<Object> source_properties =
-        LoadObjectField(CAST(source), JSObject::kPropertiesOrHashOffset);
-    {
-      GotoIf(TaggedIsSmi(source_properties), &allocate_object);
-      GotoIf(IsEmptyFixedArray(source_properties), &allocate_object);
-
-      // This IC requires that the source object has fast properties.
-      TNode<PropertyArray> source_property_array = CAST(source_properties);
-
-      TNode<IntPtrT> length = LoadPropertyArrayLength(source_property_array);
-      GotoIf(IntPtrEqual(length, IntPtrConstant(0)), &allocate_object);
-
-      TNode<PropertyArray> property_array = AllocatePropertyArray(length);
-      FillPropertyArrayWithUndefined(property_array, IntPtrConstant(0), length);
-      CopyPropertyArrayValues(source_property_array, property_array, length,
-                              SKIP_WRITE_BARRIER, DestroySource::kNo);
-      var_properties = property_array;
-    }
-
-    Goto(&allocate_object);
-    BIND(&allocate_object);
-
-    // Both maps need to be in the same slack tracking state or the unused
-    // fields will be wrongly initialized.
-    static_assert(Map::kNoSlackTracking == 0);
-    CSA_DCHECK(this,
-               Word32Equal(IsSetWord32<Map::Bits3::ConstructionCounterBits>(
-                               LoadMapBitField3(source_map)),
-                           IsSetWord32<Map::Bits3::ConstructionCounterBits>(
-                               LoadMapBitField3(result_map.value()))));
-    TNode<JSObject> object = UncheckedCast<JSObject>(AllocateJSObjectFromMap(
-        result_map.value(), var_properties.value(), var_elements.value(),
-        AllocationFlag::kNone,
-        SlackTrackingMode::kDontInitializeInObjectProperties));
-
-    // Lastly, clone any in-object properties.
-    TNode<IntPtrT> source_start =
-        LoadMapInobjectPropertiesStartInWords(source_map);
-    TNode<IntPtrT> result_start =
-        LoadMapInobjectPropertiesStartInWords(result_map.value());
-    TNode<IntPtrT> result_size = LoadMapInstanceSizeInWords(result_map.value());
-    TNode<IntPtrT> field_offset_difference =
-        TimesTaggedSize(IntPtrSub(result_start, source_start));
-#ifdef DEBUG
-    TNode<IntPtrT> source_size = LoadMapInstanceSizeInWords(source_map);
-    CSA_DCHECK(this, IntPtrGreaterThanOrEqual(
-                         IntPtrSub(source_size, field_offset_difference),
-                         result_size));
-#endif
-
-    // Just copy the fields as raw data (pretending that there are no mutable
-    // HeapNumbers). This doesn't need write barriers.
-    BuildFastLoop<IntPtrT>(
-        result_start, result_size,
-        [=](TNode<IntPtrT> field_index) {
-          TNode<IntPtrT> field_offset = TimesTaggedSize(field_index);
-          TNode<TaggedT> field =
-              LoadObjectField<TaggedT>(CAST(source), field_offset);
-          TNode<IntPtrT> result_offset =
-              IntPtrSub(field_offset, field_offset_difference);
-          StoreObjectFieldNoWriteBarrier(object, result_offset, field);
+    TNode<Object> object = FastCloneJSObject(
+        CAST(source), source_map, result_map.value(),
+        [&](TNode<Map> map, TNode<HeapObject> properties,
+            TNode<FixedArray> elements) {
+          return UncheckedCast<JSObject>(AllocateJSObjectFromMap(
+              map, properties, elements, AllocationFlag::kNone,
+              SlackTrackingMode::kDontInitializeInObjectProperties));
         },
-        1, LoopUnrollingMode::kYes, IndexAdvanceMode::kPost);
-
-    // We need to go through the {object} again here and properly clone them. We
-    // use a second loop here to ensure that the GC (and heap verifier) always
-    // sees properly initialized objects, i.e. never hits undefined values in
-    // double fields.
-    TNode<IntPtrT> start_offset = TimesTaggedSize(result_start);
-    TNode<IntPtrT> end_offset =
-        IntPtrAdd(TimesTaggedSize(result_size), field_offset_difference);
-    ConstructorBuiltinsAssembler(state()).CopyMutableHeapNumbersInObject(
-        object, start_offset, end_offset);
+        true /* target_is_new */);
 
     Return(object);
   }

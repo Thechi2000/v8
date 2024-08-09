@@ -52,6 +52,8 @@ namespace internal {
   V(PropertyArray)                   \
   V(PropertyCell)                    \
   V(PrototypeInfo)                   \
+  V(RegExpBoilerplateDescription)    \
+  V(RegExpDataWrapper)               \
   V(SeqOneByteString)                \
   V(SeqTwoByteString)                \
   V(SharedFunctionInfo)              \
@@ -73,6 +75,7 @@ namespace internal {
   IF_WASM(V, WasmNull)               \
   IF_WASM(V, WasmResumeData)         \
   IF_WASM(V, WasmStruct)             \
+  IF_WASM(V, WasmSuspenderObject)    \
   IF_WASM(V, WasmTypeInfo)           \
   SIMPLE_HEAP_OBJECT_LIST1(V)
 
@@ -82,18 +85,21 @@ namespace internal {
 #define TYPED_VISITOR_WITH_SLACK_ID_LIST(V) \
   V(JSArrayBuffer)                          \
   V(JSDataViewOrRabGsabDataView)            \
+  V(JSDate)                                 \
   V(JSExternalObject)                       \
   V(JSFinalizationRegistry)                 \
   V(JSFunction)                             \
   V(JSObject)                               \
+  V(JSRegExp)                               \
   V(JSSynchronizationPrimitive)             \
   V(JSTypedArray)                           \
   V(JSWeakCollection)                       \
   V(JSWeakRef)                              \
+  IF_WASM(V, WasmGlobalObject)              \
   IF_WASM(V, WasmInstanceObject)            \
-  IF_WASM(V, WasmSuspenderObject)           \
   IF_WASM(V, WasmSuspendingObject)          \
-  IF_WASM(V, WasmTableObject)
+  IF_WASM(V, WasmTableObject)               \
+  IF_WASM(V, WasmTagObject)
 
 // List of visitor ids that can only appear in read-only maps. Unfortunately,
 // these are generally contained in all other lists.
@@ -127,6 +133,8 @@ namespace internal {
   V(PropertyArray)                                        \
   V(PropertyCell)                                         \
   V(PrototypeInfo)                                        \
+  V(RegExpBoilerplateDescription)                         \
+  V(RegExpDataWrapper)                                    \
   V(ScopeInfo)                                            \
   V(SeqOneByteString)                                     \
   V(SeqTwoByteString)                                     \
@@ -137,8 +145,6 @@ namespace internal {
   V(Symbol)                                               \
   V(ThinString)                                           \
   V(TransitionArray)                                      \
-  V(UncompiledDataWithoutPreparseData)                    \
-  V(UncompiledDataWithPreparseData)                       \
   V(WeakArrayList)                                        \
   V(WeakFixedArray)
 

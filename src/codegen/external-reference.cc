@@ -4,6 +4,8 @@
 
 #include "src/codegen/external-reference.h"
 
+#include <optional>
+
 #include "include/v8-fast-api-calls.h"
 #include "src/api/api-inl.h"
 #include "src/base/bits.h"
@@ -207,6 +209,25 @@ constexpr struct alignas(16) {
 
 // Implementation of ExternalReference
 
+bool ExternalReference::IsIsolateFieldId() const {
+  return (raw_ > 0 && raw_ <= static_cast<Address>(kNumIsolateFieldIds));
+}
+
+Address ExternalReference::address() const {
+  // If this CHECK triggers, then an ExternalReference gets created with an
+  // IsolateFieldId where the root register is not available, and therefore
+  // IsolateFieldIds cannot be used, or ExternalReferences with IsolateFieldIds
+  // don't get supported yet and support should be added.
+  CHECK(!IsIsolateFieldId());
+  return raw_;
+}
+
+int32_t ExternalReference::offset_from_root_register() const {
+  CHECK(IsIsolateFieldId());
+  return static_cast<int32_t>(
+      IsolateData::GetOffset(static_cast<IsolateFieldId>(raw_)));
+}
+
 static ExternalReference::Type BuiltinCallTypeForResultSize(int result_size) {
   switch (result_size) {
     case 1:
@@ -239,6 +260,11 @@ ExternalReference ExternalReference::Create(Runtime::FunctionId id) {
 }
 
 // static
+ExternalReference ExternalReference::Create(IsolateFieldId id) {
+  return ExternalReference(id);
+}
+
+// static
 ExternalReference ExternalReference::Create(const Runtime::Function* f) {
   return ExternalReference(
       Redirect(f->entry, BuiltinCallTypeForResultSize(f->result_size)));
@@ -253,8 +279,8 @@ ExternalReference ExternalReference::isolate_address(Isolate* isolate) {
   return ExternalReference(isolate);
 }
 
-ExternalReference ExternalReference::builtins_table(Isolate* isolate) {
-  return ExternalReference(isolate->builtin_table());
+ExternalReference ExternalReference::isolate_address() {
+  return ExternalReference(IsolateFieldId::kIsolateAddress);
 }
 
 ExternalReference ExternalReference::handle_scope_implementer_address(
@@ -303,6 +329,11 @@ ExternalReference ExternalReference::code_pointer_table_address() {
 
 ExternalReference ExternalReference::memory_chunk_metadata_table_address() {
   return ExternalReference(MemoryChunk::MetadataTableAddress());
+}
+
+ExternalReference ExternalReference::js_dispatch_table_address() {
+  // TODO(saelo): maybe rename to js_dispatch_table_base_address?
+  return ExternalReference(GetProcessWideJSDispatchTable()->base_address());
 }
 
 #endif  // V8_ENABLE_SANDBOX
@@ -430,7 +461,7 @@ Address DebugGetCoverageInfo(Isolate* isolate, Address raw_sfi) {
   DisallowGarbageCollection no_gc;
   Tagged<SharedFunctionInfo> sfi =
       Cast<SharedFunctionInfo>(Tagged<Object>(raw_sfi));
-  base::Optional<Tagged<DebugInfo>> debug_info =
+  std::optional<Tagged<DebugInfo>> debug_info =
       isolate->debug()->TryGetDebugInfo(sfi);
   if (debug_info.has_value() && debug_info.value()->HasCoverageInfo()) {
     return debug_info.value()->coverage_info().ptr();
@@ -509,6 +540,7 @@ FUNCTION_REFERENCE(compute_output_frames_function,
 
 #ifdef V8_ENABLE_WEBASSEMBLY
 FUNCTION_REFERENCE(wasm_sync_stack_limit, wasm::sync_stack_limit)
+FUNCTION_REFERENCE(wasm_return_switch, wasm::return_switch)
 FUNCTION_REFERENCE(wasm_switch_to_the_central_stack,
                    wasm::switch_to_the_central_stack)
 FUNCTION_REFERENCE(wasm_switch_from_the_central_stack,
@@ -541,6 +573,8 @@ FUNCTION_REFERENCE(wasm_float64_to_int64_sat,
                    wasm::float64_to_int64_sat_wrapper)
 FUNCTION_REFERENCE(wasm_float64_to_uint64_sat,
                    wasm::float64_to_uint64_sat_wrapper)
+FUNCTION_REFERENCE(wasm_float16_to_float32, wasm::float16_to_float32_wrapper)
+FUNCTION_REFERENCE(wasm_float32_to_float16, wasm::float32_to_float16_wrapper)
 FUNCTION_REFERENCE(wasm_int64_div, wasm::int64_div_wrapper)
 FUNCTION_REFERENCE(wasm_int64_mod, wasm::int64_mod_wrapper)
 FUNCTION_REFERENCE(wasm_uint64_div, wasm::uint64_div_wrapper)
@@ -561,6 +595,41 @@ FUNCTION_REFERENCE(wasm_f32x4_ceil, wasm::f32x4_ceil_wrapper)
 FUNCTION_REFERENCE(wasm_f32x4_floor, wasm::f32x4_floor_wrapper)
 FUNCTION_REFERENCE(wasm_f32x4_trunc, wasm::f32x4_trunc_wrapper)
 FUNCTION_REFERENCE(wasm_f32x4_nearest_int, wasm::f32x4_nearest_int_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_abs, wasm::f16x8_abs_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_neg, wasm::f16x8_neg_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_sqrt, wasm::f16x8_sqrt_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_ceil, wasm::f16x8_ceil_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_floor, wasm::f16x8_floor_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_trunc, wasm::f16x8_trunc_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_nearest_int, wasm::f16x8_nearest_int_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_eq, wasm::f16x8_eq_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_ne, wasm::f16x8_ne_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_lt, wasm::f16x8_lt_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_le, wasm::f16x8_le_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_add, wasm::f16x8_add_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_sub, wasm::f16x8_sub_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_mul, wasm::f16x8_mul_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_div, wasm::f16x8_div_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_min, wasm::f16x8_min_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_max, wasm::f16x8_max_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_pmin, wasm::f16x8_pmin_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_pmax, wasm::f16x8_pmax_wrapper)
+FUNCTION_REFERENCE(wasm_i16x8_sconvert_f16x8,
+                   wasm::i16x8_sconvert_f16x8_wrapper)
+FUNCTION_REFERENCE(wasm_i16x8_uconvert_f16x8,
+                   wasm::i16x8_uconvert_f16x8_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_sconvert_i16x8,
+                   wasm::f16x8_sconvert_i16x8_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_uconvert_i16x8,
+                   wasm::f16x8_uconvert_i16x8_wrapper)
+FUNCTION_REFERENCE(wasm_f32x4_promote_low_f16x8,
+                   wasm::f32x4_promote_low_f16x8_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_demote_f32x4_zero,
+                   wasm::f16x8_demote_f32x4_zero_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_demote_f64x2_zero,
+                   wasm::f16x8_demote_f64x2_zero_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_qfma, wasm::f16x8_qfma_wrapper)
+FUNCTION_REFERENCE(wasm_f16x8_qfms, wasm::f16x8_qfms_wrapper)
 FUNCTION_REFERENCE(wasm_memory_init, wasm::memory_init_wrapper)
 FUNCTION_REFERENCE(wasm_memory_copy, wasm::memory_copy_wrapper)
 FUNCTION_REFERENCE(wasm_memory_fill, wasm::memory_fill_wrapper)
@@ -660,12 +729,6 @@ ExternalReference ExternalReference::is_shared_space_isolate_flag_address(
     Isolate* isolate) {
   return ExternalReference(
       isolate->isolate_data()->is_shared_space_isolate_flag_address());
-}
-
-ExternalReference ExternalReference::uses_shared_heap_flag_address(
-    Isolate* isolate) {
-  return ExternalReference(
-      isolate->isolate_data()->uses_shared_heap_flag_address());
 }
 
 ExternalReference ExternalReference::new_space_allocation_top_address(
@@ -1422,6 +1485,9 @@ template ExternalReference
 ExternalReference::search_string_raw<const base::uc16, const base::uc16>();
 
 ExternalReference ExternalReference::FromRawAddress(Address address) {
+  if (address <= static_cast<Address>(kNumIsolateFieldIds)) {
+    return ExternalReference(static_cast<IsolateFieldId>(address));
+  }
   return ExternalReference(address);
 }
 
@@ -1477,48 +1543,8 @@ ExternalReference ExternalReference::debug_suspended_generator_address(
   return ExternalReference(isolate->debug()->suspended_generator_address());
 }
 
-ExternalReference ExternalReference::fast_c_call_caller_fp_address(
-    Isolate* isolate) {
-  return ExternalReference(
-      isolate->isolate_data()->fast_c_call_caller_fp_address());
-}
-
 ExternalReference ExternalReference::context_address(Isolate* isolate) {
   return ExternalReference(isolate->context_address());
-}
-
-ExternalReference ExternalReference::fast_c_call_caller_pc_address(
-    Isolate* isolate) {
-  return ExternalReference(
-      isolate->isolate_data()->fast_c_call_caller_pc_address());
-}
-
-ExternalReference ExternalReference::fast_api_call_target_address(
-    Isolate* isolate) {
-  return ExternalReference(
-      isolate->isolate_data()->fast_api_call_target_address());
-}
-
-ExternalReference ExternalReference::api_callback_thunk_argument_address(
-    Isolate* isolate) {
-  return ExternalReference(
-      isolate->isolate_data()->api_callback_thunk_argument_address());
-}
-
-ExternalReference ExternalReference::continuation_preserved_embedder_data(
-    Isolate* isolate) {
-  return ExternalReference(
-      isolate->continuation_preserved_embedder_data_address());
-}
-
-ExternalReference ExternalReference::stack_is_iterable_address(
-    Isolate* isolate) {
-  return ExternalReference(
-      isolate->isolate_data()->stack_is_iterable_address());
-}
-
-ExternalReference ExternalReference::execution_mode_address(Isolate* isolate) {
-  return ExternalReference(isolate->isolate_data()->execution_mode_address());
 }
 
 FUNCTION_REFERENCE(call_enqueue_microtask_function,
@@ -1772,7 +1798,7 @@ FUNCTION_REFERENCE(
     JSFinalizationRegistry::RemoveCellFromUnregisterTokenMap)
 
 bool operator==(ExternalReference lhs, ExternalReference rhs) {
-  return lhs.address() == rhs.address();
+  return lhs.raw() == rhs.raw();
 }
 
 bool operator!=(ExternalReference lhs, ExternalReference rhs) {
@@ -1783,15 +1809,41 @@ size_t hash_value(ExternalReference reference) {
   if (v8_flags.predictable) {
     // Avoid ASLR non-determinism in predictable mode. For this, just take the
     // lowest 12 bit corresponding to a 4K page size.
-    return base::hash<Address>()(reference.address() & 0xfff);
+    return base::hash<Address>()(reference.raw() & 0xfff);
   }
-  return base::hash<Address>()(reference.address());
+  return base::hash<Address>()(reference.raw());
 }
 
+namespace {
+static constexpr const char* GetNameOfIsolateFieldId(IsolateFieldId id) {
+  switch (id) {
+#define CASE(id, name, camel)    \
+  case IsolateFieldId::k##camel: \
+    return name;
+    EXTERNAL_REFERENCE_LIST_ISOLATE_FIELDS(CASE)
+#undef CASE
+#define CASE(camel, size, name)  \
+  case IsolateFieldId::k##camel: \
+    return #name;
+    ISOLATE_DATA_FIELDS(CASE)
+#undef CASE
+    default:
+      return "unknown";
+  }
+}
+}  // namespace
+
 std::ostream& operator<<(std::ostream& os, ExternalReference reference) {
-  os << reinterpret_cast<const void*>(reference.address());
-  const Runtime::Function* fn = Runtime::FunctionForEntry(reference.address());
-  if (fn) os << "<" << fn->name << ".entry>";
+  os << reinterpret_cast<const void*>(reference.raw());
+  if (reference.IsIsolateFieldId()) {
+    os << "<"
+       << GetNameOfIsolateFieldId(static_cast<IsolateFieldId>(reference.raw()))
+       << ">";
+  } else {
+    const Runtime::Function* fn =
+        Runtime::FunctionForEntry(reference.address());
+    if (fn) os << "<" << fn->name << ".entry>";
+  }
   return os;
 }
 

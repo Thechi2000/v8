@@ -48,7 +48,8 @@
   V(ExternalConstant)                \
   V(NumberConstant)                  \
   V(PointerConstant)                 \
-  V(HeapConstant)
+  V(HeapConstant)                    \
+  V(TrustedHeapConstant)
 
 // Opcodes for constant operators.
 #define CONSTANT_OP_LIST(V)    \
@@ -173,6 +174,7 @@
   V(JSCreateLiteralObject)       \
   V(JSCreateLiteralRegExp)       \
   V(JSCreateObject)              \
+  V(JSCreateStringWrapper)       \
   V(JSCreatePromise)             \
   V(JSCreateStringIterator)      \
   V(JSCreateTypedArray)          \
@@ -429,6 +431,14 @@
 
 #define SIMPLIFIED_SPECULATIVE_NUMBER_UNOP_LIST(V) V(SpeculativeToNumber)
 
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+#define SIMPLIFIED_CPED_OP_LIST(V)        \
+  V(GetContinuationPreservedEmbedderData) \
+  V(SetContinuationPreservedEmbedderData)
+#else
+#define SIMPLIFIED_CPED_OP_LIST(V)
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+
 #define SIMPLIFIED_OTHER_OP_LIST(V)     \
   V(Allocate)                           \
   V(AllocateRaw)                        \
@@ -534,7 +544,8 @@
   V(TransitionElementsKind)             \
   V(TypeOf)                             \
   V(Unsigned32Divide)                   \
-  V(VerifyType)
+  V(VerifyType)                         \
+  SIMPLIFIED_CPED_OP_LIST(V)
 
 #define SIMPLIFIED_SPECULATIVE_BIGINT_BINOP_LIST(V) \
   V(SpeculativeBigIntAdd)                           \
@@ -909,6 +920,16 @@
   IF_WASM(V, F32x4Trunc)                  \
   IF_WASM(V, F32x4NearestInt)             \
   IF_WASM(V, F32x4DemoteF64x2Zero)        \
+  IF_WASM(V, F16x8Splat)                  \
+  IF_WASM(V, F16x8ExtractLane)            \
+  IF_WASM(V, F16x8ReplaceLane)            \
+  IF_WASM(V, F16x8Abs)                    \
+  IF_WASM(V, F16x8Neg)                    \
+  IF_WASM(V, F16x8Sqrt)                   \
+  IF_WASM(V, F16x8Ceil)                   \
+  IF_WASM(V, F16x8Floor)                  \
+  IF_WASM(V, F16x8Trunc)                  \
+  IF_WASM(V, F16x8NearestInt)             \
   IF_WASM(V, I64x2Splat)                  \
   IF_WASM(V, I64x2SplatI32Pair)           \
   IF_WASM(V, I64x2ExtractLane)            \
@@ -1079,6 +1100,12 @@
   IF_WASM(V, I16x8RelaxedQ15MulRS)        \
   IF_WASM(V, I16x8DotI8x16I7x16S)         \
   IF_WASM(V, I32x4DotI8x16I7x16AddS)      \
+  IF_WASM(V, I8x16AddReduce)              \
+  IF_WASM(V, I16x8AddReduce)              \
+  IF_WASM(V, I32x4AddReduce)              \
+  IF_WASM(V, I64x2AddReduce)              \
+  IF_WASM(V, F32x4AddReduce)              \
+  IF_WASM(V, F64x2AddReduce)              \
   IF_WASM(V, I8x16Shuffle)                \
   IF_WASM(V, V128AnyTrue)                 \
   IF_WASM(V, I64x2AllTrue)                \

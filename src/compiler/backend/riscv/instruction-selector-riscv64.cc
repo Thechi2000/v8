@@ -449,6 +449,7 @@ void InstructionSelectorT<Adapter>::VisitLoad(node_t node) {
       case MachineRepresentation::kSimd256:  // Fall through.
       case MachineRepresentation::kMapWord:  // Fall through.
       case MachineRepresentation::kIndirectPointer:  // Fall through.
+      case MachineRepresentation::kFloat16:          // Fall through.
       case MachineRepresentation::kNone:
         UNREACHABLE();
     }
@@ -565,6 +566,7 @@ void InstructionSelectorT<Adapter>::VisitStore(typename Adapter::node_t node) {
       case MachineRepresentation::kMapWord:  // Fall through.
       case MachineRepresentation::kNone:
       case MachineRepresentation::kProtectedPointer:
+      case MachineRepresentation::kFloat16:
         UNREACHABLE();
     }
 
@@ -670,25 +672,6 @@ void InstructionSelectorT<Adapter>::VisitWord32Xor(node_t node) {
     VisitBinop<Adapter, Int32BinopMatcher>(this, node, kRiscvXor32, true,
                                            kRiscvXor32);
   } else {
-    Int32BinopMatcher m(node);
-    if (m.left().IsWord32Or() && CanCover(node, m.left().node()) &&
-        m.right().Is(-1)) {
-      Int32BinopMatcher mleft(m.left().node());
-      if (!mleft.right().HasResolvedValue()) {
-        RiscvOperandGeneratorT<Adapter> g(this);
-        Emit(kRiscvNor32, g.DefineAsRegister(node),
-             g.UseRegister(mleft.left().node()),
-             g.UseRegister(mleft.right().node()));
-        return;
-      }
-    }
-    if (m.right().Is(-1)) {
-      // Use Nor for bit negation and eliminate constant loading for xori.
-      RiscvOperandGeneratorT<Adapter> g(this);
-      Emit(kRiscvNor32, g.DefineAsRegister(node),
-           g.UseRegister(m.left().node()), g.TempImmediate(0));
-      return;
-    }
     VisitBinop<Adapter, Int32BinopMatcher>(this, node, kRiscvXor32, true,
                                            kRiscvXor32);
   }
@@ -701,25 +684,6 @@ void InstructionSelectorT<Adapter>::VisitWord64Xor(node_t node) {
     VisitBinop<Adapter, Int64BinopMatcher>(this, node, kRiscvXor, true,
                                            kRiscvXor);
   } else {
-    Int64BinopMatcher m(node);
-    if (m.left().IsWord64Or() && CanCover(node, m.left().node()) &&
-        m.right().Is(-1)) {
-      Int64BinopMatcher mleft(m.left().node());
-      if (!mleft.right().HasResolvedValue()) {
-        RiscvOperandGeneratorT<Adapter> g(this);
-        Emit(kRiscvNor, g.DefineAsRegister(node),
-             g.UseRegister(mleft.left().node()),
-             g.UseRegister(mleft.right().node()));
-        return;
-      }
-    }
-    if (m.right().Is(-1)) {
-      // Use Nor for bit negation and eliminate constant loading for xori.
-      RiscvOperandGeneratorT<Adapter> g(this);
-      Emit(kRiscvNor, g.DefineAsRegister(node), g.UseRegister(m.left().node()),
-           g.TempImmediate(0));
-      return;
-    }
     VisitBinop<Adapter, Int64BinopMatcher>(this, node, kRiscvXor, true,
                                            kRiscvXor);
   }
@@ -1079,7 +1043,8 @@ void InstructionSelectorT<TurbofanAdapter>::VisitInt64Mul(Node* node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt32Div(node_t node) {
   if constexpr (Adapter::IsTurboshaft) {
-    VisitRRR(this, kRiscvDiv32, node);
+    VisitRRR(this, kRiscvDiv32, node,
+             OperandGenerator::RegisterUseKind::kUseUniqueRegister);
   } else {
   RiscvOperandGeneratorT<Adapter> g(this);
   Int32BinopMatcher m(node);
@@ -1099,13 +1064,15 @@ void InstructionSelectorT<Adapter>::VisitInt32Div(node_t node) {
     }
   }
   Emit(kRiscvDiv32, g.DefineSameAsFirst(node), g.UseRegister(m.left().node()),
-       g.UseRegister(m.right().node()));
+       g.UseRegister(m.right().node(),
+                     OperandGenerator::RegisterUseKind::kUseUniqueRegister));
   }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitUint32Div(node_t node) {
-  VisitRRR(this, kRiscvDivU32, node);
+  VisitRRR(this, kRiscvDivU32, node,
+           OperandGenerator::RegisterUseKind::kUseUniqueRegister);
 }
 
 template <typename Adapter>
@@ -1142,12 +1109,14 @@ void InstructionSelectorT<Adapter>::VisitUint32Mod(node_t node) {
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt64Div(node_t node) {
-  VisitRRR(this, kRiscvDiv64, node);
+  VisitRRR(this, kRiscvDiv64, node,
+           OperandGenerator::RegisterUseKind::kUseUniqueRegister);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitUint64Div(node_t node) {
-  VisitRRR(this, kRiscvDivU64, node);
+  VisitRRR(this, kRiscvDivU64, node,
+           OperandGenerator::RegisterUseKind::kUseUniqueRegister);
 }
 
 template <typename Adapter>
@@ -1948,6 +1917,7 @@ void InstructionSelectorT<Adapter>::VisitUnalignedLoad(node_t node) {
       case MachineRepresentation::kMapWord:            // Fall through.
       case MachineRepresentation::kIndirectPointer:    // Fall through.
       case MachineRepresentation::kProtectedPointer:   // Fall through.
+      case MachineRepresentation::kFloat16:            // Fall through.
       case MachineRepresentation::kNone:
         UNREACHABLE();
     }
@@ -2021,6 +1991,7 @@ void InstructionSelectorT<Adapter>::VisitUnalignedStore(node_t node) {
       case MachineRepresentation::kMapWord:            // Fall through.
       case MachineRepresentation::kIndirectPointer:    // Fall through.
       case MachineRepresentation::kProtectedPointer:   // Fall through.
+      case MachineRepresentation::kFloat16:
       case MachineRepresentation::kNone:
         UNREACHABLE();
     }
@@ -2836,7 +2807,7 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitWord32Equal(node_t node) {
     // HeapConstants and CompressedHeapConstants can be treated the same when
     // using them as an input to a 32-bit comparison. Check whether either is
     // present.
-    if (MatchTaggedConstant(node, &right) && !right.is_null() &&
+    if (MatchHeapConstant(node, &right) && !right.is_null() &&
         roots_table.IsRootHandle(right, &root_index)) {
       if (RootsTable::IsReadOnly(root_index)) {
         Tagged_t ptr =

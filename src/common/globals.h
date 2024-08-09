@@ -140,6 +140,18 @@ namespace internal {
 #define V8_ENABLE_SANDBOX_BOOL false
 #endif
 
+#if defined(V8_ENABLE_SANDBOX) && !defined(V8_DISABLE_LEAPTIERING)
+// Initially, Leaptiering is only available on sandbox-enabled builds, and so
+// V8_ENABLE_SANDBOX and V8_ENABLE_LEAPTIERING are effectively equivalent. Once
+// completed there, it will be ported to non-sandbox builds, at which point the
+// two defines will be separated from each other. Finally, once Leaptiering is
+// used on all configurations, the define will be removed completely.
+#define V8_ENABLE_LEAPTIERING 1
+#define V8_ENABLE_LEAPTIERING_BOOL true
+#else
+#define V8_ENABLE_LEAPTIERING_BOOL false
+#endif
+
 #ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL true
 #else
@@ -287,6 +299,16 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT true
 #else
 #define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT false
+#endif
+
+// Enable hardware features to make the sandbox memory temporarily inaccessible.
+// This is currently only used with pkeys and in debug mode.
+// TODO(sroettger): add a gn arg to toggle this once we enable it in non-debug
+//                  builds.
+#if V8_HAS_PKU_JIT_WRITE_PROTECT && defined(V8_ENABLE_SANDBOX) && defined(DEBUG)
+#define V8_ENABLE_SANDBOX_HARDWARE_SUPPORT true
+#else
+#define V8_ENABLE_SANDBOX_HARDWARE_SUPPORT false
 #endif
 
 // Determine whether tagged pointers are 8 bytes (used in Torque layouts for
@@ -555,8 +577,10 @@ constexpr int kIndirectPointerSize = sizeof(IndirectPointerHandle);
 // tagged pointers.
 #ifdef V8_ENABLE_SANDBOX
 constexpr int kTrustedPointerSize = kIndirectPointerSize;
+using TrustedPointer_t = TrustedPointerHandle;
 #else
 constexpr int kTrustedPointerSize = kTaggedSize;
+using TrustedPointer_t = Tagged_t;
 #endif
 constexpr int kCodePointerSize = kTrustedPointerSize;
 
@@ -564,6 +588,10 @@ constexpr int kCodePointerSize = kTrustedPointerSize;
 // space base when the sandbox is enabled. Otherwise, they are regular tagged
 // pointers. Either way, they are always kTaggedSize fields.
 constexpr int kProtectedPointerSize = kTaggedSize;
+
+#ifdef V8_ENABLE_LEAPTIERING
+constexpr int kJSDispatchHandleSize = sizeof(JSDispatchHandle);
+#endif
 
 constexpr int kEmbedderDataSlotSize = kSystemPointerSize;
 
@@ -1097,6 +1125,10 @@ using JSPrimitive =
 // or a FixedArray.
 using JSAny = Union<Smi, HeapNumber, BigInt, String, Symbol, Boolean, Null,
                     Undefined, JSReceiver>;
+using JSAnyNotNumeric =
+    Union<String, Symbol, Boolean, Null, Undefined, JSReceiver>;
+using JSAnyNotNumber =
+    Union<BigInt, String, Symbol, Boolean, Null, Undefined, JSReceiver>;
 using JSCallable =
     Union<JSBoundFunction, JSFunction, JSObject, JSProxy, JSWrappedFunction>;
 using MaybeObject = MaybeWeak<Object>;
@@ -1753,15 +1785,16 @@ inline std::ostream& operator<<(std::ostream& os, CreateArgumentsType type) {
 constexpr int kScopeInfoMaxInlinedLocalNamesSize = 75;
 
 enum ScopeType : uint8_t {
-  CLASS_SCOPE,        // The scope introduced by a class.
-  EVAL_SCOPE,         // The top-level scope for an eval source.
-  FUNCTION_SCOPE,     // The top-level scope for a function.
-  MODULE_SCOPE,       // The scope introduced by a module literal
-  SCRIPT_SCOPE,       // The top-level scope for a script or a top-level eval.
-  CATCH_SCOPE,        // The scope introduced by catch.
-  BLOCK_SCOPE,        // The scope introduced by a new block.
-  WITH_SCOPE,         // The scope introduced by with.
-  SHADOW_REALM_SCOPE  // Synthetic scope for ShadowRealm NativeContexts.
+  SCRIPT_SCOPE,        // The top-level scope for a script or a top-level eval.
+  REPL_MODE_SCOPE,     // The top-level scope for a repl-mode script.
+  CLASS_SCOPE,         // The scope introduced by a class.
+  EVAL_SCOPE,          // The top-level scope for an eval source.
+  FUNCTION_SCOPE,      // The top-level scope for a function.
+  MODULE_SCOPE,        // The scope introduced by a module literal
+  CATCH_SCOPE,         // The scope introduced by catch.
+  BLOCK_SCOPE,         // The scope introduced by a new block.
+  WITH_SCOPE,          // The scope introduced by with.
+  SHADOW_REALM_SCOPE,  // Synthetic scope for ShadowRealm NativeContexts.
 };
 
 inline std::ostream& operator<<(std::ostream& os, ScopeType type) {
@@ -1784,6 +1817,8 @@ inline std::ostream& operator<<(std::ostream& os, ScopeType type) {
       return os << "WITH_SCOPE";
     case ScopeType::SHADOW_REALM_SCOPE:
       return os << "SHADOW_REALM_SCOPE";
+    case ScopeType::REPL_MODE_SCOPE:
+      return os << "REPL_MODE_SCOPE";
   }
   UNREACHABLE();
 }
@@ -2554,7 +2589,7 @@ enum class StubCallMode {
 
 enum class NeedsContext { kYes, kNo };
 
-constexpr int kFunctionLiteralIdInvalid = -1;
+constexpr int kInvalidInfoId = -1;
 constexpr int kFunctionLiteralIdTopLevel = 0;
 
 constexpr int kSwissNameDictionaryInitialCapacity = 4;

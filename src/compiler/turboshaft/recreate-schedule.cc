@@ -189,6 +189,9 @@ TURBOSHAFT_SIMPLIFIED_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
 TURBOSHAFT_OTHER_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
 TURBOSHAFT_WASM_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
 SHOULD_HAVE_BEEN_LOWERED(Dead)
+// {AbortCSADcheck} is not emitted in pipelines that still use
+// {RecreateSchedule}.
+SHOULD_HAVE_BEEN_LOWERED(AbortCSADcheck)
 #undef SHOULD_HAVE_BEEN_LOWERED
 
 Node* ScheduleBuilder::ProcessOperation(const WordBinopOp& op) {
@@ -1059,19 +1062,26 @@ Node* ScheduleBuilder::ProcessOperation(const ConstantOp& op) {
       return AddNode(common.HeapConstant(op.handle()), {});
     case ConstantOp::Kind::kCompressedHeapObject:
       return AddNode(common.CompressedHeapConstant(op.handle()), {});
+    case ConstantOp::Kind::kTrustedHeapObject:
+      return AddNode(common.TrustedHeapConstant(op.handle()), {});
     case ConstantOp::Kind::kNumber:
-      return AddNode(common.NumberConstant(op.number()), {});
+      return AddNode(common.NumberConstant(op.number().get_scalar()), {});
     case ConstantOp::Kind::kTaggedIndex:
       return AddNode(common.TaggedIndexConstant(op.tagged_index()), {});
     case ConstantOp::Kind::kFloat64:
-      return AddNode(common.Float64Constant(op.float64()), {});
+      return AddNode(common.Float64Constant(op.float64().get_scalar()), {});
     case ConstantOp::Kind::kFloat32:
-      return AddNode(common.Float32Constant(op.float32()), {});
+      return AddNode(common.Float32Constant(op.float32().get_scalar()), {});
     case ConstantOp::Kind::kRelocatableWasmCall:
       return RelocatableIntPtrConstant(op.integral(), RelocInfo::WASM_CALL);
     case ConstantOp::Kind::kRelocatableWasmStubCall:
       return RelocatableIntPtrConstant(op.integral(),
                                        RelocInfo::WASM_STUB_CALL);
+    case ConstantOp::Kind::kRelocatableWasmCanonicalSignatureId:
+      return AddNode(common.RelocatableInt32Constant(
+                         base::checked_cast<int32_t>(op.integral()),
+                         RelocInfo::WASM_CANONICAL_SIG_ID),
+                     {});
   }
 }
 
@@ -1396,6 +1406,10 @@ std::pair<Node*, MachineType> ScheduleBuilder::BuildDeoptInput(
       return {AddNode(common.ArgumentsLengthState(), {}),
               MachineType::AnyTagged()};
     }
+    case Instr::kRestLength:
+      // For now, kRestLength is only generated when using the Maglev frontend,
+      // which doesn't use recreate-schedule.
+      [[fallthrough]];
     case Instr::kUnusedRegister:
       UNREACHABLE();
   }
@@ -1659,6 +1673,10 @@ Node* ScheduleBuilder::ProcessOperation(const Simd128UnaryOp& op) {
   }
 }
 
+Node* ScheduleBuilder::ProcessOperation(const Simd128ReduceOp& op) {
+  UNIMPLEMENTED();
+}
+
 Node* ScheduleBuilder::ProcessOperation(const Simd128ShiftOp& op) {
   switch (op.kind) {
 #define HANDLE_KIND(kind)             \
@@ -1721,6 +1739,9 @@ Node* ScheduleBuilder::ProcessOperation(const Simd128ExtractLaneOp& op) {
     case Simd128ExtractLaneOp::Kind::kI64x2:
       o = machine.I64x2ExtractLane(op.lane);
       break;
+    case Simd128ExtractLaneOp::Kind::kF16x8:
+      o = machine.F16x8ExtractLane(op.lane);
+      break;
     case Simd128ExtractLaneOp::Kind::kF32x4:
       o = machine.F32x4ExtractLane(op.lane);
       break;
@@ -1746,6 +1767,9 @@ Node* ScheduleBuilder::ProcessOperation(const Simd128ReplaceLaneOp& op) {
       break;
     case Simd128ReplaceLaneOp::Kind::kI64x2:
       o = machine.I64x2ReplaceLane(op.lane);
+      break;
+    case Simd128ReplaceLaneOp::Kind::kF16x8:
+      o = machine.F16x8ReplaceLane(op.lane);
       break;
     case Simd128ReplaceLaneOp::Kind::kF32x4:
       o = machine.F32x4ReplaceLane(op.lane);

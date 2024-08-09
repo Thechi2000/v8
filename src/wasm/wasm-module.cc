@@ -321,8 +321,8 @@ Handle<JSObject> GetTypeForGlobal(Isolate* isolate, bool is_mutable,
 }
 
 Handle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
-                                  base::Optional<uint32_t> max_size,
-                                  bool shared, bool is_memory64) {
+                                  std::optional<uint32_t> max_size, bool shared,
+                                  bool is_memory64) {
   Factory* factory = isolate->factory();
 
   Handle<JSFunction> object_function = isolate->object_function();
@@ -349,7 +349,7 @@ Handle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
 
 Handle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
                                  uint32_t min_size,
-                                 base::Optional<uint32_t> max_size,
+                                 std::optional<uint32_t> max_size,
                                  bool is_table64) {
   Factory* factory = isolate->factory();
 
@@ -393,7 +393,8 @@ Handle<JSArray> GetImports(Isolate* isolate,
   Handle<String> tag_string = factory->InternalizeUtf8String("tag");
 
   // Create the result array.
-  const WasmModule* module = module_object->module();
+  NativeModule* native_module = module_object->native_module();
+  const WasmModule* module = native_module->module();
   int num_imports = static_cast<int>(module->import_table.size());
   Handle<JSArray> array_object = factory->NewJSArray(PACKED_ELEMENTS, 0, 0);
   Handle<FixedArray> storage = factory->NewFixedArray(num_imports);
@@ -405,8 +406,12 @@ Handle<JSArray> GetImports(Isolate* isolate,
   // Populate the result array.
   const WellKnownImportsList& well_known_imports =
       module->type_feedback.well_known_imports;
+  const std::string& magic_string_constants =
+      native_module->compile_imports().constants_module();
   const bool has_magic_string_constants =
-      module->type_feedback.has_magic_string_constants;
+      native_module->compile_imports().contains(
+          CompileTimeImport::kStringConstants);
+
   int cursor = 0;
   for (int index = 0; index < num_imports; ++index) {
     const WasmImport& import = module->import_table[index];
@@ -429,7 +434,7 @@ Handle<JSArray> GetImports(Isolate* isolate,
       case kExternalTable:
         if (enabled_features.has_type_reflection()) {
           auto& table = module->tables[import.index];
-          base::Optional<uint32_t> maximum_size;
+          std::optional<uint32_t> maximum_size;
           if (table.has_maximum_size) maximum_size.emplace(table.maximum_size);
           type_value = GetTypeForTable(isolate, table.type, table.initial_size,
                                        maximum_size, table.is_table64);
@@ -439,7 +444,7 @@ Handle<JSArray> GetImports(Isolate* isolate,
       case kExternalMemory:
         if (enabled_features.has_type_reflection()) {
           auto& memory = module->memories[import.index];
-          base::Optional<uint32_t> maximum_size;
+          std::optional<uint32_t> maximum_size;
           if (memory.has_maximum_pages) {
             maximum_size.emplace(memory.maximum_pages);
           }
@@ -450,10 +455,12 @@ Handle<JSArray> GetImports(Isolate* isolate,
         import_kind = memory_string;
         break;
       case kExternalGlobal:
-        if (has_magic_string_constants && import.module_name.length() == 1 &&
-            module_object->native_module()
-                    ->wire_bytes()[import.module_name.offset()] ==
-                kMagicStringConstantsModuleName) {
+        if (has_magic_string_constants &&
+            import.module_name.length() == magic_string_constants.size() &&
+            std::equal(magic_string_constants.begin(),
+                       magic_string_constants.end(),
+                       module_object->native_module()->wire_bytes().begin() +
+                           import.module_name.offset())) {
           continue;
         }
         if (enabled_features.has_type_reflection()) {
@@ -534,7 +541,7 @@ Handle<JSArray> GetExports(Isolate* isolate,
       case kExternalTable:
         if (enabled_features.has_type_reflection()) {
           auto& table = module->tables[exp.index];
-          base::Optional<uint32_t> maximum_size;
+          std::optional<uint32_t> maximum_size;
           if (table.has_maximum_size) maximum_size.emplace(table.maximum_size);
           type_value = GetTypeForTable(isolate, table.type, table.initial_size,
                                        maximum_size, table.is_table64);
@@ -544,7 +551,7 @@ Handle<JSArray> GetExports(Isolate* isolate,
       case kExternalMemory:
         if (enabled_features.has_type_reflection()) {
           auto& memory = module->memories[exp.index];
-          base::Optional<uint32_t> maximum_size;
+          std::optional<uint32_t> maximum_size;
           if (memory.has_maximum_pages) {
             maximum_size.emplace(memory.maximum_pages);
           }
@@ -657,7 +664,13 @@ int GetSourcePosition(const WasmModule* module, uint32_t func_index,
 }
 
 size_t WasmModule::EstimateStoredSize() const {
-  UPDATE_WHEN_CLASS_CHANGES(WasmModule, 824);
+  UPDATE_WHEN_CLASS_CHANGES(WasmModule,
+#if V8_ENABLE_DRUMBRAKE
+                            920
+#else   // V8_ENABLE_DRUMBRAKE
+                            856
+#endif  // V8_ENABLE_DRUMBRAKE
+  );
   return sizeof(WasmModule) +                            // --
          signature_zone.allocation_size_for_tracing() +  // --
          ContentSize(types) +                            // --
@@ -711,7 +724,7 @@ size_t IndirectNameMap::EstimateCurrentMemoryConsumption() const {
 }
 
 size_t TypeFeedbackStorage::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(TypeFeedbackStorage, 168);
+  UPDATE_WHEN_CLASS_CHANGES(TypeFeedbackStorage, 200);
   UPDATE_WHEN_CLASS_CHANGES(FunctionTypeFeedback, 48);
   // Not including sizeof(TFS) because that's contained in sizeof(WasmModule).
   base::SharedMutexGuard<base::kShared> lock(&mutex);
@@ -720,6 +733,7 @@ size_t TypeFeedbackStorage::EstimateCurrentMemoryConsumption() const {
     result += ContentSize(feedback.feedback_vector);
     result += feedback.call_targets.size() * sizeof(uint32_t);
   }
+  result += ContentSize(deopt_count_for_function);
   // The size of {well_known_imports} can only be estimated at the WasmModule
   // level.
   if (v8_flags.trace_wasm_offheap_memory) {
@@ -729,7 +743,13 @@ size_t TypeFeedbackStorage::EstimateCurrentMemoryConsumption() const {
 }
 
 size_t WasmModule::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(WasmModule, 824);
+  UPDATE_WHEN_CLASS_CHANGES(WasmModule,
+#if V8_ENABLE_DRUMBRAKE
+                            920
+#else   // V8_ENABLE_DRUMBRAKE
+                            856
+#endif  // V8_ENABLE_DRUMBRAKE
+  );
   size_t result = EstimateStoredSize();
 
   result += type_feedback.EstimateCurrentMemoryConsumption();

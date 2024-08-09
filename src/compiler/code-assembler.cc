@@ -4,6 +4,7 @@
 
 #include "src/compiler/code-assembler.h"
 
+#include <optional>
 #include <ostream>
 
 #include "src/builtins/builtins-inl.h"
@@ -319,6 +320,10 @@ TNode<ExternalReference> CodeAssembler::ExternalConstant(
     ExternalReference address) {
   return UncheckedCast<ExternalReference>(
       raw_assembler()->ExternalConstant(address));
+}
+
+TNode<ExternalReference> CodeAssembler::IsolateField(IsolateFieldId id) {
+  return ExternalConstant(ExternalReference::Create(id));
 }
 
 TNode<Float32T> CodeAssembler::Float32Constant(double value) {
@@ -1265,7 +1270,7 @@ Node* CodeAssembler::CallStubRImpl(StubCallMode call_mode,
 Node* CodeAssembler::CallJSStubImpl(const CallInterfaceDescriptor& descriptor,
                                     TNode<Object> target, TNode<Object> context,
                                     TNode<Object> function,
-                                    base::Optional<TNode<Object>> new_target,
+                                    std::optional<TNode<Object>> new_target,
                                     TNode<Int32T> arity,
                                     std::initializer_list<Node*> args) {
   constexpr size_t kMaxNumArgs = 10;
@@ -1349,7 +1354,7 @@ Node* CodeAssembler::CallCFunctionN(Signature<MachineType>* signature,
 }
 
 Node* CodeAssembler::CallCFunction(
-    Node* function, base::Optional<MachineType> return_type,
+    Node* function, std::optional<MachineType> return_type,
     std::initializer_list<CodeAssembler::CFunctionArg> args) {
   return raw_assembler()->CallCFunction(function, return_type, args);
 }

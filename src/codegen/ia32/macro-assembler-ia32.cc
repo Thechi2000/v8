@@ -208,39 +208,33 @@ void MacroAssembler::PushArray(Register array, Register size, Register scratch,
 
 Operand MacroAssembler::ExternalReferenceAsOperand(ExternalReference reference,
                                                    Register scratch) {
-  if (root_array_available() && options().enable_root_relative_access) {
-    intptr_t delta =
-        RootRegisterOffsetForExternalReference(isolate(), reference);
-    return Operand(kRootRegister, delta);
-  }
-  if (root_array_available() && options().isolate_independent_code) {
-    if (IsAddressableThroughRootRegister(isolate(), reference)) {
-      // Some external references can be efficiently loaded as an offset from
-      // kRootRegister.
-      intptr_t offset =
+  if (root_array_available()) {
+    if (reference.IsIsolateFieldId()) {
+      return Operand(kRootRegister, reference.offset_from_root_register());
+    }
+    if (options().enable_root_relative_access) {
+      intptr_t delta =
           RootRegisterOffsetForExternalReference(isolate(), reference);
-      return Operand(kRootRegister, offset);
-    } else {
-      // Otherwise, do a memory load from the external reference table.
-      mov(scratch, Operand(kRootRegister,
-                           RootRegisterOffsetForExternalReferenceTableEntry(
-                               isolate(), reference)));
-      return Operand(scratch, 0);
+      return Operand(kRootRegister, delta);
+    }
+    if (options().isolate_independent_code) {
+      if (IsAddressableThroughRootRegister(isolate(), reference)) {
+        // Some external references can be efficiently loaded as an offset from
+        // kRootRegister.
+        intptr_t offset =
+            RootRegisterOffsetForExternalReference(isolate(), reference);
+        return Operand(kRootRegister, offset);
+      } else {
+        // Otherwise, do a memory load from the external reference table.
+        mov(scratch, Operand(kRootRegister,
+                             RootRegisterOffsetForExternalReferenceTableEntry(
+                                 isolate(), reference)));
+        return Operand(scratch, 0);
+      }
     }
   }
   Move(scratch, Immediate(reference));
   return Operand(scratch, 0);
-}
-
-// TODO(v8:6666): If possible, refactor into a platform-independent function in
-// MacroAssembler.
-Operand MacroAssembler::ExternalReferenceAddressAsOperand(
-    ExternalReference reference) {
-  DCHECK(root_array_available());
-  DCHECK(options().isolate_independent_code);
-  return Operand(
-      kRootRegister,
-      RootRegisterOffsetForExternalReferenceTableEntry(isolate(), reference));
 }
 
 // TODO(v8:6666): If possible, refactor into a platform-independent function in
@@ -299,11 +293,20 @@ void MacroAssembler::StoreRootRelative(int32_t offset, Register value) {
 
 void MacroAssembler::LoadAddress(Register destination,
                                  ExternalReference source) {
-  // TODO(jgruber): Add support for enable_root_relative_access.
-  if (root_array_available() && options().isolate_independent_code) {
-    IndirectLoadExternalReference(destination, source);
-    return;
+  if (root_array_available()) {
+    if (source.IsIsolateFieldId()) {
+      lea(destination,
+          Operand(kRootRegister, source.offset_from_root_register()));
+      return;
+    }
+    if (options().isolate_independent_code) {
+      IndirectLoadExternalReference(destination, source);
+      return;
+    }
   }
+  // External references should not get created with IDs if
+  // `!root_array_available()`.
+  CHECK(!source.IsIsolateFieldId());
   mov(destination, Immediate(source));
 }
 
@@ -1318,15 +1321,10 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& ext,
 
 Operand MacroAssembler::StackLimitAsOperand(StackLimitKind kind) {
   DCHECK(root_array_available());
-  Isolate* isolate = this->isolate();
-  ExternalReference limit =
-      kind == StackLimitKind::kRealStackLimit
-          ? ExternalReference::address_of_real_jslimit(isolate)
-          : ExternalReference::address_of_jslimit(isolate);
-  DCHECK(MacroAssembler::IsAddressableThroughRootRegister(isolate, limit));
+  intptr_t offset = kind == StackLimitKind::kRealStackLimit
+                        ? IsolateData::real_jslimit_offset()
+                        : IsolateData::jslimit_offset();
 
-  intptr_t offset =
-      MacroAssembler::RootRegisterOffsetForExternalReference(isolate, limit);
   CHECK(is_int32(offset));
   return Operand(kRootRegister, static_cast<int32_t>(offset));
 }
@@ -1589,12 +1587,23 @@ void MacroAssembler::Ret(int bytes_dropped, Register scratch) {
 }
 
 void MacroAssembler::Push(Immediate value) {
-  if (root_array_available() && options().isolate_independent_code) {
+  if (root_array_available()) {
+    if (value.is_external_reference()) {
+      ExternalReference reference = value.external_reference();
+      if (reference.IsIsolateFieldId()) {
+        push(kRootRegister);
+        add(Operand(esp, 0), Immediate(reference.offset_from_root_register()));
+        return;
+      }
+      if (options().isolate_independent_code) {
+        push(kRootRegister);
+        add(Operand(esp, 0), Immediate(RootRegisterOffsetForExternalReference(
+                                 isolate(), reference)));
+        return;
+      }
+    }
     if (value.is_embedded_object()) {
       Push(HeapObjectAsOperand(value.embedded_object()));
-      return;
-    } else if (value.is_external_reference()) {
-      Push(ExternalReferenceAddressAsOperand(value.external_reference()));
       return;
     }
   }
@@ -1623,19 +1632,33 @@ void MacroAssembler::Move(Register dst, const Immediate& src) {
   }
 }
 
+namespace {
+bool ShouldUsePushPopForMove(bool root_array_available,
+                             bool isolate_independent_code,
+                             const Immediate& src) {
+  if (root_array_available) {
+    if (src.is_external_reference() &&
+        src.external_reference().IsIsolateFieldId()) {
+      return true;
+    }
+    if (isolate_independent_code) {
+      if (src.is_external_reference()) return true;
+      if (src.is_embedded_object()) return true;
+      if (src.is_heap_number_request()) return true;
+    }
+  }
+  return false;
+}
+}  // namespace
+
 void MacroAssembler::Move(Operand dst, const Immediate& src) {
   // Since there's no scratch register available, take a detour through the
   // stack.
-  if (root_array_available() && options().isolate_independent_code) {
-    if (src.is_embedded_object() || src.is_external_reference() ||
-        src.is_heap_number_request()) {
-      Push(src);
-      pop(dst);
-      return;
-    }
-  }
-
-  if (src.is_embedded_object()) {
+  if (ShouldUsePushPopForMove(root_array_available(),
+                              options().isolate_independent_code, src)) {
+    Push(src);
+    pop(dst);
+  } else if (src.is_embedded_object()) {
     mov(dst, src.embedded_object());
   } else {
     mov(dst, src);
@@ -1950,22 +1973,14 @@ int MacroAssembler::CallCFunction(Register function, int num_arguments,
     if (function == ecx) scratch = edx;
     LoadLabelAddress(pc_scratch, &get_pc);
 
-    // See x64 code for reasoning about how to address the isolate data fields.
-    DCHECK_IMPLIES(!root_array_available(), isolate() != nullptr);
-    mov(root_array_available()
-            ? Operand(kRootRegister,
-                      IsolateData::fast_c_call_caller_pc_offset())
-            : ExternalReferenceAsOperand(
-                  ExternalReference::fast_c_call_caller_pc_address(isolate()),
-                  scratch),
+    // The root array is always available in production code. Only in one unit
+    // test it is not available. The following code is not needed in the unit
+    // test though, so we don't provide code here for the case where the root
+    // array is not available.
+    CHECK(root_array_available());
+    mov(ExternalReferenceAsOperand(IsolateFieldId::kFastCCallCallerPC),
         pc_scratch);
-    mov(root_array_available()
-            ? Operand(kRootRegister,
-                      IsolateData::fast_c_call_caller_fp_offset())
-            : ExternalReferenceAsOperand(
-                  ExternalReference::fast_c_call_caller_fp_address(isolate()),
-                  scratch),
-        ebp);
+    mov(ExternalReferenceAsOperand(IsolateFieldId::kFastCCallCallerFP), ebp);
   }
 
   call(function);
@@ -1975,13 +1990,7 @@ int MacroAssembler::CallCFunction(Register function, int num_arguments,
 
   if (set_isolate_data_slots == SetIsolateDataSlots::kYes) {
     // We don't unset the PC; the FP is the source of truth.
-    Register scratch = ecx;
-    mov(root_array_available()
-            ? Operand(kRootRegister,
-                      IsolateData::fast_c_call_caller_fp_offset())
-            : ExternalReferenceAsOperand(
-                  ExternalReference::fast_c_call_caller_fp_address(isolate()),
-                  scratch),
+    mov(ExternalReferenceAsOperand(IsolateFieldId::kFastCCallCallerFP),
         Immediate(0));
   }
 
@@ -2281,8 +2290,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
   Label profiler_or_side_effects_check_enabled, done_api_call;
   if (with_profiling) {
     __ RecordComment("Check if profiler or side effects check is enabled");
-    __ cmpb(__ ExternalReferenceAsOperand(ER::execution_mode_address(isolate),
-                                          no_reg),
+    __ cmpb(__ ExternalReferenceAsOperand(IsolateFieldId::kExecutionMode),
             Immediate(0));
     __ j(not_zero, &profiler_or_side_effects_check_enabled);
 #ifdef V8_RUNTIME_CALL_STATS
@@ -2353,7 +2361,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     // Additional parameter is the address of the actual callback function.
     if (thunk_arg.is_valid()) {
       MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
-          ER::api_callback_thunk_argument_address(isolate), no_reg);
+          IsolateFieldId::kApiCallbackThunkArgument);
       __ mov(thunk_arg_mem_op, thunk_arg);
     }
     __ Move(scratch, Immediate(thunk_ref));
@@ -2373,7 +2381,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     // Save the return value in a callee-save register.
     Register saved_result = prev_limit_reg;
     __ mov(saved_result, return_value);
-    __ Move(scratch, Immediate(ER::isolate_address(isolate)));
+    __ Move(scratch, Immediate(ER::isolate_address()));
     __ mov(Operand(esp, 0), scratch);
     __ Move(scratch, Immediate(ER::delete_handle_scope_extensions()));
     __ call(scratch);

@@ -7,4 +7,7 @@ specific_include_rules = {
     "+src/compiler/pipeline.h",
     "+src/compiler/turboshaft/phase.h",
   ],
+  ".*-tsa.cc": [
+    "+src/compiler",
+  ],
 }

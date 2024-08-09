@@ -732,7 +732,7 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
 
       CHECK(shared->HasUncompiledDataWithPreparseData());
       i::Handle<i::PreparseData> produced_data_on_heap(
-          shared->uncompiled_data_with_preparse_data()->preparse_data(),
+          shared->uncompiled_data_with_preparse_data(isolate)->preparse_data(),
           isolate);
 
       i::UnoptimizedCompileFlags flags =
@@ -798,6 +798,43 @@ TEST_F(PreParserTest, Regress753896) {
   // error is not detected inside lazy functions, but it might be in the future.
   i::parsing::ParseProgram(&info, script, isolate,
                            i::parsing::ReportStatisticsMode::kYes);
+}
+
+TEST_F(PreParserTest, TopLevelArrowFunctions) {
+  constexpr char kSource[] = R"(
+    var a = () => { return 4; };
+    var b = (() => { return 4; });
+    var c = x => x + 2;
+    var d = (x => x + 2);
+    var e = (x, y, z) => x + y + z;
+    var f = ((x, y, z) => x + y + z);
+    // Functions declared within default parameters are also top-level.
+    var g = (x = (y => y * 2)) => { return x; };
+    var h = ((x = y => y * 2) => { return x; });
+    var i = (x = (y) => 0) => { return x; };
+  )";
+  i::Isolate* isolate = i_isolate();
+  i::HandleScope scope(isolate);
+  TryRunJS(kSource).ToLocalChecked();
+  auto IsCompiled = [&](const char* name) {
+    Local<Value> v = TryRunJS(name).ToLocalChecked();
+    i::DirectHandle<i::Object> o = v8::Utils::OpenDirectHandle(*v);
+    i::DirectHandle<i::JSFunction> f = i::Cast<i::JSFunction>(o);
+    i::Handle<i::SharedFunctionInfo> shared = i::handle(f->shared(), isolate);
+    return shared->is_compiled();
+  };
+  EXPECT_FALSE(IsCompiled("a"));
+  EXPECT_TRUE(IsCompiled("b"));
+  EXPECT_FALSE(IsCompiled("c"));
+  EXPECT_TRUE(IsCompiled("d"));
+  EXPECT_FALSE(IsCompiled("e"));
+  EXPECT_TRUE(IsCompiled("f"));
+  EXPECT_FALSE(IsCompiled("g"));
+  EXPECT_TRUE(IsCompiled("h"));
+  EXPECT_FALSE(IsCompiled("i"));
+  EXPECT_TRUE(IsCompiled("g()"));
+  EXPECT_FALSE(IsCompiled("h()"));
+  EXPECT_FALSE(IsCompiled("i()"));
 }
 
 TEST_F(PreParserTest, ProducingAndConsumingByteData) {

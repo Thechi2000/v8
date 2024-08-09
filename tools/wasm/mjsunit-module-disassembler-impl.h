@@ -304,6 +304,7 @@ class MjsunitNamesProvider {
       case kI16:  out << "kWasmI16";  return;
       case kI32:  out << "kWasmI32";  return;
       case kI64:  out << "kWasmI64";  return;
+      case kF16:  out << "kWasmF16";  return;
       case kF32:  out << "kWasmF32";  return;
       case kF64:  out << "kWasmF64";  return;
       case kS128: out << "kWasmS128"; return;
@@ -1110,7 +1111,7 @@ class MjsunitModuleDis {
             "that can be\n"
             "// found in the LICENSE file.\n"
             "\n"
-            "// Flags: --wasm-staging\n"
+            "// Flags: --wasm-staging --wasm-inlining-call-indirect\n"
             "\n"
             "d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');\n"
             "\n"
@@ -1177,8 +1178,11 @@ class MjsunitModuleDis {
           break;
         }
       }
-      for (uint32_t pre = i; pre < std::min(recgroup.end_type_index, i + 1);
-           pre++) {
+      uint32_t end_index =
+          recgroup.end_type_index != OffsetsProvider::RecGroup::kInvalid
+              ? recgroup.end_type_index
+              : i + 1;
+      for (uint32_t pre = i; pre < end_index; pre++) {
         if (needed_at[pre] == i) {
           out_ << "let ";
           names()->PrintTypeVariableName(out_, pre);

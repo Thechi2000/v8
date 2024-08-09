@@ -243,12 +243,10 @@ type ExternalPointer
     generates 'TNode<ExternalPointerT>' constexpr 'ExternalPointer_t';
 type CppHeapPointer
     generates 'TNode<CppHeapPointerT>' constexpr 'CppHeapPointer_t';
-type IndirectPointer
-    generates 'TNode<IndirectPointerHandleT>'
-    constexpr 'IndirectPointerHandle';
-// TODO(saelo): implement accessors and type checkers for these fields.
-type IndirectPointer<To : type extends ExposedTrustedObject> extends
-    IndirectPointer;
+type TrustedPointer
+    generates 'TNode<TrustedPointerT>' constexpr 'TrustedPointer_t';
+type TrustedPointer<To : type extends ExposedTrustedObject> extends
+    TrustedPointer;
 type ProtectedPointer extends Tagged;
 type ProtectedPointer<To : type extends TrustedObject> extends ProtectedPointer;
 extern class InstructionStream extends TrustedObject;
@@ -1317,7 +1315,6 @@ extern macro ChangeUint32ToWord(uint32): uintptr;  // Doesn't sign-extend.
 extern macro ChangeInt32ToInt64(int32): int64;  // Sign-extends.
 extern macro ChangeUint32ToUint64(uint32): uint64;  // Doesn't sign-extend.
 extern macro LoadNativeContext(Context): NativeContext;
-extern macro GetContinuationPreservedEmbedderData(): Object;
 extern macro TruncateFloat64ToFloat16(float64): float16;
 extern macro TruncateFloat32ToFloat16(float32): float16;
 extern macro TruncateFloat64ToFloat32(float64): float32;
@@ -1485,6 +1482,9 @@ macro GetArrayBufferNoInitFunction(implicit context: Context)(): JSFunction {
 }
 macro GetIteratorFunction(implicit context: Context)(): JSFunction {
   return *NativeContextSlot(ContextSlot::ITERATOR_FUNCTION_INDEX);
+}
+macro GetStringFunction(implicit context: Context)(): JSFunction {
+  return *NativeContextSlot(ContextSlot::STRING_FUNCTION_INDEX);
 }
 macro GetFastPackedElementsJSArrayMap(implicit context: Context)(): Map {
   return *NativeContextSlot(ContextSlot::JS_ARRAY_PACKED_ELEMENTS_MAP_INDEX);

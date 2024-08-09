@@ -5,6 +5,7 @@
 #include "src/compiler/js-call-reducer.h"
 
 #include <functional>
+#include <optional>
 
 #include "src/base/container-utils.h"
 #include "src/base/small-vector.h"
@@ -21,6 +22,7 @@
 #include "src/compiler/fast-api-calls.h"
 #include "src/compiler/feedback-source.h"
 #include "src/compiler/graph-assembler.h"
+#include "src/compiler/heap-refs.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/js-operator.h"
 #include "src/compiler/linkage.h"
@@ -271,16 +273,18 @@ class JSCallReducerAssembler : public JSGraphAssembler {
 
   ForBuilder0 ForZeroUntil(TNode<Number> excluded_limit) {
     TNode<Number> initial_value = ZeroConstant();
-    auto cond = [=](TNode<Number> i) {
+    auto cond = [=, this](TNode<Number> i) {
       return NumberLessThan(i, excluded_limit);
     };
-    auto step = [=](TNode<Number> i) { return NumberAdd(i, OneConstant()); };
+    auto step = [=, this](TNode<Number> i) {
+      return NumberAdd(i, OneConstant());
+    };
     return {this, initial_value, cond, step};
   }
 
   ForBuilder0 Forever(TNode<Number> initial_value, const StepFunction1& step) {
-    return {this, initial_value, [=](TNode<Number>) { return TrueConstant(); },
-            step};
+    return {this, initial_value,
+            [=, this](TNode<Number>) { return TrueConstant(); }, step};
   }
 
   using For1BodyFunction = std::function<void(TNode<Number>, TNode<Object>*)>;
@@ -353,10 +357,12 @@ class JSCallReducerAssembler : public JSGraphAssembler {
   ForBuilder1 For1ZeroUntil(TNode<Number> excluded_limit,
                             TNode<Object> initial_arg0) {
     TNode<Number> initial_value = ZeroConstant();
-    auto cond = [=](TNode<Number> i) {
+    auto cond = [=, this](TNode<Number> i) {
       return NumberLessThan(i, excluded_limit);
     };
-    auto step = [=](TNode<Number> i) { return NumberAdd(i, OneConstant()); };
+    auto step = [=, this](TNode<Number> i) {
+      return NumberAdd(i, OneConstant());
+    };
     return {this, initial_value, cond, step, initial_arg0};
   }
 
@@ -871,7 +877,7 @@ TNode<Object> JSCallReducerAssembler::CopyNode() {
 TNode<JSArray> JSCallReducerAssembler::CreateArrayNoThrow(
     TNode<Object> ctor, TNode<Number> size, FrameState frame_state) {
   return AddNode<JSArray>(
-      graph()->NewNode(javascript()->CreateArray(1, base::nullopt), ctor, ctor,
+      graph()->NewNode(javascript()->CreateArray(1, std::nullopt), ctor, ctor,
                        size, ContextInput(), frame_state, effect(), control()));
 }
 
@@ -1751,7 +1757,7 @@ struct MapFrameStateParams {
   TNode<Object> receiver;
   TNode<Object> callback;
   TNode<Object> this_arg;
-  base::Optional<TNode<JSArray>> a;
+  std::optional<TNode<JSArray>> a;
   TNode<Object> original_length;
 };
 
@@ -2700,7 +2706,7 @@ Reduction JSCallReducer::ReduceArrayConstructor(Node* node) {
   NodeProperties::ReplaceValueInput(node, target, 0);
   NodeProperties::ReplaceValueInput(node, target, 1);
   NodeProperties::ChangeOp(node,
-                           javascript()->CreateArray(arity, base::nullopt));
+                           javascript()->CreateArray(arity, std::nullopt));
   return Changed(node);
 }
 
@@ -3832,10 +3838,13 @@ Reduction JSCallReducer::ReduceCallWasmFunction(Node* node,
   if (shared.object()->HasWasmExportedFunctionData()) {
     // TODO(jkummerow): Introduce a pointer from WasmExportedFunctionData
     // to WasmTrustedInstanceData.
-    Tagged<ExposedTrustedObject> ref =
-        shared.object()->wasm_exported_function_data()->internal()->ref();
-    if (!IsWasmTrustedInstanceData(ref)) return NoChange();
-    native_module = Cast<WasmTrustedInstanceData>(ref)->native_module();
+    Tagged<TrustedObject> implicit_arg = shared.object()
+                                             ->wasm_exported_function_data()
+                                             ->internal()
+                                             ->implicit_arg();
+    if (!IsWasmTrustedInstanceData(implicit_arg)) return NoChange();
+    native_module =
+        Cast<WasmTrustedInstanceData>(implicit_arg)->native_module();
   }
   // TODO(mliedtke): We should be able to remove module, signature, native
   // module and function index from the SharedFunctionInfoRef. However, for some
@@ -4966,6 +4975,12 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
     case Builtin::kDataViewPrototypeGetFloat64:
       return ReduceDataViewAccess(node, DataViewAccess::kGet,
                                   ExternalArrayType::kExternalFloat64Array);
+    case Builtin::kDataViewPrototypeGetBigInt64:
+      return ReduceDataViewAccess(node, DataViewAccess::kGet,
+                                  ExternalArrayType::kExternalBigInt64Array);
+    case Builtin::kDataViewPrototypeGetBigUint64:
+      return ReduceDataViewAccess(node, DataViewAccess::kGet,
+                                  ExternalArrayType::kExternalBigUint64Array);
     case Builtin::kDataViewPrototypeSetUint8:
       return ReduceDataViewAccess(node, DataViewAccess::kSet,
                                   ExternalArrayType::kExternalUint8Array);
@@ -4990,6 +5005,12 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
     case Builtin::kDataViewPrototypeSetFloat64:
       return ReduceDataViewAccess(node, DataViewAccess::kSet,
                                   ExternalArrayType::kExternalFloat64Array);
+    case Builtin::kDataViewPrototypeSetBigInt64:
+      return ReduceDataViewAccess(node, DataViewAccess::kSet,
+                                  ExternalArrayType::kExternalBigInt64Array);
+    case Builtin::kDataViewPrototypeSetBigUint64:
+      return ReduceDataViewAccess(node, DataViewAccess::kSet,
+                                  ExternalArrayType::kExternalBigUint64Array);
     case Builtin::kTypedArrayPrototypeByteLength:
       return ReduceArrayBufferViewByteLengthAccessor(node, JS_TYPED_ARRAY_TYPE);
     case Builtin::kTypedArrayPrototypeByteOffset:
@@ -5189,6 +5210,12 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
     case Builtin::kBigIntAsIntN:
     case Builtin::kBigIntAsUintN:
       return ReduceBigIntAsN(node, builtin);
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+    case Builtin::kGetContinuationPreservedEmbedderData:
+      return ReduceGetContinuationPreservedEmbedderData(node);
+    case Builtin::kSetContinuationPreservedEmbedderData:
+      return ReduceSetContinuationPreservedEmbedderData(node);
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
     default:
       break;
   }
@@ -5294,7 +5321,7 @@ Reduction JSCallReducer::ReduceJSCallWithArrayLike(Node* node) {
     return NoChange();
   }
 
-  base::Optional<Reduction> maybe_result =
+  std::optional<Reduction> maybe_result =
       TryReduceJSCallMathMinMaxWithArrayLike(node);
   if (maybe_result.has_value()) {
     return maybe_result.value();
@@ -5431,7 +5458,7 @@ Reduction JSCallReducer::ReduceJSConstruct(Node* node) {
           node->ReplaceInput(n.NewTargetIndex(), new_target);
           node->RemoveInput(n.FeedbackVectorIndex());
           NodeProperties::ChangeOp(
-              node, javascript()->CreateArray(arity, base::nullopt));
+              node, javascript()->CreateArray(arity, std::nullopt));
           return Changed(node);
         }
         case Builtin::kObjectConstructor: {
@@ -5461,6 +5488,8 @@ Reduction JSCallReducer::ReduceJSConstruct(Node* node) {
         }
         case Builtin::kPromiseConstructor:
           return ReducePromiseConstructor(node);
+        case Builtin::kStringConstructor:
+          return ReduceStringConstructor(node, function);
         case Builtin::kTypedArrayConstructor:
           return ReduceTypedArrayConstructor(node, function.shared(broker()));
         default:
@@ -7057,7 +7086,7 @@ Reduction JSCallReducer::ReduceStringPrototypeLocaleCompare(Node* node) {
         ObjectRef ref = m.Ref(broker());
         if (!ref.IsString()) return NoChange();
         StringRef sref = ref.AsString();
-        if (base::Optional<Handle<String>> maybe_locales =
+        if (std::optional<Handle<String>> maybe_locales =
                 sref.ObjectIfContentAccessible(broker())) {
           locales = *maybe_locales;
         } else {
@@ -7210,6 +7239,88 @@ Reduction JSCallReducer::ReduceStringPrototypeConcat(Node* node) {
 
   ReplaceWithValue(node, value, effect, control);
   return Replace(value);
+}
+
+namespace {
+
+FrameState CreateStringCreateLazyDeoptContinuationFrameState(
+    JSGraph* graph, SharedFunctionInfoRef shared, Node* target, Node* context,
+    Node* outer_frame_state) {
+  Node* const receiver = graph->TheHoleConstant();
+  Node* stack_parameters[]{receiver};
+  const int stack_parameter_count = arraysize(stack_parameters);
+  return CreateJavaScriptBuiltinContinuationFrameState(
+      graph, shared, Builtin::kStringCreateLazyDeoptContinuation, target,
+      context, stack_parameters, stack_parameter_count, outer_frame_state,
+      ContinuationFrameStateMode::LAZY);
+}
+
+}  // namespace
+
+Reduction JSCallReducer::ReduceStringConstructor(Node* node,
+                                                 JSFunctionRef constructor) {
+  JSConstructNode n(node);
+  if (n.target() != n.new_target()) return NoChange();
+
+  DCHECK_EQ(constructor, native_context().string_function(broker_));
+  DCHECK(constructor.initial_map(broker_).IsJSPrimitiveWrapperMap());
+
+  Node* context = n.context();
+  FrameState frame_state = n.frame_state();
+  Effect effect = n.effect();
+  Control control = n.control();
+
+  Node* primitive_value;
+  if (n.ArgumentCount() == 0) {
+    primitive_value = jsgraph()->EmptyStringConstant();
+  } else {
+    // Insert a construct stub frame into the chain of frame states. This will
+    // reconstruct the proper frame when deoptimizing within the constructor.
+    frame_state = CreateConstructInvokeStubFrameState(
+        node, frame_state, constructor.shared(broker_), context, common(),
+        graph());
+
+    // This continuation takes the newly created primitive string, and wraps it
+    // in a string wrapper, matching CreateStringWrapper.
+    Node* continuation_frame_state =
+        CreateStringCreateLazyDeoptContinuationFrameState(
+            jsgraph(), constructor.shared(broker_), n.target(), context,
+            frame_state);
+
+    primitive_value = effect = control =
+        graph()->NewNode(javascript()->ToString(), n.Argument(0), context,
+                         continuation_frame_state, effect, control);
+
+    // Rewire potential exception edges.
+    Node* on_exception = nullptr;
+    if (NodeProperties::IsExceptionalCall(node, &on_exception)) {
+      // Create appropriate {IfException} and {IfSuccess} nodes.
+      Node* if_exception =
+          graph()->NewNode(common()->IfException(), effect, control);
+      control = graph()->NewNode(common()->IfSuccess(), control);
+
+      // Join the exception edges.
+      Node* merge =
+          graph()->NewNode(common()->Merge(2), if_exception, on_exception);
+      Node* ephi = graph()->NewNode(common()->EffectPhi(2), if_exception,
+                                    on_exception, merge);
+      Node* phi =
+          graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, 2),
+                           if_exception, on_exception, merge);
+      ReplaceWithValue(on_exception, phi, ephi, merge);
+      merge->ReplaceInput(1, on_exception);
+      ephi->ReplaceInput(1, on_exception);
+      phi->ReplaceInput(1, on_exception);
+    }
+  }
+
+  RelaxControls(node, control);
+  node->ReplaceInput(0, primitive_value);
+  node->ReplaceInput(1, context);
+  node->ReplaceInput(2, effect);
+  node->TrimInputCount(3);
+  NodeProperties::ChangeOp(node, javascript()->CreateStringWrapper());
+  return Changed(node);
 }
 
 Reduction JSCallReducer::ReducePromiseConstructor(Node* node) {
@@ -8308,6 +8419,12 @@ Reduction JSCallReducer::ReduceDataViewAccess(Node* node, DataViewAccess access,
   Node* receiver = n.receiver();
   Node* offset = n.ArgumentOr(0, jsgraph()->ZeroConstant());
   Node* value = nullptr;
+
+  if (!Is64() && (element_type == kExternalBigInt64Array ||
+                  element_type == kExternalBigUint64Array)) {
+    return NoChange();
+  }
+
   if (access == DataViewAccess::kSet) {
     value = n.ArgumentOrUndefined(1, jsgraph());
   }
@@ -8370,10 +8487,18 @@ Reduction JSCallReducer::ReduceDataViewAccess(Node* node, DataViewAccess access,
 
   // Coerce {value} to Number.
   if (access == DataViewAccess::kSet) {
-    value = effect = graph()->NewNode(
-        simplified()->SpeculativeToNumber(NumberOperationHint::kNumberOrOddball,
-                                          p.feedback()),
-        value, effect, control);
+    if (element_type == kExternalBigInt64Array ||
+        element_type == kExternalBigUint64Array) {
+      value = effect =
+          graph()->NewNode(simplified()->SpeculativeToBigInt(
+                               BigIntOperationHint::kBigInt, p.feedback()),
+                           value, effect, control);
+    } else {
+      value = effect = graph()->NewNode(
+          simplified()->SpeculativeToNumber(
+              NumberOperationHint::kNumberOrOddball, p.feedback()),
+          value, effect, control);
+    }
   }
 
   // We need to retain either the {receiver} itself or it's backing
@@ -8548,7 +8673,7 @@ Reduction JSCallReducer::ReduceNumberParseInt(Node* node) {
       return Replace(value);
     }
 
-    base::Optional<double> number = input_value.ToInt(broker(), radix_value);
+    std::optional<double> number = input_value.ToInt(broker(), radix_value);
     if (number.has_value()) {
       Node* result = graph()->NewNode(common()->NumberConstant(number.value()));
       ReplaceWithValue(node, result);
@@ -8743,9 +8868,9 @@ Reduction JSCallReducer::ReduceBigIntAsN(Node* node, Builtin builtin) {
   return NoChange();
 }
 
-base::Optional<Reduction> JSCallReducer::TryReduceJSCallMathMinMaxWithArrayLike(
+std::optional<Reduction> JSCallReducer::TryReduceJSCallMathMinMaxWithArrayLike(
     Node* node) {
-  if (!v8_flags.turbo_optimize_math_minmax) return base::nullopt;
+  if (!v8_flags.turbo_optimize_math_minmax) return std::nullopt;
 
   JSCallWithArrayLikeNode n(node);
   CallParameters const& p = n.Parameters();
@@ -8754,15 +8879,15 @@ base::Optional<Reduction> JSCallReducer::TryReduceJSCallMathMinMaxWithArrayLike(
   Control control = n.control();
 
   if (p.speculation_mode() == SpeculationMode::kDisallowSpeculation) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   if (n.ArgumentCount() != 1) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   if (!dependencies()->DependOnNoElementsProtector()) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   // These ops are handled by ReduceCallOrConstructWithArrayLikeOrSpread.
@@ -8771,7 +8896,7 @@ base::Optional<Reduction> JSCallReducer::TryReduceJSCallMathMinMaxWithArrayLike(
   Node* arguments_list = n.Argument(0);
   if (arguments_list->opcode() == IrOpcode::kJSCreateLiteralArray ||
       arguments_list->opcode() == IrOpcode::kJSCreateArguments) {
-    return base::nullopt;
+    return std::nullopt;
   }
 
   HeapObjectMatcher m(target);
@@ -8782,7 +8907,7 @@ base::Optional<Reduction> JSCallReducer::TryReduceJSCallMathMinMaxWithArrayLike(
 
       // Don't inline cross native context.
       if (!function.native_context(broker()).equals(native_context())) {
-        return base::nullopt;
+        return std::nullopt;
       }
 
       SharedFunctionInfoRef shared = function.shared(broker());
@@ -8791,7 +8916,7 @@ base::Optional<Reduction> JSCallReducer::TryReduceJSCallMathMinMaxWithArrayLike(
       if (builtin == Builtin::kMathMax || builtin == Builtin::kMathMin) {
         return ReduceJSCallMathMinMaxWithArrayLike(node, builtin);
       } else {
-        return base::nullopt;
+        return std::nullopt;
       }
     }
   }
@@ -8803,7 +8928,7 @@ base::Optional<Reduction> JSCallReducer::TryReduceJSCallMathMinMaxWithArrayLike(
     ProcessedFeedback const& feedback =
         broker()->GetFeedbackForCall(p.feedback());
     if (feedback.IsInsufficient()) {
-      return base::nullopt;
+      return std::nullopt;
     }
     OptionalHeapObjectRef feedback_target = feedback.AsCall().target();
     if (feedback_target.has_value() &&
@@ -8812,7 +8937,7 @@ base::Optional<Reduction> JSCallReducer::TryReduceJSCallMathMinMaxWithArrayLike(
           jsgraph()->ConstantNoHole(*feedback_target, broker());
       ObjectRef target_ref = feedback_target.value();
       if (!target_ref.IsJSFunction()) {
-        return base::nullopt;
+        return std::nullopt;
       }
       JSFunctionRef function = target_ref.AsJSFunction();
       SharedFunctionInfoRef shared = function.shared(broker());
@@ -8837,7 +8962,7 @@ base::Optional<Reduction> JSCallReducer::TryReduceJSCallMathMinMaxWithArrayLike(
     }
   }
 
-  return base::nullopt;
+  return std::nullopt;
 }
 
 Reduction JSCallReducer::ReduceJSCallMathMinMaxWithArrayLike(Node* node,
@@ -8851,6 +8976,39 @@ Reduction JSCallReducer::ReduceJSCallMathMinMaxWithArrayLike(Node* node,
   Node* subgraph = a.ReduceJSCallMathMinMaxWithArrayLike(builtin);
   return ReplaceWithSubgraph(&a, subgraph);
 }
+
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+Reduction JSCallReducer::ReduceGetContinuationPreservedEmbedderData(
+    Node* node) {
+  JSCallNode n(node);
+  Effect effect = n.effect();
+  Control control = n.control();
+
+  Node* value = effect = graph()->NewNode(
+      simplified()->GetContinuationPreservedEmbedderData(), effect);
+
+  ReplaceWithValue(node, value, effect, control);
+  return Replace(node);
+}
+
+Reduction JSCallReducer::ReduceSetContinuationPreservedEmbedderData(
+    Node* node) {
+  JSCallNode n(node);
+  Effect effect = n.effect();
+  Control control = n.control();
+
+  if (n.ArgumentCount() == 0) return NoChange();
+
+  effect =
+      graph()->NewNode(simplified()->SetContinuationPreservedEmbedderData(),
+                       n.Argument(0), effect);
+
+  Node* value = jsgraph()->UndefinedConstant();
+
+  ReplaceWithValue(node, value, effect, control);
+  return Replace(node);
+}
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
 CompilationDependencies* JSCallReducer::dependencies() const {
   return broker()->dependencies();

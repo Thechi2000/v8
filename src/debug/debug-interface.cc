@@ -127,9 +127,8 @@ Local<String> GetDateDescription(Local<Date> date) {
   auto jsdate = i::Cast<i::JSDate>(receiver);
   i::Isolate* i_isolate = jsdate->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  auto buffer = i::ToDateString(
-      i::Object::NumberValue(Cast<i::Number>(jsdate->value())),
-      i_isolate->date_cache(), i::ToDateStringMode::kLocalDateAndTime);
+  auto buffer = i::ToDateString(jsdate->value(), i_isolate->date_cache(),
+                                i::ToDateStringMode::kLocalDateAndTime);
   return Utils::ToLocal(i_isolate->factory()
                             ->NewStringFromUtf8(base::VectorOf(buffer))
                             .ToHandleChecked());
@@ -161,7 +160,7 @@ Local<String> GetFunctionDescription(Local<Function> function) {
         builder.AppendCStringLiteral("function ");
         builder.AppendString(debug_name);
         builder.AppendCStringLiteral("() { [native code] }");
-        return Utils::ToLocal(builder.Finish().ToHandleChecked(), i_isolate);
+        return Utils::ToLocal(builder.Finish().ToHandleChecked());
       }
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -346,8 +345,8 @@ bool GetPrivateMembers(Local<Context> context, Local<Object> object, int filter,
     } else if (include_fields) {  // Private fields
       i::DirectHandle<i::String> name(
           i::Cast<i::String>(i::Cast<i::Symbol>(*key)->description()), isolate);
-      names_out->push_back(Utils::ToLocal(name, isolate));
-      values_out->push_back(Utils::ToLocal(value, isolate));
+      names_out->push_back(Utils::ToLocal(name));
+      values_out->push_back(Utils::ToLocal(value));
     }
   }
 
@@ -537,7 +536,7 @@ MaybeLocal<String> Script::Name() const {
   i::Isolate* isolate = script->GetIsolate();
   i::DirectHandle<i::Object> value(script->name(), isolate);
   if (!IsString(*value)) return MaybeLocal<String>();
-  return Utils::ToLocal(i::Cast<i::String>(value), isolate);
+  return Utils::ToLocal(i::Cast<i::String>(value));
 }
 
 MaybeLocal<String> Script::SourceURL() const {
@@ -545,7 +544,7 @@ MaybeLocal<String> Script::SourceURL() const {
   i::Isolate* isolate = script->GetIsolate();
   i::DirectHandle<i::PrimitiveHeapObject> value(script->source_url(), isolate);
   if (!IsString(*value)) return MaybeLocal<String>();
-  return Utils::ToLocal(i::Cast<i::String>(value), isolate);
+  return Utils::ToLocal(i::Cast<i::String>(value));
 }
 
 MaybeLocal<String> Script::SourceMappingURL() const {
@@ -553,7 +552,7 @@ MaybeLocal<String> Script::SourceMappingURL() const {
   i::Isolate* isolate = script->GetIsolate();
   i::DirectHandle<i::Object> value(script->source_mapping_url(), isolate);
   if (!IsString(*value)) return MaybeLocal<String>();
-  return Utils::ToLocal(i::Cast<i::String>(value), isolate);
+  return Utils::ToLocal(i::Cast<i::String>(value));
 }
 
 MaybeLocal<String> Script::GetSha256Hash() const {
@@ -578,11 +577,11 @@ Local<ScriptSource> Script::Source() const {
   if (script->type() == i::Script::Type::kWasm) {
     i::DirectHandle<i::Object> wasm_native_module(
         script->wasm_managed_native_module(), isolate);
-    return Utils::Convert<i::Object, ScriptSource>(wasm_native_module, isolate);
+    return Utils::Convert<i::Object, ScriptSource>(wasm_native_module);
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   i::DirectHandle<i::PrimitiveHeapObject> source(script->source(), isolate);
-  return Utils::Convert<i::PrimitiveHeapObject, ScriptSource>(source, isolate);
+  return Utils::Convert<i::PrimitiveHeapObject, ScriptSource>(source);
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -656,8 +655,8 @@ Maybe<int> Script::GetSourceOffset(const Location& location,
   i::DirectHandle<i::Script> script = Utils::OpenDirectHandle(this);
 #if V8_ENABLE_WEBASSEMBLY
   if (script->type() == i::Script::Type::kWasm) {
-    DCHECK_EQ(0, location.GetLineNumber());
-    return Just(location.GetColumnNumber());
+    return location.GetLineNumber() == 0 ? Just(location.GetColumnNumber())
+                                         : Nothing<int>();
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -1066,7 +1065,7 @@ Local<String> WasmValueObject::type() const {
   auto object = i::Cast<i::WasmValueObject>(Utils::OpenDirectHandle(this));
   i::Isolate* isolate = object->GetIsolate();
   i::DirectHandle<i::String> type(object->type(), isolate);
-  return Utils::ToLocal(type, isolate);
+  return Utils::ToLocal(type);
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -1132,7 +1131,7 @@ MaybeLocal<Script> GeneratorObject::Script() {
   if (!IsScript(maybe_script)) return {};
   i::Isolate* isolate = obj->GetIsolate();
   i::DirectHandle<i::Script> script(i::Cast<i::Script>(maybe_script), isolate);
-  return ToApiHandle<v8::debug::Script>(script, isolate);
+  return ToApiHandle<v8::debug::Script>(script);
 }
 
 Local<Function> GeneratorObject::Function() {
@@ -1343,7 +1342,7 @@ MaybeLocal<v8::Value> EphemeronTable::Get(v8::Isolate* isolate,
   i::DirectHandle<i::Object> value(self->Lookup(internal_key), i_isolate);
 
   if (IsTheHole(*value)) return {};
-  return Utils::ToLocal(value, i_isolate);
+  return Utils::ToLocal(value);
 }
 
 Local<EphemeronTable> EphemeronTable::Set(v8::Isolate* isolate,
@@ -1376,14 +1375,14 @@ Local<Value> AccessorPair::getter() {
   auto accessors = Utils::OpenDirectHandle(this);
   i::Isolate* isolate = accessors->GetIsolate();
   i::DirectHandle<i::Object> getter(accessors->getter(), isolate);
-  return Utils::ToLocal(getter, isolate);
+  return Utils::ToLocal(getter);
 }
 
 Local<Value> AccessorPair::setter() {
   auto accessors = Utils::OpenDirectHandle(this);
   i::Isolate* isolate = accessors->GetIsolate();
   i::DirectHandle<i::Object> setter(accessors->setter(), isolate);
-  return Utils::ToLocal(setter, isolate);
+  return Utils::ToLocal(setter);
 }
 
 bool AccessorPair::IsAccessorPair(Local<Value> that) {

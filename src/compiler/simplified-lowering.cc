@@ -5,6 +5,7 @@
 #include "src/compiler/simplified-lowering.h"
 
 #include <limits>
+#include <optional>
 
 #include "include/v8-fast-api-calls.h"
 #include "src/base/small-vector.h"
@@ -152,6 +153,7 @@ UseInfo TruncatingUseInfoFromRepresentation(MachineRepresentation rep) {
       return UseInfo::AnyTagged();
     case MachineRepresentation::kFloat64:
       return UseInfo::TruncatingFloat64();
+    case MachineRepresentation::kFloat16:
     case MachineRepresentation::kFloat32:
       return UseInfo::Float32();
     case MachineRepresentation::kWord8:
@@ -240,7 +242,7 @@ class JSONGraphWriterWithVerifierTypes : public JSONGraphWriter {
       : JSONGraphWriter(os, graph, positions, origins), verifier_(verifier) {}
 
  protected:
-  base::Optional<Type> GetType(Node* node) override {
+  std::optional<Type> GetType(Node* node) override {
     return verifier_->GetType(node);
   }
 
@@ -1947,6 +1949,11 @@ class RepresentationSelector {
         if (flags & uint8_t(CTypeInfo::Flags::kEnforceRangeBit) ||
             flags & uint8_t(CTypeInfo::Flags::kClampBit)) {
           DCHECK(repr != CFunctionInfo::Int64Representation::kBigInt);
+          // If the parameter is marked as `kEnforceRange` or `kClampBit`, then
+          // special type conversion gets added explicitly to the generated
+          // code. Therefore it is sufficient here to only require here that the
+          // value is a Float64, even though the C++ signature actually asks for
+          // an `int32_t`.
           return UseInfo::CheckedNumberAsFloat64(kIdentifyZeros, feedback);
         }
         switch (type.GetType()) {
@@ -2066,6 +2073,8 @@ class RepresentationSelector {
     BigIntRef bigint = ref.AsBigInt();
     bool lossless = false;
     int64_t shift_amount = bigint.AsInt64(&lossless);
+    // We bail out if we cannot represent the shift amount correctly.
+    if (!lossless) return false;
 
     // Canonicalize {shift_amount}.
     bool is_shift_left =
@@ -2076,7 +2085,7 @@ class RepresentationSelector {
       if (shift_amount == std::numeric_limits<int64_t>::min()) return false;
       is_shift_left = !is_shift_left;
       shift_amount = -shift_amount;
-      DCHECK(shift_amount > 0);
+      DCHECK_GT(shift_amount, 0);
     }
     DCHECK_GE(shift_amount, 0);
 
@@ -2089,7 +2098,7 @@ class RepresentationSelector {
                     UseInfo::CheckedBigIntTruncatingWord64(FeedbackSource{}),
                     UseInfo::Any(), MachineRepresentation::kWord64);
       if (lower<T>()) {
-        if (!lossless || shift_amount > 63) {
+        if (shift_amount > 63) {
           DeferReplacement(node, jsgraph_->Int64Constant(0));
         } else if (shift_amount == 0) {
           DeferReplacement(node, node->InputAt(0));
@@ -2108,7 +2117,7 @@ class RepresentationSelector {
                     UseInfo::CheckedBigIntTruncatingWord64(FeedbackSource{}),
                     UseInfo::Any(), MachineRepresentation::kWord64);
       if (lower<T>()) {
-        if (!lossless || shift_amount > 63) {
+        if (shift_amount > 63) {
           ReplaceWithPureNode(
               node,
               graph()->NewNode(lowering->machine()->Word64Sar(),
@@ -2130,7 +2139,7 @@ class RepresentationSelector {
                     UseInfo::CheckedBigIntTruncatingWord64(FeedbackSource{}),
                     UseInfo::Any(), MachineRepresentation::kWord64);
       if (lower<T>()) {
-        if (!lossless || shift_amount > 63) {
+        if (shift_amount > 63) {
           DeferReplacement(node, jsgraph_->Int64Constant(0));
         } else if (shift_amount == 0) {
           DeferReplacement(node, node->InputAt(0));
@@ -2349,6 +2358,8 @@ class RepresentationSelector {
         return;
       }
       case IrOpcode::kHeapConstant:
+        return VisitLeaf<T>(node, MachineRepresentation::kTaggedPointer);
+      case IrOpcode::kTrustedHeapConstant:
         return VisitLeaf<T>(node, MachineRepresentation::kTaggedPointer);
       case IrOpcode::kPointerConstant: {
         VisitLeaf<T>(node, MachineType::PointerRepresentation());
@@ -4649,6 +4660,17 @@ class RepresentationSelector {
         }
         SetOutput<T>(node, LoadRepresentationOf(node->op()).representation());
         return;
+
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+      case IrOpcode::kGetContinuationPreservedEmbedderData:
+        SetOutput<T>(node, MachineRepresentation::kTagged);
+        return;
+
+      case IrOpcode::kSetContinuationPreservedEmbedderData:
+        ProcessInput<T>(node, 0, UseInfo::AnyTagged());
+        SetOutput<T>(node, MachineRepresentation::kNone);
+        return;
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
       default:
         FATAL(

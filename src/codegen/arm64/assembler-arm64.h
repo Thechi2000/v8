@@ -8,10 +8,10 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 
 #include "absl/container/btree_map.h"
 #include "absl/container/flat_hash_map.h"
-#include "src/base/optional.h"
 #include "src/codegen/arm64/constants-arm64.h"
 #include "src/codegen/arm64/instructions-arm64.h"
 #include "src/codegen/arm64/register-arm64.h"
@@ -121,7 +121,7 @@ class Operand {
   bool NeedsRelocation(const Assembler* assembler) const;
 
  private:
-  base::Optional<HeapNumberRequest> heap_number_request_;
+  std::optional<HeapNumberRequest> heap_number_request_;
   Immediate immediate_;
   Register reg_;
   Shift shift_;
@@ -292,6 +292,12 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   inline static void deserialization_set_target_internal_reference_at(
       Address pc, Address target,
       RelocInfo::Mode mode = RelocInfo::INTERNAL_REFERENCE);
+
+  // Read/modify the uint32 constant used at pc.
+  static inline uint32_t uint32_constant_at(Address pc, Address constant_pool);
+  static inline void set_uint32_constant_at(
+      Address pc, Address constant_pool, uint32_t new_constant,
+      ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
 
   // This value is used in the serialization process and must be zero for
   // ARM64, as the code target is split across multiple instructions and does

@@ -68,16 +68,9 @@ class IA32OperandConverter : public InstructionOperandConverter {
 
   Immediate ToImmediate(InstructionOperand* operand) {
     Constant constant = ToConstant(operand);
-#if V8_ENABLE_WEBASSEMBLY
-    if (constant.type() == Constant::kInt32 &&
-        RelocInfo::IsWasmReference(constant.rmode())) {
-      return Immediate(static_cast<Address>(constant.ToInt32()),
-                       constant.rmode());
-    }
-#endif  // V8_ENABLE_WEBASSEMBLY
     switch (constant.type()) {
       case Constant::kInt32:
-        return Immediate(constant.ToInt32());
+        return Immediate(constant.ToInt32(), constant.rmode());
       case Constant::kFloat32:
         return Immediate::EmbeddedNumber(constant.ToFloat32());
       case Constant::kFloat64:
@@ -1608,7 +1601,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         size_t index = 0;
         Operand operand = i.MemoryOperand(&index);
         if (HasImmediateInput(instr, index)) {
-          __ mov(operand, i.InputImmediate(index));
+          __ Move(operand, i.InputImmediate(index));
         } else {
           __ mov(operand, i.InputRegister(index));
         }
@@ -4040,7 +4033,7 @@ void CodeGenerator::AssembleConstructFrame() {
           call_descriptor->IsWasmImportWrapper() ||
           call_descriptor->IsWasmCapiFunction()) {
         // For import wrappers and C-API functions, this stack slot is only used
-        // for printing stack traces in V8. Also, it holds a WasmApiFunctionRef
+        // for printing stack traces in V8. Also, it holds a WasmImportData
         // instead of the instance itself, which is taken care of in the frames
         // accessors.
         __ push(kWasmInstanceRegister);
@@ -4429,6 +4422,8 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
         Register dst = g.ToRegister(destination);
         if (src.type() == Constant::kHeapObject) {
           __ Move(dst, src.ToHeapObject());
+        } else if (src.type() == Constant::kExternalReference) {
+          __ Move(dst, Immediate(src.ToExternalReference()));
         } else {
           __ Move(dst, g.ToImmediate(source));
         }

@@ -9,6 +9,8 @@
 #ifndef V8_CODEGEN_RISCV_MACRO_ASSEMBLER_RISCV_H_
 #define V8_CODEGEN_RISCV_MACRO_ASSEMBLER_RISCV_H_
 
+#include <optional>
+
 #include "src/codegen/assembler-arch.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/bailout-reason.h"
@@ -117,6 +119,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
                      IsolateData::cage_base_offset());
 #endif
   }
+
+  void LoadIsolateField(const Register& rd, IsolateFieldId id);
 
   // Jump unconditionally to given label.
   void jmp(Label* L, Label::Distance distance = Label::kFar) {
@@ -236,7 +240,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // that is guaranteed not to be clobbered.
   MemOperand ExternalReferenceAsOperand(ExternalReference reference,
                                         Register scratch);
-
+  MemOperand ExternalReferenceAsOperand(IsolateFieldId id) {
+    return ExternalReferenceAsOperand(ExternalReference::Create(id), no_reg);
+  }
   inline void GenPCRelativeJump(Register rd, int32_t imm32) {
     BlockTrampolinePoolScope block_trampoline_pool(this);
     DCHECK(is_int32(imm32 + 0x800));
@@ -772,7 +778,12 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // Change endianness
   void ByteSwap(Register dest, Register src, int operand_size,
-                Register scratch);
+                Register scratch = no_reg);
+
+  // helper function for bytes reverse
+  template <int NBYTES>
+  void ReverseBytesHelper(Register rd, Register rs, Register tmp1,
+                          Register tmp2);
 
   void Clear_if_nan_d(Register rd, FPURegister fs);
   void Clear_if_nan_s(Register rd, FPURegister fs);
@@ -1714,9 +1725,9 @@ struct MoveCycleState {
   // {MoveToTempLocation}.
   RegList scratch_regs;
   // Available scratch registers during the move cycle resolution scope.
-  base::Optional<UseScratchRegisterScope> temps;
+  std::optional<UseScratchRegisterScope> temps;
   // Scratch register picked by {MoveToTempLocation}.
-  base::Optional<Register> scratch_reg;
+  std::optional<Register> scratch_reg;
 };
 
 inline MemOperand ExitFrameStackSlotOperand(int offset) {

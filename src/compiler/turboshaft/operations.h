@@ -9,13 +9,13 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 
 #include "src/base/logging.h"
 #include "src/base/macros.h"
-#include "src/base/optional.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/small-vector.h"
 #include "src/base/template-utils.h"
@@ -33,6 +33,7 @@
 #include "src/compiler/turboshaft/snapshot-table.h"
 #include "src/compiler/turboshaft/types.h"
 #include "src/compiler/turboshaft/utils.h"
+#include "src/compiler/turboshaft/zone-with-name.h"
 #include "src/compiler/write-barrier-kind.h"
 #include "src/flags/flags.h"
 
@@ -54,10 +55,21 @@ class Node;
 enum class TrapId : int32_t;
 }  // namespace v8::internal::compiler
 namespace v8::internal::compiler::turboshaft {
+
+inline constexpr char kCompilationZoneName[] = "compilation-zone";
+
 class Block;
 struct FrameStateData;
 class Graph;
 struct FrameStateOp;
+
+enum class HashingStrategy {
+  kDefault,
+  // This strategy requires that hashing a graph during builtin construction
+  // (mksnapshot) produces the same hash for repeated runs of mksnapshot. This
+  // requires that no pointers and external constants are used in hashes.
+  kMakeSnapshotStable,
+};
 
 // This belongs to `VariableReducer` in `variable-reducer.h`. It is defined here
 // because of cyclic header dependencies.
@@ -169,6 +181,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(Simd128Constant)                      \
   V(Simd128Binop)                         \
   V(Simd128Unary)                         \
+  V(Simd128Reduce)                        \
   V(Simd128Shift)                         \
   V(Simd128Test)                          \
   V(Simd128Splat)                         \
@@ -195,10 +208,19 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(Switch)                                           \
   V(Deoptimize)
 
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+#define TURBOSHAFT_CPED_OPERATION_LIST(V) \
+  V(GetContinuationPreservedEmbedderData) \
+  V(SetContinuationPreservedEmbedderData)
+#else
+#define TURBOSHAFT_CPED_OPERATION_LIST(V)
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+
 // These operations should be lowered to Machine operations during
 // MachineLoweringPhase.
 #define TURBOSHAFT_SIMPLIFIED_OPERATION_LIST(V) \
   TURBOSHAFT_INTL_OPERATION_LIST(V)             \
+  TURBOSHAFT_CPED_OPERATION_LIST(V)             \
   V(ArgumentsLength)                            \
   V(BigIntBinop)                                \
   V(BigIntComparison)                           \
@@ -296,7 +318,8 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(AtomicWord32Pair)                        \
   V(MemoryBarrier)                           \
   V(Comment)                                 \
-  V(Dead)
+  V(Dead)                                    \
+  V(AbortCSADcheck)
 
 // These are operations used in the frontend and are mostly tied to JS
 // semantics.
@@ -342,12 +365,13 @@ constexpr std::underlying_type_t<Opcode> OpcodeIndex(Opcode x) {
   return static_cast<std::underlying_type_t<Opcode>>(x);
 }
 
-template <class Op>
-struct operation_to_opcode_map {};
-
 #define FORWARD_DECLARE(Name) struct Name##Op;
 TURBOSHAFT_OPERATION_LIST(FORWARD_DECLARE)
 #undef FORWARD_DECLARE
+
+namespace detail {
+template <class Op>
+struct operation_to_opcode_map {};
 
 #define OPERATION_OPCODE_MAP_CASE(Name)    \
   template <>                              \
@@ -355,6 +379,13 @@ TURBOSHAFT_OPERATION_LIST(FORWARD_DECLARE)
       : std::integral_constant<Opcode, Opcode::k##Name> {};
 TURBOSHAFT_OPERATION_LIST(OPERATION_OPCODE_MAP_CASE)
 #undef OPERATION_OPCODE_MAP_CASE
+}  // namespace detail
+
+template <typename Op>
+struct operation_to_opcode
+    : detail::operation_to_opcode_map<std::remove_cvref_t<Op>> {};
+template <typename Op>
+constexpr Opcode operation_to_opcode_v = operation_to_opcode<Op>::value;
 
 template <typename Op, uint64_t Mask, uint64_t Value>
 struct OpMaskT {
@@ -807,6 +838,10 @@ struct OpEffects {
 };
 static_assert(sizeof(OpEffects) == sizeof(OpEffects::Bits));
 
+V8_INLINE size_t hash_value(OpEffects effects) {
+  return static_cast<size_t>(effects.bits());
+}
+
 inline bool CannotSwapOperations(OpEffects first, OpEffects second) {
   return first.produces.bits() & (second.consumes.bits());
 }
@@ -959,6 +994,8 @@ struct alignas(OpIndex) Operation {
   // Returns true if {this} is the only operation using {value}.
   bool IsOnlyUserOf(const Operation& value, const Graph& graph) const;
 
+  void Print() const;
+
  protected:
   // Operation objects store their inputs behind the object. Therefore, they can
   // only be constructed as part of a Graph.
@@ -1000,7 +1037,6 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
 inline std::ostream& operator<<(std::ostream& os, const Operation& op) {
   return os << OperationPrintStyle{op};
 }
-V8_EXPORT_PRIVATE void Print(const Operation& op);
 
 V8_EXPORT_PRIVATE Zone* get_zone(Graph* graph);
 
@@ -1036,11 +1072,11 @@ struct OperationT : Operation {
            derived_this().Effects().is_required_when_unused();
   }
 
-  static constexpr base::Optional<OpEffects> EffectsIfStatic() {
+  static constexpr std::optional<OpEffects> EffectsIfStatic() {
     if constexpr (HasStaticEffects<Derived>::value) {
       return Derived::Effects();
     }
-    return base::nullopt;
+    return std::nullopt;
   }
 
   Derived& derived_this() { return *static_cast<Derived*>(this); }
@@ -1141,9 +1177,13 @@ struct OperationT : Operation {
     return derived_this().inputs() == other.derived_this().inputs() &&
            derived_this().options() == other.derived_this().options();
   }
-  size_t hash_value() const {
-    return fast_hash_combine(opcode, derived_this().inputs(),
-                             derived_this().options());
+  template <typename... Args>
+  size_t HashWithOptions(const Args&... args) const {
+    return fast_hash_combine(opcode, derived_this().inputs(), args...);
+  }
+  size_t hash_value(
+      HashingStrategy strategy = HashingStrategy::kDefault) const {
+    return HashWithOptions(derived_this().options());
   }
 
   void PrintInputs(std::ostream& os, const std::string& op_index_prefix) const {
@@ -1276,7 +1316,8 @@ struct FixedArityOperationT : OperationT<Derived> {
   V(word64_rol_lowerable, Word64RolLowerable)      \
   V(sat_conversion_is_safe, SatConversionIsSafe)   \
   V(word32_select, Word32Select)                   \
-  V(word64_select, Word64Select)
+  V(word64_select, Word64Select)                   \
+  V(float16, Float16)
 
 class V8_EXPORT_PRIVATE SupportedOperations {
 #define DECLARE_FIELD(name, machine_name) bool name##_;
@@ -1324,10 +1365,10 @@ base::Vector<const MaybeRegisterRepresentation> MaybeRepVector() {
 V8_EXPORT_PRIVATE bool ValidOpInputRep(
     const Graph& graph, OpIndex input,
     std::initializer_list<RegisterRepresentation> expected_rep,
-    base::Optional<size_t> projection_index = {});
+    std::optional<size_t> projection_index = {});
 V8_EXPORT_PRIVATE bool ValidOpInputRep(
     const Graph& graph, OpIndex input, RegisterRepresentation expected_rep,
-    base::Optional<size_t> projection_index = {});
+    std::optional<size_t> projection_index = {});
 #endif  // DEBUG
 
 // DeadOp is a special operation that can be used by analyzers to mark
@@ -1344,6 +1385,25 @@ struct DeadOp : FixedArityOperationT<0, DeadOp> {
       ZoneVector<MaybeRegisterRepresentation>& storage) const {
     return {};
   }
+
+  void Validate(const Graph& graph) const {}
+  auto options() const { return std::tuple{}; }
+};
+
+struct AbortCSADcheckOp : FixedArityOperationT<1, AbortCSADcheckOp> {
+  static constexpr OpEffects effects =
+      OpEffects().RequiredWhenUnused().CanLeaveCurrentFunction();
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+  }
+
+  V<String> message() { return Base::input<String>(0); }
+
+  explicit AbortCSADcheckOp(V<String> message) : Base(message) {}
 
   void Validate(const Graph& graph) const {}
   auto options() const { return std::tuple{}; }
@@ -2264,10 +2324,10 @@ struct BitcastWord32PairToFloat64Op
                           MaybeRegisterRepresentation::Word32()>();
   }
 
-  OpIndex high_word32() const { return input(0); }
-  OpIndex low_word32() const { return input(1); }
+  V<Word32> high_word32() const { return input<Word32>(0); }
+  V<Word32> low_word32() const { return input<Word32>(1); }
 
-  BitcastWord32PairToFloat64Op(OpIndex high_word32, OpIndex low_word32)
+  BitcastWord32PairToFloat64Op(V<Word32> high_word32, V<Word32> low_word32)
       : Base(high_word32, low_word32) {}
 
   void Validate(const Graph& graph) const {
@@ -2450,25 +2510,25 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     kExternal,
     kHeapObject,
     kCompressedHeapObject,
+    kTrustedHeapObject,
     kRelocatableWasmCall,
-    kRelocatableWasmStubCall
+    kRelocatableWasmStubCall,
+    kRelocatableWasmCanonicalSignatureId
   };
 
   Kind kind;
   RegisterRepresentation rep = Representation(kind);
   union Storage {
     uint64_t integral;
-    // TODO(42204049): To prevent signaling NaNs converting to quiet NaNs we
-    // should use Float32 and Float64.
-    float float32;
-    double float64;
+    i::Float32 float32;
+    i::Float64 float64;
     ExternalReference external;
     Handle<HeapObject> handle;
 
     Storage(uint64_t integral = 0) : integral(integral) {}
     Storage(i::Tagged<Smi> smi) : integral(smi.ptr()) {}
-    Storage(double constant) : float64(constant) {}
-    Storage(float constant) : float32(constant) {}
+    Storage(i::Float64 constant) : float64(constant) {}
+    Storage(i::Float32 constant) : float32(constant) {}
     Storage(ExternalReference constant) : external(constant) {}
     Storage(Handle<HeapObject> constant) : handle(constant) {}
 
@@ -2491,6 +2551,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
 
   static RegisterRepresentation Representation(Kind kind) {
     switch (kind) {
+      case Kind::kRelocatableWasmCanonicalSignatureId:
       case Kind::kWord32:
         return RegisterRepresentation::Word32();
       case Kind::kWord64:
@@ -2501,6 +2562,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
         return RegisterRepresentation::Float64();
       case Kind::kExternal:
       case Kind::kTaggedIndex:
+      case Kind::kTrustedHeapObject:
       case Kind::kRelocatableWasmCall:
       case Kind::kRelocatableWasmStubCall:
         return RegisterRepresentation::WordPtr();
@@ -2520,6 +2582,9 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     DCHECK_IMPLIES(
         kind == Kind::kWord32,
         storage.integral <= WordRepresentation::Word32().MaxUnsignedValue());
+    DCHECK_IMPLIES(
+        kind == Kind::kRelocatableWasmCanonicalSignatureId,
+        storage.integral <= WordRepresentation::Word32().MaxSignedValue());
   }
 
   uint64_t integral() const {
@@ -2531,6 +2596,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     DCHECK(IsIntegral());
     switch (kind) {
       case Kind::kWord32:
+      case Kind::kRelocatableWasmCanonicalSignatureId:
         return static_cast<int32_t>(storage.integral);
       case Kind::kWord64:
         return static_cast<int64_t>(storage.integral);
@@ -2554,17 +2620,17 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     return i::Tagged<Smi>(storage.integral);
   }
 
-  double number() const {
+  i::Float64 number() const {
     DCHECK_EQ(kind, Kind::kNumber);
     return storage.float64;
   }
 
-  float float32() const {
+  i::Float32 float32() const {
     DCHECK_EQ(kind, Kind::kFloat32);
     return storage.float32;
   }
 
-  double float64() const {
+  i::Float64 float64() const {
     DCHECK_EQ(kind, Kind::kFloat64);
     return storage.float64;
   }
@@ -2580,7 +2646,8 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
   }
 
   Handle<i::HeapObject> handle() const {
-    DCHECK(kind == Kind::kHeapObject || kind == Kind::kCompressedHeapObject);
+    DCHECK(kind == Kind::kHeapObject || kind == Kind::kCompressedHeapObject ||
+           kind == Kind::kTrustedHeapObject);
     return storage.handle;
   }
 
@@ -2598,13 +2665,15 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
   bool IsIntegral() const {
     return kind == Kind::kWord32 || kind == Kind::kWord64 ||
            kind == Kind::kRelocatableWasmCall ||
-           kind == Kind::kRelocatableWasmStubCall;
+           kind == Kind::kRelocatableWasmStubCall ||
+           kind == Kind::kRelocatableWasmCanonicalSignatureId;
   }
 
   auto options() const { return std::tuple{kind, storage}; }
 
   void PrintOptions(std::ostream& os) const;
-  size_t hash_value() const {
+  size_t hash_value(
+      HashingStrategy strategy = HashingStrategy::kDefault) const {
     switch (kind) {
       case Kind::kWord32:
       case Kind::kWord64:
@@ -2612,17 +2681,24 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
       case Kind::kTaggedIndex:
       case Kind::kRelocatableWasmCall:
       case Kind::kRelocatableWasmStubCall:
-        return fast_hash_combine(opcode, kind, storage.integral);
+      case Kind::kRelocatableWasmCanonicalSignatureId:
+        return HashWithOptions(storage.integral);
       case Kind::kFloat32:
-        return fast_hash_combine(opcode, kind, storage.float32);
+        return HashWithOptions(storage.float32.get_bits());
       case Kind::kFloat64:
       case Kind::kNumber:
-        return fast_hash_combine(opcode, kind, storage.float64);
+        return HashWithOptions(storage.float64.get_bits());
       case Kind::kExternal:
-        return fast_hash_combine(opcode, kind, storage.external.address());
+        return HashWithOptions(strategy == HashingStrategy::kMakeSnapshotStable
+                                   ? 0
+                                   : storage.external.raw());
       case Kind::kHeapObject:
       case Kind::kCompressedHeapObject:
-        return fast_hash_combine(opcode, kind, storage.handle.address());
+      case Kind::kTrustedHeapObject:
+        if (strategy == HashingStrategy::kMakeSnapshotStable) {
+          return HashWithOptions();
+        }
+        return HashWithOptions(storage.handle.address());
     }
   }
   bool operator==(const ConstantOp& other) const {
@@ -2634,6 +2710,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
       case Kind::kTaggedIndex:
       case Kind::kRelocatableWasmCall:
       case Kind::kRelocatableWasmStubCall:
+      case Kind::kRelocatableWasmCanonicalSignatureId:
         return storage.integral == other.storage.integral;
       case Kind::kFloat32:
         // Using a bit_cast to uint32_t in order to return false when comparing
@@ -2655,9 +2732,10 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
         return base::bit_cast<uint64_t>(storage.float64) ==
                base::bit_cast<uint64_t>(other.storage.float64);
       case Kind::kExternal:
-        return storage.external.address() == other.storage.external.address();
+        return storage.external.raw() == other.storage.external.raw();
       case Kind::kHeapObject:
       case Kind::kCompressedHeapObject:
+      case Kind::kTrustedHeapObject:
         return storage.handle.address() == other.storage.handle.address();
     }
   }
@@ -2849,7 +2927,7 @@ struct LoadOp : OperationT<LoadOp> {
 
   void Validate(const Graph& graph) const {
     DCHECK(loaded_rep.ToRegisterRepresentation() == result_rep ||
-           (loaded_rep.IsTagged() &&
+           (loaded_rep.IsCompressibleTagged() &&
             result_rep == RegisterRepresentation::Compressed()) ||
            kind.is_atomic);
     DCHECK_IMPLIES(element_size_log2 > 0, index().valid());
@@ -3359,8 +3437,17 @@ struct JSStackCheckOp : FixedArityOperationT<2, JSStackCheckOp> {
       case Kind::kFunctionEntry:
         return OpEffects().CanCallAnything();
       case Kind::kLoop:
-        // Loop body iteration stack checks can't write memory or allocate.
-        return OpEffects().CanDependOnChecks().CanDeopt().CanReadHeapMemory();
+        // Loop body iteration stack checks can't write memory.
+        // TODO(dmercadier): we could prevent this from allocating. In
+        // particular, we'd need to:
+        //   - forbid GC interrupts from being processed in loop stack checks.
+        //   - make sure that the debugger always deopts the current function
+        //     when it triggers a loop interrupt.
+        return OpEffects()
+            .CanDependOnChecks()
+            .CanDeopt()
+            .CanReadHeapMemory()
+            .CanAllocate();
     }
   }
 
@@ -3588,7 +3675,8 @@ struct DeoptimizeIfOp : FixedArityOperationT<2, DeoptimizeIfOp> {
     // same `negated`, regardless of their `frame_state` and `parameters`.
     return condition() == other.condition() && negated == other.negated;
   }
-  size_t hash_value() const {
+  size_t hash_value(
+      HashingStrategy strategy = HashingStrategy::kDefault) const {
     // To enable GVNing as described above in `EqualsForGVN`, `hash_value` has
     // to ignore the `frame_state` and the `parameters`.
     return fast_hash_combine(Opcode::kDeoptimizeIf, condition(), negated);
@@ -3785,9 +3873,23 @@ struct TSCallDescriptor : public NON_EXPORTED_BASE(ZoneObject) {
   }
 };
 
+template <>
+struct fast_hash<TSCallDescriptor> {
+  size_t operator()(const TSCallDescriptor& v) {
+    const CallDescriptor& d = *v.descriptor;
+    // This does not include all fields of the call descriptor, but it should be
+    // sufficient to differentiate between different calls (and collisions are
+    // not too critical).
+    return fast_hash_combine(d.kind(), d.tag(), d.ReturnCount(),
+                             d.ParameterCount(), d.GPParameterCount(),
+                             d.FPParameterCount(), d.ParameterSlotCount(),
+                             d.ReturnSlotCount(), d.flags());
+  }
+};
+
 // If {target} is a HeapObject representing a builtin, return that builtin's ID.
-base::Optional<Builtin> TryGetBuiltinId(const ConstantOp* target,
-                                        JSHeapBroker* broker);
+std::optional<Builtin> TryGetBuiltinId(const ConstantOp* target,
+                                       JSHeapBroker* broker);
 
 struct CallOp : OperationT<CallOp> {
   const TSCallDescriptor* descriptor;
@@ -3880,7 +3982,8 @@ struct CallOp : OperationT<CallOp> {
   // TODO(mliedtke): Should the hash function be overwritten, so that calls (and
   // potentially tail calls) can participate in GVN? Right now this is prevented
   // by every call descriptor being a different pointer.
-  auto options() const { return std::tuple{descriptor}; }
+  auto options() const { return std::tuple{descriptor, callee_effects}; }
+  size_t hash_value(HashingStrategy strategy = HashingStrategy::kDefault) const;
   void PrintOptions(std::ostream& os) const;
 };
 
@@ -3908,6 +4011,7 @@ struct CheckExceptionOp : FixedArityOperationT<1, CheckExceptionOp> {
 
   V8_EXPORT_PRIVATE void Validate(const Graph& graph) const;
 
+  size_t hash_value(HashingStrategy strategy = HashingStrategy::kDefault) const;
   auto options() const { return std::tuple{didnt_throw_block, catch_block}; }
 };
 
@@ -4123,6 +4227,7 @@ struct GotoOp : FixedArityOperationT<0, GotoOp> {
   explicit GotoOp(Block* destination, bool is_backedge)
       : Base(), is_backedge(is_backedge), destination(destination) {}
   void Validate(const Graph& graph) const {}
+  size_t hash_value(HashingStrategy strategy = HashingStrategy::kDefault) const;
   auto options() const { return std::tuple{destination, is_backedge}; }
 };
 
@@ -4146,6 +4251,7 @@ struct BranchOp : FixedArityOperationT<1, BranchOp> {
 
   void Validate(const Graph& graph) const {
   }
+  size_t hash_value(HashingStrategy strategy = HashingStrategy::kDefault) const;
   auto options() const { return std::tuple{if_true, if_false, hint}; }
 };
 
@@ -4186,6 +4292,7 @@ struct SwitchOp : FixedArityOperationT<1, SwitchOp> {
 
   void Validate(const Graph& graph) const {}
   void PrintOptions(std::ostream& os) const;
+  size_t hash_value(HashingStrategy strategy = HashingStrategy::kDefault) const;
   auto options() const { return std::tuple{cases, default_case, default_hint}; }
 };
 
@@ -5785,8 +5892,10 @@ struct TransitionAndStoreArrayElementOp
     }
   }
 
-  size_t hash_value() const {
-    return fast_hash_combine(kind, fast_map.address(), double_map.address());
+  size_t hash_value(
+      HashingStrategy strategy = HashingStrategy::kDefault) const {
+    DCHECK_EQ(strategy, HashingStrategy::kDefault);
+    return HashWithOptions(fast_map.address(), double_map.address());
   }
 
   bool operator==(const TransitionAndStoreArrayElementOp& other) const {
@@ -5914,8 +6023,10 @@ struct CheckedClosureOp : FixedArityOperationT<2, CheckedClosureOp> {
   bool operator==(const CheckedClosureOp& other) const {
     return feedback_cell.address() == other.feedback_cell.address();
   }
-  size_t hash_value() const {
-    return base::hash_value(feedback_cell.address());
+  size_t hash_value(
+      HashingStrategy strategy = HashingStrategy::kDefault) const {
+    DCHECK_EQ(strategy, HashingStrategy::kDefault);
+    return HashWithOptions(feedback_cell.address());
   }
 
   auto options() const { return std::tuple{feedback_cell}; }
@@ -6154,7 +6265,7 @@ struct FastApiCallOp : OperationT<FastApiCallOp> {
 
   V<FrameState> frame_state() const { return input<FrameState>(0); }
 
-  OpIndex data_argument() const { return input(1); }
+  V<Object> data_argument() const { return input<Object>(1); }
 
   V<Context> context() const { return input<Context>(2); }
 
@@ -6162,7 +6273,7 @@ struct FastApiCallOp : OperationT<FastApiCallOp> {
     return inputs().SubVector(kNumNonParamInputs, inputs().size());
   }
 
-  FastApiCallOp(V<FrameState> frame_state, OpIndex data_argument,
+  FastApiCallOp(V<FrameState> frame_state, V<Object> data_argument,
                 V<Context> context, base::Vector<const OpIndex> arguments,
                 const FastApiCallParameters* parameters)
       : Base(kNumNonParamInputs + arguments.size()),
@@ -6190,8 +6301,7 @@ struct FastApiCallOp : OperationT<FastApiCallOp> {
   }
 
   static FastApiCallOp& New(Graph* graph, V<FrameState> frame_state,
-                            OpIndex data_argument,
-                            V<Context> context,
+                            V<Object> data_argument, V<Context> context,
                             base::Vector<const OpIndex> arguments,
                             const FastApiCallParameters* parameters) {
     return Base::New(graph, kNumNonParamInputs + arguments.size(), frame_state,
@@ -7027,9 +7137,9 @@ struct StringAsWtf16Op : FixedArityOperationT<1, StringAsWtf16Op> {
           .CanDependOnChecks()
           .CanReadMemory();
 
-  explicit StringAsWtf16Op(V<Object> string) : Base(string) {}
+  explicit StringAsWtf16Op(V<String> string) : Base(string) {}
 
-  OpIndex string() const { return input(0); }
+  V<String> string() const { return input<String>(0); }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     return RepVector<RegisterRepresentation::Tagged()>();
@@ -7333,6 +7443,13 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
   FOREACH_SIMD_128_UNARY_SIGN_EXTENSION_OPCODE(V)
 
 #define FOREACH_SIMD_128_UNARY_OPTIONAL_OPCODE(V)                             \
+  V(F16x8Abs)                                                                 \
+  V(F16x8Neg)                                                                 \
+  V(F16x8Sqrt)                                                                \
+  V(F16x8Ceil)                                                                \
+  V(F16x8Floor)                                                               \
+  V(F16x8Trunc)                                                               \
+  V(F16x8NearestInt)                                                          \
   V(F32x4Ceil)                                                                \
   V(F32x4Floor)                                                               \
   V(F32x4Trunc)                                                               \
@@ -7383,6 +7500,45 @@ struct Simd128UnaryOp : FixedArityOperationT<1, Simd128UnaryOp> {
 };
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
                                            Simd128UnaryOp::Kind kind);
+
+#define FOREACH_SIMD_128_REDUCE_OPTIONAL_OPCODE(V) \
+  V(I8x16AddReduce)                                \
+  V(I16x8AddReduce)                                \
+  V(I32x4AddReduce)                                \
+  V(I64x2AddReduce)                                \
+  V(F32x4AddReduce)                                \
+  V(F64x2AddReduce)
+
+struct Simd128ReduceOp : FixedArityOperationT<1, Simd128ReduceOp> {
+  enum class Kind : uint8_t {
+#define DEFINE_KIND(kind) k##kind,
+    FOREACH_SIMD_128_REDUCE_OPTIONAL_OPCODE(DEFINE_KIND)
+#undef DEFINE_KIND
+  };
+
+  Kind kind;
+
+  static constexpr OpEffects effects = OpEffects();
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Simd128()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<RegisterRepresentation::Simd128()>();
+  }
+
+  Simd128ReduceOp(V<Simd128> input, Kind kind) : Base(input), kind(kind) {}
+
+  V<Simd128> input() const { return Base::input<Simd128>(0); }
+
+  void Validate(const Graph& graph) const {}
+
+  auto options() const { return std::tuple{kind}; }
+};
+V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
+                                           Simd128ReduceOp::Kind kind);
 
 #define FOREACH_SIMD_128_SHIFT_OPCODE(V) \
   V(I8x16Shl)                            \
@@ -7474,14 +7630,17 @@ struct Simd128TestOp : FixedArityOperationT<1, Simd128TestOp> {
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
                                            Simd128TestOp::Kind kind);
 
-#define FOREACH_SIMD_128_SPLAT_OPCODE(V) \
-  V(I8x16)                               \
-  V(I16x8)                               \
-  V(I32x4)                               \
-  V(I64x2)                               \
-  V(F32x4)                               \
+#define FOREACH_SIMD_128_SPLAT_MANDATORY_OPCODE(V) \
+  V(I8x16)                                         \
+  V(I16x8)                                         \
+  V(I32x4)                                         \
+  V(I64x2)                                         \
+  V(F32x4)                                         \
   V(F64x2)
 
+#define FOREACH_SIMD_128_SPLAT_OPCODE(V)     \
+  FOREACH_SIMD_128_SPLAT_MANDATORY_OPCODE(V) \
+  V(F16x8)
 struct Simd128SplatOp : FixedArityOperationT<1, Simd128SplatOp> {
   enum class Kind : uint8_t {
 #define DEFINE_KIND(kind) k##kind,
@@ -7506,6 +7665,7 @@ struct Simd128SplatOp : FixedArityOperationT<1, Simd128SplatOp> {
         return MaybeRepVector<RegisterRepresentation::Word32()>();
       case Kind::kI64x2:
         return MaybeRepVector<RegisterRepresentation::Word64()>();
+      case Kind::kF16x8:
       case Kind::kF32x4:
         return MaybeRepVector<RegisterRepresentation::Float32()>();
       case Kind::kF64x2:
@@ -7587,6 +7747,7 @@ struct Simd128ExtractLaneOp : FixedArityOperationT<1, Simd128ExtractLaneOp> {
     kI16x8U,
     kI32x4,
     kI64x2,
+    kF16x8,
     kF32x4,
     kF64x2,
   };
@@ -7595,6 +7756,26 @@ struct Simd128ExtractLaneOp : FixedArityOperationT<1, Simd128ExtractLaneOp> {
   uint8_t lane;
 
   static constexpr OpEffects effects = OpEffects();
+
+  static MachineRepresentation element_rep(Kind kind) {
+    switch (kind) {
+      case Kind::kI8x16S:
+      case Kind::kI8x16U:
+        return MachineRepresentation::kWord8;
+      case Kind::kI16x8S:
+      case Kind::kI16x8U:
+        return MachineRepresentation::kWord16;
+      case Kind::kI32x4:
+        return MachineRepresentation::kWord32;
+      case Kind::kI64x2:
+        return MachineRepresentation::kWord64;
+      case Kind::kF16x8:
+      case Kind::kF32x4:
+        return MachineRepresentation::kFloat32;
+      case Kind::kF64x2:
+        return MachineRepresentation::kFloat64;
+    }
+  }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     switch (kind) {
@@ -7606,6 +7787,7 @@ struct Simd128ExtractLaneOp : FixedArityOperationT<1, Simd128ExtractLaneOp> {
         return RepVector<RegisterRepresentation::Word32()>();
       case Kind::kI64x2:
         return RepVector<RegisterRepresentation::Word64()>();
+      case Kind::kF16x8:
       case Kind::kF32x4:
         return RepVector<RegisterRepresentation::Float32()>();
       case Kind::kF64x2:
@@ -7633,6 +7815,7 @@ struct Simd128ExtractLaneOp : FixedArityOperationT<1, Simd128ExtractLaneOp> {
         break;
       case Kind::kI16x8S:
       case Kind::kI16x8U:
+      case Kind::kF16x8:
         lane_count = 8;
         break;
       case Kind::kI32x4:
@@ -7658,6 +7841,7 @@ struct Simd128ReplaceLaneOp : FixedArityOperationT<2, Simd128ReplaceLaneOp> {
     kI16x8,
     kI32x4,
     kI64x2,
+    kF16x8,
     kF32x4,
     kF64x2,
   };
@@ -7691,6 +7875,7 @@ struct Simd128ReplaceLaneOp : FixedArityOperationT<2, Simd128ReplaceLaneOp> {
         lane_count = 16;
         break;
       case Kind::kI16x8:
+      case Kind::kF16x8:
         lane_count = 8;
         break;
       case Kind::kI32x4:
@@ -7717,6 +7902,7 @@ struct Simd128ReplaceLaneOp : FixedArityOperationT<2, Simd128ReplaceLaneOp> {
         return RegisterRepresentation::Word32();
       case Kind::kI64x2:
         return RegisterRepresentation::Word64();
+      case Kind::kF16x8:
       case Kind::kF32x4:
         return RegisterRepresentation::Float32();
       case Kind::kF64x2:
@@ -8545,14 +8731,55 @@ struct SetStackPointerOp : FixedArityOperationT<1, SetStackPointerOp> {
 
 #endif  // V8_ENABLE_WEBASSEMBLY
 
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+struct GetContinuationPreservedEmbedderDataOp
+    : FixedArityOperationT<0, GetContinuationPreservedEmbedderDataOp> {
+  static constexpr OpEffects effects = OpEffects().CanReadOffHeapMemory();
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return {};
+  }
+
+  GetContinuationPreservedEmbedderDataOp() : Base() {}
+
+  void Validate(const Graph& graph) const {}
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct SetContinuationPreservedEmbedderDataOp
+    : FixedArityOperationT<1, SetContinuationPreservedEmbedderDataOp> {
+  static constexpr OpEffects effects = OpEffects().CanWriteOffHeapMemory();
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+  }
+
+  explicit SetContinuationPreservedEmbedderDataOp(V<Object> value)
+      : Base(value) {}
+
+  void Validate(const Graph& graph) const {}
+
+  auto options() const { return std::tuple{}; }
+};
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+
 #define OPERATION_EFFECTS_CASE(Name) Name##Op::EffectsIfStatic(),
-static constexpr base::Optional<OpEffects>
+static constexpr std::optional<OpEffects>
     kOperationEffectsTable[kNumberOfOpcodes] = {
         TURBOSHAFT_OPERATION_LIST(OPERATION_EFFECTS_CASE)};
 #undef OPERATION_EFFECTS_CASE
 
 template <class Op>
-const Opcode OperationT<Op>::opcode = operation_to_opcode_map<Op>::value;
+const Opcode OperationT<Op>::opcode = operation_to_opcode<Op>::value;
 
 template <Opcode opcode>
 struct opcode_to_operation_map {};
@@ -8769,6 +8996,17 @@ Op* CreateOperation(base::SmallVector<OperationStorageSlot, 32>& storage,
   // but in Operations, they only count for 1 input when they are valid.
   DCHECK_GE(input_count, op->input_count);
   return op;
+}
+
+template <typename F>
+auto VisitOperation(const Operation& op, F&& f) {
+  switch (op.opcode) {
+#define CASE(name)      \
+  case Opcode::k##name: \
+    return f(op.Cast<name##Op>());
+    TURBOSHAFT_OPERATION_LIST(CASE)
+#undef CASE
+  }
 }
 
 // Checking that throwing operations have the required members and options.

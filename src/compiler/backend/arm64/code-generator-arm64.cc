@@ -239,14 +239,9 @@ class Arm64OperandConverter final : public InstructionOperandConverter {
     Constant constant = ToConstant(operand);
     switch (constant.type()) {
       case Constant::kInt32:
-        return Operand(constant.ToInt32());
+        return Operand(constant.ToInt32(), constant.rmode());
       case Constant::kInt64:
-#if V8_ENABLE_WEBASSEMBLY
-        if (RelocInfo::IsWasmReference(constant.rmode())) {
-          return Operand(constant.ToInt64(), constant.rmode());
-        }
-#endif  // V8_ENABLE_WEBASSEMBLY
-        return Operand(constant.ToInt64());
+        return Operand(constant.ToInt64(), constant.rmode());
       case Constant::kFloat32:
         return Operand::EmbeddedNumber(constant.ToFloat32());
       case Constant::kFloat64:
@@ -1211,6 +1206,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kIeee754Float64Tanh:
       ASSEMBLE_IEEE754_UNOP(tanh);
       break;
+    case kArm64Float16RoundDown:
+      EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintm, instr, i, kFormatH,
+                       kFormat8H);
+      break;
     case kArm64Float32RoundDown:
       EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintm, instr, i, kFormatS,
                        kFormat4S);
@@ -1218,6 +1217,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Float64RoundDown:
       EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintm, instr, i, kFormatD,
                        kFormat2D);
+      break;
+    case kArm64Float16RoundUp:
+      EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintp, instr, i, kFormatH,
+                       kFormat8H);
       break;
     case kArm64Float32RoundUp:
       EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintp, instr, i, kFormatS,
@@ -1231,6 +1234,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       EmitFpOrNeonUnop(masm(), &MacroAssembler::Frinta, instr, i, kFormatD,
                        kFormat2D);
       break;
+    case kArm64Float16RoundTruncate:
+      EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintz, instr, i, kFormatH,
+                       kFormat8H);
+      break;
     case kArm64Float32RoundTruncate:
       EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintz, instr, i, kFormatS,
                        kFormat4S);
@@ -1238,6 +1245,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Float64RoundTruncate:
       EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintz, instr, i, kFormatD,
                        kFormat2D);
+      break;
+    case kArm64Float16RoundTiesEven:
+      EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintn, instr, i, kFormatH,
+                       kFormat8H);
       break;
     case kArm64Float32RoundTiesEven:
       EmitFpOrNeonUnop(masm(), &MacroAssembler::Frintn, instr, i, kFormatS,
@@ -1357,8 +1368,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       VectorFormat src_f =
           ScalarFormatFromLaneSize(LaneSizeField::decode(opcode));
       VectorFormat dst_f = VectorFormatFillQ(src_f);
-      __ Dup(i.OutputSimd128Register().Format(dst_f),
-             i.InputSimd128Register(0).Format(src_f), 0);
+      if (src_f == kFormatH) {
+        __ Fcvt(i.OutputFloat32Register(0).H(), i.InputFloat32Register(0));
+        __ Dup(i.OutputSimd128Register().Format(dst_f),
+               i.OutputSimd128Register().Format(src_f), 0);
+      } else {
+        __ Dup(i.OutputSimd128Register().Format(dst_f),
+               i.InputSimd128Register(0).Format(src_f), 0);
+      }
       break;
     }
     case kArm64Smlal: {
@@ -2465,6 +2482,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       VectorFormat src_f = VectorFormatFillQ(dst_f);
       __ Mov(i.OutputSimd128Register().Format(dst_f),
              i.InputSimd128Register(0).Format(src_f), i.InputInt8(1));
+      if (dst_f == kFormatH) {
+        __ Fcvt(i.OutputSimd128Register().S(), i.OutputSimd128Register().H());
+      }
       break;
     }
     case kArm64FReplaceLane: {
@@ -2474,7 +2494,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (dst != src1) {
         __ Mov(dst, src1);
       }
-      __ Mov(dst, i.InputInt8(1), i.InputSimd128Register(2).Format(f), 0);
+      if (f == kFormat8H) {
+        UseScratchRegisterScope scope(masm());
+        VRegister tmp = scope.AcquireV(kFormat8H);
+        __ Fcvt(tmp.H(), i.InputSimd128Register(2).S());
+        __ Mov(dst, i.InputInt8(1), tmp.Format(f), 0);
+      } else {
+        __ Mov(dst, i.InputInt8(1), i.InputSimd128Register(2).Format(f), 0);
+      }
       break;
     }
       SIMD_FCM_L_CASE(kArm64FEq, eq, eq);
@@ -2683,6 +2710,34 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_BINOP_LANE_SIZE_CASE(kArm64IGeU, Cmhs);
     case kArm64I32x4BitMask: {
       __ I32x4BitMask(i.OutputRegister32(), i.InputSimd128Register(0));
+      break;
+    }
+    case kArm64I8x16Addv: {
+      __ Addv(i.OutputSimd128Register().B(), i.InputSimd128Register(0).V16B());
+      break;
+    }
+    case kArm64I16x8Addv: {
+      __ Addv(i.OutputSimd128Register().H(), i.InputSimd128Register(0).V8H());
+      break;
+    }
+    case kArm64I32x4Addv: {
+      __ Addv(i.OutputSimd128Register().S(), i.InputSimd128Register(0).V4S());
+      break;
+    }
+    case kArm64I64x2AddPair: {
+      __ Addp(i.OutputSimd128Register().D(), i.InputSimd128Register(0).V2D());
+      break;
+    }
+    case kArm64F32x4AddReducePairwise: {
+      UseScratchRegisterScope scope(masm());
+      VRegister tmp = scope.AcquireV(kFormat4S);
+      __ Faddp(tmp.V4S(), i.InputSimd128Register(0).V4S(),
+               i.InputSimd128Register(0).V4S());
+      __ Faddp(i.OutputSimd128Register().S(), tmp.V2S());
+      break;
+    }
+    case kArm64F64x2AddPair: {
+      __ Faddp(i.OutputSimd128Register().D(), i.InputSimd128Register(0).V2D());
       break;
     }
     case kArm64I32x4DotI16x8S: {
@@ -3954,8 +4009,15 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
         __ Mov(dst.W(),
                Immediate(src_object, RelocInfo::COMPRESSED_EMBEDDED_OBJECT));
       }
+    } else if (src.type() == Constant::kExternalReference) {
+      __ Mov(dst, src.ToExternalReference());
     } else {
-      __ Mov(dst, g.ToImmediate(source));
+      Operand src_op = g.ToImmediate(source);
+      if (src.type() == Constant::kInt32 && src_op.NeedsRelocation(masm())) {
+        // Use 32-bit loads for relocatable 32-bit constants.
+        dst = dst.W();
+      }
+      __ Mov(dst, src_op);
     }
   };
   switch (MoveType::InferMove(source, destination)) {

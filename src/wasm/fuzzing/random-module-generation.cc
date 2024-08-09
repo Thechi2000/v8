@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 
 #include "src/base/small-vector.h"
 #include "src/base/utils/random-number-generator.h"
@@ -410,10 +411,6 @@ class BodyGen {
     bool emit_end_;
   };
 
-  int NumImportedFunctions() {
-    return builder_->builder()->NumImportedFunctions();
-  }
-
   void block(base::Vector<const ValueType> param_types,
              base::Vector<const ValueType> return_types, DataRange* data) {
     BlockScope block_scope(this, kExprBlock, param_types, return_types,
@@ -543,11 +540,8 @@ class BodyGen {
     catch_blocks_.push_back(control_depth);
     for (int i = 0; i < num_catch; ++i) {
       const FunctionSig* exception_type = builder_->builder()->GetTagType(i);
-      auto exception_type_vec =
-          base::VectorOf(exception_type->parameters().begin(),
-                         exception_type->parameter_count());
       builder_->EmitWithU32V(kExprCatch, i);
-      ConsumeAndGenerate(exception_type_vec, return_type_vec, data);
+      ConsumeAndGenerate(exception_type->parameters(), return_type_vec, data);
     }
     if (has_catch_all) {
       builder_->Emit(kExprCatchAll);
@@ -627,7 +621,7 @@ class BodyGen {
     if (has_ref) block_returns.last() = kWasmExnRef;
     {
       BlockScope block(this, kExprBlock, param_types, block_returns,
-                       base::VectorOf(block_returns));
+                       block_returns);
       try_table_rec(param_types, return_types, catch_cases, i + 1, data);
     }
     // Catch label. Consume the unpacked values and exnref (if any), produce
@@ -691,9 +685,9 @@ class BodyGen {
     // There is always at least the block representing the function body.
     DCHECK(!blocks_.empty());
     const uint32_t target_block = data->get<uint8_t>() % blocks_.size();
-    const auto break_types = blocks_[target_block];
+    const auto break_types = base::VectorOf(blocks_[target_block]);
 
-    Generate(base::VectorOf(break_types), data);
+    Generate(break_types, data);
     builder_->EmitWithI32V(
         kExprBr, static_cast<uint32_t>(blocks_.size()) - 1 - target_block);
   }
@@ -752,7 +746,7 @@ class BodyGen {
         kExprBrOnNonNull,
         static_cast<uint32_t>(blocks_.size()) - 1 - target_block);
     ConsumeAndGenerate(
-        base::VectorOf(break_types.data(), break_types.size() - 1),
+        break_types.SubVector(0, break_types.size() - 1),
         wanted_kind == kVoid
             ? base::Vector<ValueType>{}
             : base::VectorOf({ValueType::Primitive(wanted_kind)}),
@@ -811,7 +805,7 @@ class BodyGen {
 
   void return_op(DataRange* data) {
     auto returns = builder_->signature()->returns();
-    Generate(base::VectorOf(returns.begin(), returns.size()), data);
+    Generate(returns, data);
     builder_->Emit(kExprReturn);
   }
 
@@ -1123,11 +1117,9 @@ class BodyGen {
       }
       return;
     }
-    auto return_types =
-        base::VectorOf(sig->returns().begin(), sig->return_count());
     auto wanted_types =
         base::VectorOf(&wanted_kind, wanted_kind == kWasmVoid ? 0 : 1);
-    ConsumeAndGenerate(return_types, wanted_types, data);
+    ConsumeAndGenerate(sig->returns(), wanted_types, data);
   }
 
   struct Var {
@@ -1256,10 +1248,7 @@ class BodyGen {
     } else {
       int tag = data->get<uint8_t>() % builder_->builder()->NumTags();
       const FunctionSig* exception_sig = builder_->builder()->GetTagType(tag);
-      base::Vector<const ValueType> exception_types(
-          exception_sig->parameters().begin(),
-          exception_sig->parameter_count());
-      Generate(exception_types, data);
+      Generate(exception_sig->parameters(), data);
       builder_->EmitWithU32V(kExprThrow, tag);
     }
   }
@@ -1883,7 +1872,7 @@ class BodyGen {
       return false;
     }
 
-    Generate(base::VectorOf(break_types.data(), break_types.size() - 1), data);
+    Generate(break_types.SubVector(0, break_types.size() - 1), data);
     if (data->get<bool>()) {
       // br_on_cast
       HeapType source_type = top_type(break_type.heap_type());
@@ -1900,8 +1889,7 @@ class BodyGen {
       // Fallthrough: The type has been up-cast to the source type of the
       // br_on_cast instruction! (If the type on the stack was more specific,
       // this loses type information.)
-      base::SmallVector<ValueType, 32> fallthrough_types(
-          base::VectorOf(break_types));
+      base::SmallVector<ValueType, 32> fallthrough_types(break_types);
       fallthrough_types.back() = ValueType::RefMaybeNull(
           source_type, source_is_nullable ? kNullable : kNonNullable);
       ConsumeAndGenerate(base::VectorOf(fallthrough_types), {}, data);
@@ -1924,8 +1912,7 @@ class BodyGen {
       builder_->EmitI32V(source_type.code());
       builder_->EmitI32V(target_type.code());
       // Fallthrough: The type has been cast to the target type.
-      base::SmallVector<ValueType, 32> fallthrough_types(
-          base::VectorOf(break_types));
+      base::SmallVector<ValueType, 32> fallthrough_types(break_types);
       fallthrough_types.back() = ValueType::RefMaybeNull(
           target_type, target_is_nullable ? kNullable : kNonNullable);
       ConsumeAndGenerate(base::VectorOf(fallthrough_types), {}, data);
@@ -2204,6 +2191,10 @@ class BodyGen {
       local = GetValueType<options>(data, num_types);
       fn->AddLocal(local);
     }
+  }
+
+  int NumImportedFunctions() {
+    return builder_->builder()->NumImportedFunctions();
   }
 
   // Generator functions.
@@ -3065,7 +3056,7 @@ class BodyGen {
 
   void GenerateRef(HeapType type, DataRange* data,
                    Nullability nullability = kNullable) {
-    base::Optional<GeneratorRecursionScope> rec_scope;
+    std::optional<GeneratorRecursionScope> rec_scope;
     if (nullability) {
       rec_scope.emplace(this);
     }
@@ -3966,6 +3957,7 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
                                recursion_depth + 1));
       }
     }
+    case kF16:
     case kF32:
       return WasmInitExpr(0.0f);
     case kF64:
@@ -4389,38 +4381,121 @@ base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
 }
 
 namespace {
+
+bool HasSameReturns(const FunctionSig* a, const FunctionSig* b) {
+  if (a->return_count() != b->return_count()) return false;
+  for (size_t i = 0; i < a->return_count(); ++i) {
+    if (a->GetReturn(i) != b->GetReturn(i)) return false;
+  }
+  return true;
+}
+
 template <WasmModuleGenerationOptions options>
 void EmitDeoptAndReturnValues(BodyGen<options> gen_body, WasmFunctionBuilder* f,
                               const FunctionSig* target_sig,
                               uint32_t target_sig_index, uint32_t global_index,
-                              DataRange* data) {
-  // TODO(mliedtke): Add support for call_indirect and return calls as well.
-  gen_body.Generate(base::VectorOf(target_sig->parameters().begin(),
-                                   target_sig->parameters().size()),
-                    data);
+                              uint32_t table_index, DataRange* data) {
+  base::Vector<const ValueType> return_types = f->signature()->returns();
+  // Split the return types randomly and generate some values before the
+  // deopting call and some afterwards. (This makes sure that we have deopts
+  // where there are values on the wasm value stack which are not used by the
+  // deopting call itself.)
+  uint32_t returns_split = data->get<uint8_t>() % (return_types.size() + 1);
+  if (returns_split) {
+    gen_body.Generate(return_types.SubVector(0, returns_split), data);
+  }
+  gen_body.Generate(target_sig->parameters(), data);
   f->EmitWithU32V(kExprGlobalGet, global_index);
-  f->EmitWithU32V(kExprCallRef, target_sig_index);
-  gen_body.ConsumeAndGenerate(base::VectorOf(target_sig->returns().begin(),
-                                             target_sig->returns().size()),
-                              base::VectorOf(f->signature()->returns().begin(),
-                                             f->signature()->return_count()),
-                              data);
+  // Tail calls can only be emitted if the return types match.
+  bool same_returns = HasSameReturns(target_sig, f->signature());
+  size_t option_count = (same_returns + 1) * 2;
+  switch (data->get<uint8_t>() % option_count) {
+    case 0:
+      // Emit call_ref.
+      f->Emit(kExprTableGet);
+      f->EmitU32V(table_index);
+      f->EmitWithPrefix(kExprRefCast);
+      f->EmitI32V(target_sig_index);
+      f->EmitWithU32V(kExprCallRef, target_sig_index);
+      break;
+    case 1:
+      // Emit call_indirect.
+      f->EmitWithU32V(kExprCallIndirect, target_sig_index);
+      f->EmitByte(table_index);
+      break;
+    case 2:
+      // Emit return_call_ref.
+      f->Emit(kExprTableGet);
+      f->EmitU32V(table_index);
+      f->EmitWithPrefix(kExprRefCast);
+      f->EmitI32V(target_sig_index);
+      f->EmitWithU32V(kExprReturnCallRef, target_sig_index);
+      break;
+    case 3:
+      // Emit return_call_indirect.
+      f->EmitWithU32V(kExprReturnCallIndirect, target_sig_index);
+      f->EmitByte(table_index);
+      break;
+    default:
+      UNREACHABLE();
+  }
+  gen_body.ConsumeAndGenerate(target_sig->returns(),
+                              return_types.SubVectorFrom(returns_split), data);
 }
 
 template <WasmModuleGenerationOptions options>
 void EmitCallAndReturnValues(BodyGen<options> gen_body, WasmFunctionBuilder* f,
-                             const FunctionSig* callee_sig,
-                             uint32_t callee_index, DataRange* data) {
-  gen_body.Generate(base::VectorOf(callee_sig->parameters().begin(),
-                                   callee_sig->parameters().size()),
-                    data);
-  // TODO(mliedtke): Also support call_indirect, call_ref + return calls?
-  f->EmitWithU32V(kExprCallFunction, callee_index);
-  gen_body.ConsumeAndGenerate(base::VectorOf(callee_sig->returns().begin(),
-                                             callee_sig->returns().size()),
-                              base::VectorOf(f->signature()->returns().begin(),
-                                             f->signature()->return_count()),
-                              data);
+                             WasmFunctionBuilder* callee, uint32_t table_index,
+                             DataRange* data) {
+  const FunctionSig* callee_sig = callee->signature();
+  uint32_t callee_index =
+      callee->func_index() + gen_body.NumImportedFunctions();
+
+  base::Vector<const ValueType> return_types = f->signature()->returns();
+  // Split the return types randomly and generate some values before the
+  // deopting call and some afterwards to create more interesting test cases.
+  uint32_t returns_split = data->get<uint8_t>() % (return_types.size() + 1);
+  if (returns_split) {
+    gen_body.Generate(return_types.SubVector(0, returns_split), data);
+  }
+  gen_body.Generate(callee_sig->parameters(), data);
+  // Tail calls can only be emitted if the return types match.
+  bool same_returns = HasSameReturns(callee_sig, f->signature());
+  size_t option_count = (same_returns + 1) * 3;
+  switch (data->get<uint8_t>() % option_count) {
+    case 0:
+      f->EmitWithU32V(kExprCallFunction, callee_index);
+      break;
+    case 1:
+      f->EmitWithU32V(kExprRefFunc, callee_index);
+      f->EmitWithU32V(kExprCallRef, callee->sig_index());
+      break;
+    case 2:
+      // Note that this assumes that the declared function index is the same as
+      // the index of the function in the table.
+      f->EmitI32Const(callee->func_index());
+      f->EmitWithU32V(kExprCallIndirect, callee->sig_index());
+      f->EmitByte(table_index);
+      break;
+    case 3:
+      f->EmitWithU32V(kExprReturnCall, callee_index);
+      break;
+    case 4:
+      f->EmitWithU32V(kExprRefFunc, callee_index);
+      f->EmitWithU32V(kExprReturnCallRef, callee->sig_index());
+      break;
+    case 5:
+      // Note that this assumes that the declared function index is the same as
+      // the index of the function in the table.
+      f->EmitI32Const(callee->func_index());
+      f->EmitWithU32V(kExprReturnCallIndirect, callee->sig_index());
+      f->EmitByte(table_index);
+      break;
+    default:
+      UNREACHABLE();
+  }
+  gen_body.ConsumeAndGenerate(callee_sig->returns(),
+                              return_types.SubVectorFrom(returns_split), data);
 }
 }  // anonymous namespace
 
@@ -4490,10 +4565,12 @@ base::Vector<uint8_t> GenerateWasmModuleForDeopt(
   DCHECK_EQ(current_type_index, num_structs + num_arrays);
 
   // Create signature for call target.
+  std::vector<ValueType> return_types =
+      GenerateTypes<options>(&range, num_types);
   constexpr bool kIsFinal = true;
   const FunctionSig* target_sig = CreateSignature(
       builder.zone(), base::VectorOf(GenerateTypes<options>(&range, num_types)),
-      base::VectorOf(GenerateTypes<options>(&range, num_types)));
+      base::VectorOf(return_types));
   uint32_t target_sig_index = builder.ForceAddSignature(target_sig, kIsFinal);
 
   for (int i = 0; i < num_call_targets; ++i) {
@@ -4503,19 +4580,24 @@ base::Vector<uint8_t> GenerateWasmModuleForDeopt(
   }
 
   // Create signatures for inlinees.
+  // Use the same return types with a certain chance. This increases the chance
+  // to emit return calls.
+  uint8_t use_same_return = range.get<uint8_t>();
   for (int i = 0; i < num_inlinees; ++i) {
+    if ((use_same_return & (1 << i)) == 0) {
+      return_types = GenerateTypes<options>(&range, num_types);
+    }
     const FunctionSig* inlinee_sig = CreateSignature(
         builder.zone(),
         base::VectorOf(GenerateTypes<options>(&range, num_types)),
-        base::VectorOf(GenerateTypes<options>(&range, num_types)));
+        base::VectorOf(return_types));
     function_signatures.push_back(
         builder.ForceAddSignature(inlinee_sig, kIsFinal));
   }
 
   // Create signature for main function.
   const FunctionSig* main_sig = CreateSignature(
-      builder.zone(), base::VectorOf({ValueType::Ref(target_sig_index)}),
-      base::VectorOf({kWasmI32}));
+      builder.zone(), base::VectorOf({kWasmI32}), base::VectorOf({kWasmI32}));
   function_signatures.push_back(builder.ForceAddSignature(main_sig, kIsFinal));
 
   DCHECK_EQ(function_signatures.back(),
@@ -4533,16 +4615,26 @@ base::Vector<uint8_t> GenerateWasmModuleForDeopt(
     functions.push_back(builder.AddFunction(function_signatures[i]));
   }
 
+  uint32_t num_entries = num_call_targets + num_inlinees;
+  uint32_t table_index =
+      builder.AddTable(kWasmFuncRef, num_entries, num_entries);
+  WasmModuleBuilder::WasmElemSegment segment(zone, kWasmFuncRef, table_index,
+                                             WasmInitExpr(0));
+  for (uint32_t i = 0; i < num_entries; i++) {
+    segment.entries.emplace_back(
+        WasmModuleBuilder::WasmElemSegment::Entry::kRefFuncEntry,
+        builder.NumImportedFunctions() + i);
+  }
+  builder.AddElementSegment(std::move(segment));
+
   gen_module.GenerateRandomTables(array_types, struct_types);
 
-  // Create global for call target.
+  // Create global for call target index.
   // Simplification: This global is used to specify the call target at the deopt
   // point instead of passing the call target around dynamically.
-  uint32_t global_index = builder.AddExportedGlobal(
-      ValueType::RefNull(target_sig_index), true,
-      WasmInitExpr::RefNullConst(
-          HeapType(static_cast<uint32_t>(target_sig_index)).representation()),
-      base::StaticCharVector("call_target"));
+  uint32_t global_index =
+      builder.AddExportedGlobal(kWasmI32, true, WasmInitExpr(0),
+                                base::StaticCharVector("call_target_index"));
 
   // Create inlinee bodies.
   for (int i = 0; i < num_inlinees; ++i) {
@@ -4558,16 +4650,12 @@ base::Vector<uint8_t> GenerateWasmModuleForDeopt(
     if (i == 0) {
       // For the inner-most inlinee, emit the deopt point (e.g. a call_ref).
       EmitDeoptAndReturnValues(gen_body, f, target_sig, target_sig_index,
-                               global_index, &function_range);
+                               global_index, table_index, &function_range);
     } else {
       // All other inlinees call the previous inlinee.
       uint32_t callee_declared_index = declared_func_index - 1;
-      uint32_t callee_index =
-          callee_declared_index + builder.NumImportedFunctions();
-      const FunctionSig* callee_sig =
-          functions[callee_declared_index]->signature();
-      EmitCallAndReturnValues(gen_body, f, callee_sig, callee_index,
-                              &function_range);
+      EmitCallAndReturnValues(gen_body, f, functions[callee_declared_index],
+                              table_index, &function_range);
     }
     // TODO(v8:14639): Disable SIMD expressions if needed, so that a module is
     // always generated.
@@ -4600,16 +4688,12 @@ base::Vector<uint8_t> GenerateWasmModuleForDeopt(
     if (num_inlinees == 0) {
       // If we don't have any inlinees, directly emit the deopt point.
       EmitDeoptAndReturnValues(gen_body, f, target_sig, target_sig_index,
-                               global_index, &function_range);
+                               global_index, table_index, &function_range);
     } else {
       // Otherwise call the "outer-most" inlinee.
       uint32_t callee_declared_index = declared_func_index - 1;
-      uint32_t callee_index =
-          callee_declared_index + builder.NumImportedFunctions();
-      const FunctionSig* callee_sig =
-          functions[callee_declared_index]->signature();
-      EmitCallAndReturnValues(gen_body, f, callee_sig, callee_index,
-                              &function_range);
+      EmitCallAndReturnValues(gen_body, f, functions[callee_declared_index],
+                              table_index, &function_range);
     }
 
     // TODO(v8:14639): Disable SIMD expressions if needed, so that a module is

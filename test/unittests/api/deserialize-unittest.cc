@@ -241,19 +241,101 @@ TEST_F(DeserializeTest, OffThreadDeserializeRejectsDifferentSource) {
   }
 }
 
+class DeserializeStarterThread : public base::Thread {
+ public:
+  explicit DeserializeStarterThread(Isolate* isolate,
+                                    v8::ScriptCompiler::CachedData* cached_data)
+      : Thread(base::Thread::Options("DeserializeStarterThread")),
+        isolate_(isolate),
+        cached_data_(cached_data) {}
+
+  void Run() override {
+    DeserializeThread deserialize_thread(
+        ScriptCompiler::StartConsumingCodeCacheOnBackground(
+            isolate_, std::make_unique<ScriptCompiler::CachedData>(
+                          cached_data_->data, cached_data_->length,
+                          ScriptCompiler::CachedData::BufferNotOwned)));
+    CHECK(deserialize_thread.Start());
+    deserialize_thread.Join();
+    task_ = deserialize_thread.TakeTask();
+  }
+
+  std::unique_ptr<ScriptCompiler::ConsumeCodeCacheTask> TakeTask() {
+    return std::move(task_);
+  }
+
+ private:
+  Isolate* isolate_;
+  v8::ScriptCompiler::CachedData* cached_data_;
+  std::unique_ptr<ScriptCompiler::ConsumeCodeCacheTask> task_;
+};
+
+// Check that off-thread deserialization started from a background thread works.
+TEST_F(DeserializeTest, OffThreadDeserializeStartedFromBackgroundThread) {
+  std::unique_ptr<v8::ScriptCompiler::CachedData> cached_data;
+
+  {
+    IsolateAndContextScope scope(this);
+
+    Local<String> source_code = NewString("function foo() { return 42; }");
+    Local<Script> script =
+        Script::Compile(context(), source_code).ToLocalChecked();
+
+    CHECK(!script->Run(context()).IsEmpty());
+    CHECK_EQ(RunGlobalFunc("foo"), Integer::New(isolate(), 42));
+
+    cached_data.reset(
+        ScriptCompiler::CreateCodeCache(script->GetUnboundScript()));
+  }
+
+  {
+    IsolateAndContextScope scope(this);
+
+    DeserializeStarterThread deserialize_starter_thread(isolate(),
+                                                        cached_data.get());
+    CHECK(deserialize_starter_thread.Start());
+    {
+      // Check that code execution works wille the DeserializeStarterThread
+      // staring a ConsumeCodeCacheTask.
+      Local<String> other_source_code =
+          NewString("function bar() { return 21; }");
+      Local<Script> other_script =
+          Script::Compile(context(), other_source_code).ToLocalChecked();
+      CHECK(!other_script->Run(context()).IsEmpty());
+      CHECK_EQ(RunGlobalFunc("bar"), Integer::New(isolate(), 21));
+    }
+    deserialize_starter_thread.Join();
+
+    Local<String> source_code = NewString("function foo() { return 42; }");
+    ScriptCompiler::Source source(
+        source_code, cached_data.release(),
+        deserialize_starter_thread.TakeTask().release());
+    Local<Script> script =
+        ScriptCompiler::Compile(context(), &source,
+                                ScriptCompiler::kConsumeCodeCache)
+            .ToLocalChecked();
+
+    CHECK(!source.GetCachedData()->rejected);
+    CHECK(!script->Run(context()).IsEmpty());
+    CHECK_EQ(RunGlobalFunc("foo"), v8::Integer::New(isolate(), 42));
+  }
+}
+
 class MergeDeserializedCodeTest : public DeserializeTest {
  protected:
   // The source code used in these tests.
   static constexpr char kSourceCode[] = R"(
     // Looks like an IIFE but isn't, to get eagerly parsed:
-    var eager = (function () {
-      // Actual IIFE, also eagerly parsed:
-      return (function iife() {
-        return 42;
-      })();
-    });
-    // Lazily parsed:
-    var lazy = function () { return eager(); };
+    { let captured = 10;
+      var eager = (function () {
+        // Actual IIFE, also eagerly parsed:
+        return (function iife() {
+          return captured, 42;
+        })();
+      });
+      // Lazily parsed:
+      var lazy = function () { return eager(); };
+    }
   )";
 
   // Objects from the Script's object graph whose lifetimes and connectedness
@@ -309,7 +391,7 @@ class MergeDeserializedCodeTest : public DeserializeTest {
 
   static i::Tagged<i::Object> ExtractSharedFunctionInfoData(
       i::Tagged<i::SharedFunctionInfo> sfi, i::Isolate* i_isolate) {
-    i::Tagged<i::Object> data = sfi->GetData(i_isolate);
+    i::Tagged<i::Object> data = sfi->GetTrustedData(i_isolate);
     // BytecodeArrays live in trusted space and so cannot be referenced through
     // tagged/compressed pointers from e.g. a FixedArray. Instead, we need to
     // use their in-sandbox wrapper object for that purpose.
@@ -333,7 +415,7 @@ class MergeDeserializedCodeTest : public DeserializeTest {
                WeakOrSmi(toplevel_sfi->feedback_metadata()));
     i::Tagged<i::Script> script = i::Cast<i::Script>(toplevel_sfi->script());
     array->set(kScript, WeakOrSmi(script));
-    i::Tagged<i::WeakFixedArray> sfis = script->shared_function_infos();
+    i::Tagged<i::WeakFixedArray> sfis = script->infos();
     CHECK_EQ(sfis->length(), 4);
     CHECK_EQ(sfis->get(0), WeakOrSmi(toplevel_sfi));
     i::Tagged<i::SharedFunctionInfo> eager =

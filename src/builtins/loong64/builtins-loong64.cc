@@ -287,44 +287,21 @@ static void AssertCodeIsBaseline(MacroAssembler* masm, Register code,
             Operand(static_cast<int>(CodeKind::BASELINE)));
 }
 
-// Equivalent of SharedFunctionInfo::GetData
-static void GetSharedFunctionInfoData(MacroAssembler* masm, Register data,
-                                      Register sfi, Register scratch) {
-#ifdef V8_ENABLE_SANDBOX
-  DCHECK(!AreAliased(data, scratch));
-  DCHECK(!AreAliased(sfi, scratch));
-  // Use trusted_function_data if non-empy, otherwise the regular function_data.
-  Label use_tagged_field, done;
-  __ Ld_wu(scratch, FieldMemOperand(
-                        sfi, SharedFunctionInfo::kTrustedFunctionDataOffset));
-
-  __ Branch(&use_tagged_field, eq, scratch, Operand(zero_reg));
-  __ ResolveIndirectPointerHandle(data, scratch, kUnknownIndirectPointerTag);
-  __ Branch(&done);
-
-  __ bind(&use_tagged_field);
-  __ LoadTaggedField(
-      data, FieldMemOperand(sfi, SharedFunctionInfo::kFunctionDataOffset));
-  __ bind(&done);
-#else
-  __ LoadTaggedField(
-      data, FieldMemOperand(sfi, SharedFunctionInfo::kFunctionDataOffset));
-#endif  // V8_ENABLE_SANDBOX
-}
-
 // TODO(v8:11429): Add a path for "not_compiled" and unify the two uses under
 // the more general dispatch.
-static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
-                                                    Register sfi,
-                                                    Register bytecode,
-                                                    Register scratch1,
-                                                    Label* is_baseline) {
+static void GetSharedFunctionInfoBytecodeOrBaseline(
+    MacroAssembler* masm, Register sfi, Register bytecode, Register scratch1,
+    Label* is_baseline, Label* is_unavailable) {
   DCHECK(!AreAliased(bytecode, scratch1));
   ASM_CODE_COMMENT(masm);
   Label done;
 
   Register data = bytecode;
-  GetSharedFunctionInfoData(masm, data, sfi, scratch1);
+  __ LoadTrustedPointerField(
+      data,
+      FieldMemOperand(sfi, SharedFunctionInfo::kTrustedFunctionDataOffset),
+      kUnknownIndirectPointerTag);
+
   __ GetObjectType(data, scratch1, scratch1);
 
 #ifndef V8_JITLESS
@@ -344,6 +321,9 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
       bytecode, FieldMemOperand(data, InterpreterData::kBytecodeArrayOffset));
 
   __ bind(&done);
+
+  __ GetObjectType(bytecode, scratch1, scratch1);
+  __ Branch(is_unavailable, ne, scratch1, Operand(BYTECODE_ARRAY_TYPE));
 }
 
 // static
@@ -428,17 +408,23 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
 
   // Underlying function needs to have bytecode available.
   if (v8_flags.debug_code) {
-    Label is_baseline;
+    Label ok, is_baseline, is_unavailable;
     Register sfi = a3;
     Register bytecode = a3;
     __ LoadTaggedField(
         sfi, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
     GetSharedFunctionInfoBytecodeOrBaseline(masm, sfi, bytecode, t5,
-                                            &is_baseline);
+                                            &is_baseline, &is_unavailable);
+    __ Branch(&ok);
+
+    __ bind(&is_unavailable);
+    __ Abort(AbortReason::kMissingBytecodeArray);
+
+    __ bind(&is_baseline);
     __ GetObjectType(a3, a3, bytecode);
     __ Assert(eq, AbortReason::kMissingBytecodeArray, bytecode,
-              Operand(BYTECODE_ARRAY_TYPE));
-    __ bind(&is_baseline);
+              Operand(CODE_TYPE));
+    __ bind(&ok);
   }
 
   // Resume (Ignition/TurboFan) generator object.
@@ -585,10 +571,10 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
   // JS frames on top.
   __ St_d(zero_reg, MemOperand(s5, 0));
 
-  __ li(s1, ExternalReference::fast_c_call_caller_fp_address(masm->isolate()));
+  __ LoadIsolateField(s1, IsolateFieldId::kFastCCallCallerFP);
   __ Ld_d(s2, MemOperand(s1, 0));
   __ St_d(zero_reg, MemOperand(s1, 0));
-  __ li(s1, ExternalReference::fast_c_call_caller_pc_address(masm->isolate()));
+  __ LoadIsolateField(s1, IsolateFieldId::kFastCCallCallerPC);
   __ Ld_d(s3, MemOperand(s1, 0));
   __ St_d(zero_reg, MemOperand(s1, 0));
   __ Push(s2, s3);
@@ -703,9 +689,9 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
 
   // Restore the top frame descriptors from the stack.
   __ Pop(a4, a5);
-  __ li(a6, ExternalReference::fast_c_call_caller_fp_address(masm->isolate()));
+  __ LoadIsolateField(a6, IsolateFieldId::kFastCCallCallerFP);
   __ St_d(a4, MemOperand(a6, 0));
-  __ li(a6, ExternalReference::fast_c_call_caller_pc_address(masm->isolate()));
+  __ LoadIsolateField(a6, IsolateFieldId::kFastCCallCallerPC);
   __ St_d(a5, MemOperand(a6, 0));
 
   __ Pop(a5);
@@ -1133,15 +1119,13 @@ void Builtins::Generate_InterpreterEntryTrampoline(
       sfi, FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
   ResetSharedFunctionInfoAge(masm, sfi);
 
-  Label is_baseline;
-  GetSharedFunctionInfoBytecodeOrBaseline(
-      masm, sfi, kInterpreterBytecodeArrayRegister, kScratchReg, &is_baseline);
 
   // The bytecode array could have been flushed from the shared function info,
   // if so, call into CompileLazy.
-  Label compile_lazy;
-  __ JumpIfObjectType(&compile_lazy, ne, kInterpreterBytecodeArrayRegister,
-                      BYTECODE_ARRAY_TYPE, kScratchReg);
+  Label is_baseline, compile_lazy;
+  GetSharedFunctionInfoBytecodeOrBaseline(
+      masm, sfi, kInterpreterBytecodeArrayRegister, kScratchReg, &is_baseline,
+      &compile_lazy);
 
   Label push_stack_frame;
   Register feedback_vector = a2;
@@ -1717,7 +1701,9 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   __ Ld_d(t0, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
   __ LoadTaggedField(
       t0, FieldMemOperand(t0, JSFunction::kSharedFunctionInfoOffset));
-  GetSharedFunctionInfoData(masm, t0, t0, t1);
+  __ LoadTrustedPointerField(
+      t0, FieldMemOperand(t0, SharedFunctionInfo::kTrustedFunctionDataOffset),
+      kUnknownIndirectPointerTag);
   __ JumpIfObjectType(&builtin_trampoline, ne, t0, INTERPRETER_DATA_TYPE,
                       kInterpreterDispatchTableRegister);
 
@@ -3051,21 +3037,20 @@ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
 void Builtins::Generate_JSToWasmWrapperAsm(MacroAssembler* masm) { __ Trap(); }
 
 void Builtins::Generate_WasmToOnHeapWasmToJsTrampoline(MacroAssembler* masm) {
-  // Load the code pointer from the WasmApiFunctionRef and tail-call there.
-  Register api_function_ref = wasm::kGpParamRegisters[0];
+  // Load the code pointer from the WasmImportData and tail-call there.
+  Register import_data = wasm::kGpParamRegisters[0];
   // Use t0 which is not in kGpParamRegisters.
   Register call_target = t0;
   UseScratchRegisterScope temps{masm};
   temps.Exclude(call_target);
 #ifdef V8_ENABLE_SANDBOX
   __ LoadCodeEntrypointViaCodePointer(
-      call_target,
-      FieldMemOperand(api_function_ref, WasmApiFunctionRef::kCodeOffset),
+      call_target, FieldMemOperand(import_data, WasmImportData::kCodeOffset),
       kWasmEntrypointTag);
 #else
   Register code = call_target;
-  __ LoadTaggedField(
-      code, FieldMemOperand(api_function_ref, WasmApiFunctionRef::kCodeOffset));
+  __ LoadTaggedField(code,
+                     FieldMemOperand(import_data, WasmImportData::kCodeOffset));
   __ Ld_d(call_target, FieldMemOperand(code, Code::kInstructionStartOffset));
 #endif
   __ Jump(call_target);
@@ -3129,7 +3114,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
   // a0 = argc, a1 = argv, a2 = isolate, s1 = target_fun
   DCHECK_EQ(kCArgRegs[0], argc_input);
   DCHECK_EQ(kCArgRegs[1], argv);
-  __ li(kCArgRegs[2], ExternalReference::isolate_address(masm->isolate()));
+  __ li(kCArgRegs[2], ER::isolate_address());
 
   __ StoreReturnAddressAndCall(target_fun);
 
@@ -3187,7 +3172,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
     __ PrepareCallCFunction(3, 0, a0);
     __ mov(kCArgRegs[0], zero_reg);
     __ mov(kCArgRegs[1], zero_reg);
-    __ li(kCArgRegs[2], ER::isolate_address(masm->isolate()));
+    __ li(kCArgRegs[2], ER::isolate_address());
     __ CallCFunction(ER::Create(Runtime::kUnwindAndFindExceptionHandler), 3,
                      SetIsolateDataSlots::kNo);
   }
@@ -3370,7 +3355,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
   __ St_d(holder, MemOperand(sp, FCA::kHolderIndex * kSystemPointerSize));
 
   // kIsolate.
-  __ li(scratch, ER::isolate_address(masm->isolate()));
+  __ li(scratch, ER::isolate_address());
   __ St_d(scratch, MemOperand(sp, FCA::kIsolateIndex * kSystemPointerSize));
 
   // kContext.
@@ -3488,7 +3473,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   __ LoadTaggedField(scratch,
                      FieldMemOperand(callback, AccessorInfo::kDataOffset));
   __ LoadRoot(undef, RootIndex::kUndefinedValue);
-  __ li(scratch2, ER::isolate_address(masm->isolate()));
+  __ li(scratch2, ER::isolate_address());
   Register holderV2 = zero_reg;
   __ Push(receiver, scratch,  // kThisIndex, kDataIndex
           undef, holderV2);   // kReturnValueIndex, kHolderV2Index
@@ -3519,7 +3504,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   DCHECK(!AreAliased(api_function_address, property_callback_info_arg, name_arg,
                      callback, scratch, scratch2));
 
-#ifdef V8_ENABLE_DIRECT_LOCAL
+#ifdef V8_ENABLE_DIRECT_HANDLE
   // name_arg = Local<Name>(name), name value was pushed to GC-ed stack space.
   // |name_arg| is already initialized above.
 #else
@@ -3633,7 +3618,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
   __ li(a1, Operand(static_cast<int>(deopt_kind)));
   // a2: code address or 0 already loaded.
   // a3: already has fp-to-sp delta.
-  __ li(a4, ExternalReference::isolate_address(isolate));
+  __ li(a4, ExternalReference::isolate_address());
 
   // Call Deoptimizer::New().
   {
@@ -3801,7 +3786,10 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
     ResetSharedFunctionInfoAge(masm, code_obj);
   }
 
-  GetSharedFunctionInfoData(masm, code_obj, code_obj, t2);
+  __ LoadTrustedPointerField(
+      code_obj,
+      FieldMemOperand(code_obj, SharedFunctionInfo::kTrustedFunctionDataOffset),
+      kUnknownIndirectPointerTag);
 
   // Check if we have baseline code. For OSR entry it is safe to assume we
   // always have baseline code.

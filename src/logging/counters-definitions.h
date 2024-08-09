@@ -56,20 +56,31 @@ namespace internal {
   HR(wasm_module_code_size_mb, V8.WasmModuleCodeSizeMiB, 0, 1024, 64)          \
   /* Newer histogram, in KiB (0..100MB). */                                    \
   HR(wasm_module_code_size_kb, V8.WasmModuleCodeSizeKiB, 0, 1024 * 100, 101)   \
+  /* Metadata size per module, collected on GC. */                             \
+  HR(wasm_module_metadata_size_kb, V8.WasmModuleMetadataSizeKiB, 0,            \
+     1024 * 100, 101)                                                          \
+  /* Metadata of the whole Wasm engine, collected on GC. */                    \
+  HR(wasm_engine_metadata_size_kb, V8.WasmEngineMetadataSizeKiB, 0,            \
+     1024 * 100, 101)                                                          \
   /* Percent of freed code size per module, collected on GC. */                \
   HR(wasm_module_freed_code_size_percent, V8.WasmModuleCodeSizePercentFreed,   \
      0, 100, 32)                                                               \
   /* Number of code GCs triggered per native module, collected on code GC. */  \
   HR(wasm_module_num_triggered_code_gcs,                                       \
      V8.WasmModuleNumberOfCodeGCsTriggered, 1, 128, 20)                        \
-  /* The amount of Liftoff code flushed on emergency GCs for allocations and   \
-   * on memory pressure. */                                                    \
+  /* The amount of executable Liftoff code flushed on emergency GCs for */     \
+  /* allocations and on memory pressure. */                                    \
   HR(wasm_flushed_liftoff_code_size_bytes, V8.WasmFlushedLiftoffCodeSizeBytes, \
      0, GB, 101)                                                               \
+  /* The size of flushed Liftoff meta data on emergency GCs for allocations */ \
+  /* and on memory pressure. */                                                \
+  HR(wasm_flushed_liftoff_metadata_size_bytes,                                 \
+     V8.WasmFlushedLiftoffMetadataSizeBytes, 0, GB, 101)                       \
   /* Number of code spaces reserved per wasm module. */                        \
   HR(wasm_module_num_code_spaces, V8.WasmModuleNumberOfCodeSpaces, 1, 128, 20) \
   /* Number of deopts triggered in webassembly code. */                        \
   HR(wasm_deopts_executed, V8.WasmDeoptsExecutedCount, 0, 10000, 51)           \
+  HR(wasm_deopts_per_function, V8.WasmDeoptsPerFunction, 0, 500, 21)           \
   /* Number of live modules per isolate. */                                    \
   HR(wasm_modules_per_isolate, V8.WasmModulesPerIsolate, 1, 1024, 30)          \
   /* Number of live modules per engine (i.e. whole process). */                \
@@ -96,6 +107,8 @@ namespace internal {
      kMaxTrustedPointers, 101)                                                 \
   HR(cppheap_pointers_count, V8.SandboxedCppHeapPointersCount, 0,              \
      kMaxCppHeapPointers, 101)                                                 \
+  HR(js_dispatch_table_entries_count, V8.JSDispatchTableEntriesCount, 0,       \
+     kMaxJSDispatchEntries, 101)                                               \
   /* Outcome of external pointer table compaction: kSuccess, */                \
   /* kPartialSuccessor kAbortedDuringSweeping. See */                          \
   /* ExternalPointerTable::TableCompactionOutcome enum for more details. */    \
@@ -103,6 +116,18 @@ namespace internal {
      V8.ExternalPointerTableCompactionOutcome, 0, 2, 3)                        \
   HR(wasm_compilation_method, V8.WasmCompilationMethod, 0, 4, 5)               \
   HR(asmjs_instantiate_result, V8.AsmjsInstantiateResult, 0, 1, 2)
+
+#if V8_ENABLE_DRUMBRAKE
+#define HISTOGRAM_RANGE_LIST_SLOW(HR)                                         \
+  /* Percentage (*1000) of time spent running Wasm jitted code. */            \
+  HR(wasm_jit_execution_ratio, V8.JitWasmExecutionPercentage, 0, 100000, 101) \
+  HR(wasm_jit_execution_too_slow, V8.JitWasmExecutionTooSlow, 0, 100000, 101) \
+  /* Percentage (*1000) of time spent running in the Wasm interpreter. */     \
+  HR(wasm_jitless_execution_ratio, V8.JitlessWasmExecutionPercentage, 0,      \
+     100000, 101)                                                             \
+  HR(wasm_jitless_execution_too_slow, V8.JitlessWasmExecutionTooSlow, 0,      \
+     100000, 101)
+#endif  // V8_ENABLE_DRUMBRAKE
 
 // Like TIMED_HISTOGRAM_LIST, but allows the use of NestedTimedHistogramScope.
 // HT(name, caption, max, unit)
@@ -358,6 +383,7 @@ namespace internal {
   SC(lo_space_bytes_used, V8.MemoryLoSpaceBytesUsed)                           \
   SC(wasm_generated_code_size, V8.WasmGeneratedCodeBytes)                      \
   SC(wasm_reloc_size, V8.WasmRelocBytes)                                       \
+  SC(wasm_deopt_data_size, V8.WasmDeoptDataBytes)                              \
   SC(wasm_lazily_compiled_functions, V8.WasmLazilyCompiledFunctions)           \
   SC(wasm_compiled_export_wrapper, V8.WasmCompiledExportWrappers)
 

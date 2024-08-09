@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -47,6 +48,7 @@
 #include "src/roots/roots.h"
 #include "src/sandbox/code-pointer-table.h"
 #include "src/sandbox/external-pointer-table.h"
+#include "src/sandbox/js-dispatch-table.h"
 #include "src/sandbox/trusted-pointer-table.h"
 #include "src/utils/allocation.h"
 #include "testing/gtest/include/gtest/gtest_prod.h"  // nogncheck
@@ -811,8 +813,8 @@ class Heap final {
 
   CodePointerTable::Space* code_pointer_space() { return &code_pointer_space_; }
 
-  ExternalBufferTable::Space* external_buffer_space() {
-    return &external_buffer_space_;
+  JSDispatchTable::Space* js_dispatch_table_space() {
+    return &js_dispatch_table_space_;
   }
 #endif  // V8_ENABLE_SANDBOX
 
@@ -851,7 +853,7 @@ class Heap final {
   const base::AddressRegion& code_region();
 
   CodeRange* code_range() {
-#if V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#ifdef V8_COMPRESS_POINTERS
     return code_range_;
 #else
     return code_range_.get();
@@ -1028,7 +1030,6 @@ class Heap final {
   uint8_t* IsMarkingFlagAddress();
   uint8_t* IsMinorMarkingFlagAddress();
 
-  void ClearRecordedSlot(Tagged<HeapObject> object, ObjectSlot slot);
   void ClearRecordedSlotRange(Address start, Address end);
   static int InsertIntoRememberedSetFromCode(MutablePageMetadata* chunk,
                                              size_t slot_offset);
@@ -1528,12 +1529,12 @@ class Heap final {
   V8_EXPORT_PRIVATE Tagged<Code> FindCodeForInnerPointer(Address inner_pointer);
   // Use the GcSafe family of functions if called while GC is in progress.
   Tagged<GcSafeCode> GcSafeFindCodeForInnerPointer(Address inner_pointer);
-  base::Optional<Tagged<GcSafeCode>> GcSafeTryFindCodeForInnerPointer(
+  std::optional<Tagged<GcSafeCode>> GcSafeTryFindCodeForInnerPointer(
       Address inner_pointer);
-  base::Optional<Tagged<InstructionStream>>
+  std::optional<Tagged<InstructionStream>>
   GcSafeTryFindInstructionStreamForInnerPointer(Address inner_pointer);
   // Only intended for use from the `jco` gdb macro.
-  base::Optional<Tagged<Code>> TryFindCodeForInnerPointerForPrinting(
+  std::optional<Tagged<Code>> TryFindCodeForInnerPointerForPrinting(
       Address inner_pointer);
 
   // Returns true if {addr} is contained within {instruction_stream} and false
@@ -2184,9 +2185,8 @@ class Heap final {
   // The space in the process-wide code pointer table managed by this heap.
   CodePointerTable::Space code_pointer_space_;
 
-  // The space in the ExternalBufferTable containing entries owned by objects
-  // in this heap.
-  ExternalBufferTable::Space external_buffer_space_;
+  // The space in the process-wide JSDispatchTable managed by this heap.
+  JSDispatchTable::Space js_dispatch_table_space_;
 #endif  // V8_ENABLE_SANDBOX
 
   LocalHeap* main_thread_local_heap_ = nullptr;
@@ -2285,11 +2285,11 @@ class Heap final {
   std::shared_ptr<v8::TaskRunner> task_runner_;
 
   // This object controls virtual space reserved for code on the V8 heap. This
-  // is only valid for 64-bit architectures where kRequiresCodeRange.
+  // is only valid for 64-bit architectures where kPlatformRequiresCodeRange.
   //
-  // Owned by the heap when !V8_COMPRESS_POINTERS_IN_SHARED_CAGE, otherwise is
-  // process-wide.
-#if V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+  // Owned by the isolate group when V8_COMPRESS_POINTERS, otherwise owned by
+  // the heap.
+#ifdef V8_COMPRESS_POINTERS
   CodeRange* code_range_ = nullptr;
 #else
   std::unique_ptr<CodeRange> code_range_;
@@ -2410,6 +2410,10 @@ class Heap final {
 
   std::atomic<double> load_start_time_ms_{0};
   bool update_allocation_limits_after_loading_ = false;
+  // Full GC may trigger during loading due to overshooting allocation limits.
+  // In such cases we may want to update the limits again once loading is
+  // actually finished.
+  bool is_full_gc_during_loading_ = false;
 
   // Classes in "heap" can be friends.
   friend class ActivateMemoryReducerTask;

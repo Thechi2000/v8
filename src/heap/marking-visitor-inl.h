@@ -25,6 +25,7 @@
 #include "src/objects/smi.h"
 #include "src/objects/string.h"
 #include "src/sandbox/external-pointer-inl.h"
+#include "src/sandbox/js-dispatch-table-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -78,6 +79,15 @@ void MarkingVisitorBase<ConcreteVisitor>::ProcessStrongHeapObject(
   concrete_visitor()->RecordSlot(host, slot, heap_object);
 }
 
+// static
+template <typename ConcreteVisitor>
+V8_INLINE constexpr bool
+MarkingVisitorBase<ConcreteVisitor>::IsTrivialWeakReferenceValue(
+    Tagged<HeapObject> host, Tagged<HeapObject> heap_object) {
+  return !IsMap(heap_object) ||
+         !(IsMap(host) || IsTransitionArray(host) || IsDescriptorArray(host));
+}
+
 // class template arguments
 template <typename ConcreteVisitor>
 // method template arguments
@@ -101,7 +111,16 @@ void MarkingVisitorBase<ConcreteVisitor>::ProcessWeakHeapObject(
     // If we do not know about liveness of the value, we have to process
     // the reference when we know the liveness of the whole transitive
     // closure.
-    local_weak_objects_->weak_references_local.Push(std::make_pair(host, slot));
+    // Distinguish trivial cases (non involving custom weakness) from
+    // non-trivial ones. The latter are maps in host objects of type Map,
+    // TransitionArray and DescriptorArray.
+    if (V8_LIKELY(IsTrivialWeakReferenceValue(host, heap_object))) {
+      local_weak_objects_->weak_references_trivial_local.Push(
+          HeapObjectAndSlot{host, slot});
+    } else {
+      local_weak_objects_->weak_references_non_trivial_local.Push(
+          HeapObjectAndSlot{host, slot});
+    }
   }
 }
 
@@ -161,7 +180,7 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitEmbeddedPointer(
     Tagged<Code> code = UncheckedCast<Code>(host->raw_code(kAcquireLoad));
     if (code->IsWeakObject(object)) {
       local_weak_objects_->weak_objects_in_code_local.Push(
-          std::make_pair(object, code));
+          HeapObjectAndCode{object, code});
       concrete_visitor()->AddWeakReferenceForReferenceSummarizer(host, object);
     } else {
       MarkObject(host, object, target_worklist.value());
@@ -272,6 +291,16 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitTrustedPointerTableEntry(
   concrete_visitor()->MarkPointerTableEntry(host, slot);
 }
 
+template <typename ConcreteVisitor>
+void MarkingVisitorBase<ConcreteVisitor>::VisitJSDispatchTableEntry(
+    Tagged<HeapObject> host, JSDispatchHandle handle) {
+#ifdef V8_ENABLE_SANDBOX
+  JSDispatchTable* table = GetProcessWideJSDispatchTable();
+  JSDispatchTable::Space* space = heap_->js_dispatch_table_space();
+  table->Mark(space, handle);
+#endif  // V8_ENABLE_SANDBOX
+}
+
 // ===========================================================================
 // Object participating in bytecode flushing =================================
 // ===========================================================================
@@ -321,9 +350,14 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitSharedFunctionInfo(
                              SharedFunctionInfo::kTrustedFunctionDataOffset,
                              kUnknownIndirectPointerTag),
                          IndirectPointerMode::kStrong);
+#else
+    VisitPointer(
+        shared_info,
+        shared_info->RawField(SharedFunctionInfo::kTrustedFunctionDataOffset));
 #endif
-    VisitPointer(shared_info, shared_info->RawField(
-                                  SharedFunctionInfo::kFunctionDataOffset));
+    VisitPointer(shared_info,
+                 shared_info->RawField(
+                     SharedFunctionInfo::kUntrustedFunctionDataOffset));
   } else if (!IsByteCodeFlushingEnabled(code_flush_mode_)) {
     // If bytecode flushing is disabled but baseline code flushing is enabled
     // then we have to visit the bytecode but not the baseline code.
@@ -355,7 +389,7 @@ bool MarkingVisitorBase<ConcreteVisitor>::HasBytecodeArrayForFlushing(
   // Get a snapshot of the function data field, and if it is a bytecode array,
   // check if it is old. Note, this is done this way since this function can be
   // called by the concurrent marker.
-  Tagged<Object> data = sfi->GetData(heap_->isolate());
+  Tagged<Object> data = sfi->GetTrustedData(heap_->isolate());
   if (IsCode(data)) {
     Tagged<Code> baseline_code = Cast<Code>(data);
     DCHECK_EQ(baseline_code->kind(), CodeKind::BASELINE);
@@ -395,10 +429,12 @@ template <typename ConcreteVisitor>
 void MarkingVisitorBase<ConcreteVisitor>::MakeOlder(
     Tagged<SharedFunctionInfo> sfi) const {
   if (v8_flags.flush_code_based_on_time) {
-    DCHECK_NE(code_flushing_increase_, 0);
+    if (code_flushing_increase_ == 0) {
+      return;
+    }
+
     uint16_t current_age;
     uint16_t updated_age;
-
     do {
       current_age = sfi->age();
       // When the age is 0, it was reset by the function prologue in
@@ -620,7 +656,6 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitWeakCell(
         weak_cell, unregister_token);
   }
   return Base::VisitWeakCell(map, weak_cell);
-  ;
 }
 
 // ===========================================================================

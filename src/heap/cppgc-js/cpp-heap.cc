@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <numeric>
+#include <optional>
 
 #include "include/cppgc/heap-consistency.h"
 #include "include/cppgc/platform.h"
@@ -15,7 +16,6 @@
 #include "include/v8-platform.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
-#include "src/base/optional.h"
 #include "src/base/platform/time.h"
 #include "src/execution/isolate-inl.h"
 #include "src/flags/flags.h"
@@ -396,21 +396,21 @@ bool CppHeap::MetricRecorderAdapter::YoungGCMetricsReportPending() const {
   return last_young_gc_event_.has_value();
 }
 
-const base::Optional<cppgc::internal::MetricRecorder::GCCycle>
+const std::optional<cppgc::internal::MetricRecorder::GCCycle>
 CppHeap::MetricRecorderAdapter::ExtractLastFullGcEvent() {
   auto res = std::move(last_full_gc_event_);
   last_full_gc_event_.reset();
   return res;
 }
 
-const base::Optional<cppgc::internal::MetricRecorder::GCCycle>
+const std::optional<cppgc::internal::MetricRecorder::GCCycle>
 CppHeap::MetricRecorderAdapter::ExtractLastYoungGcEvent() {
   auto res = std::move(last_young_gc_event_);
   last_young_gc_event_.reset();
   return res;
 }
 
-const base::Optional<cppgc::internal::MetricRecorder::MainThreadIncrementalMark>
+const std::optional<cppgc::internal::MetricRecorder::MainThreadIncrementalMark>
 CppHeap::MetricRecorderAdapter::ExtractLastIncrementalMarkEvent() {
   auto res = std::move(last_incremental_mark_event_);
   last_incremental_mark_event_.reset();
@@ -898,15 +898,9 @@ void CppHeap::FinishMarkingAndProcessWeakness() {
     marker_->LeaveAtomicPause();
   }
   marker_.reset();
-}
 
-void CppHeap::CompactAndSweep() {
-  if (!TracingInitialized()) {
-    return;
-  }
-  // TODO(336734387): This should be moved at the end of marking. Currently
-  // global limit computation considers live+dead memory.
   if (isolate_) {
+    // The size is used for recomputing the global heap limit.
     used_size_ = stats_collector_->marked_bytes();
     // Force a check next time increased memory is reported. This allows for
     // setting limits close to actual heap sizes.
@@ -915,6 +909,13 @@ void CppHeap::CompactAndSweep() {
     RecordEmbedderSpeed(isolate_->heap()->tracer(),
                         stats_collector_->marking_time(), used_size_);
   }
+}
+
+void CppHeap::CompactAndSweep() {
+  if (!TracingInitialized()) {
+    return;
+  }
+
   // The allocated bytes counter in v8 was reset to the current marked bytes, so
   // any pending allocated bytes updates should be discarded.
   buffered_allocated_bytes_ = 0;
@@ -939,7 +940,7 @@ void CppHeap::CompactAndSweep() {
     cppgc::internal::SweepingConfig::CompactableSpaceHandling
         compactable_space_handling;
     {
-      base::Optional<SweepingOnMutatorThreadForGlobalHandlesScope>
+      std::optional<SweepingOnMutatorThreadForGlobalHandlesScope>
           global_handles_scope;
       if (isolate_) {
         global_handles_scope.emplace(*isolate_->traced_handles());
@@ -1008,10 +1009,13 @@ void CppHeap::ReportBufferedAllocationSizeIfPossible() {
             heap->main_thread_local_heap(),
             heap->GCFlagsForIncrementalMarking(),
             kGCCallbackScheduleIdleGarbageCollection);
-        if (heap->incremental_marking()->IsMajorMarking() &&
-            heap->AllocationLimitOvershotByLargeMargin()) {
-          heap->FinalizeIncrementalMarkingAtomically(
-              i::GarbageCollectionReason::kExternalFinalize);
+        if (heap->incremental_marking()->IsMajorMarking()) {
+          if (heap->AllocationLimitOvershotByLargeMargin()) {
+            heap->FinalizeIncrementalMarkingAtomically(
+                i::GarbageCollectionReason::kExternalFinalize);
+          } else {
+            heap->incremental_marking()->AdvanceOnAllocation();
+          }
         }
         allocated_size_limit_for_check_ =
             allocated_size_ + kIncrementalMarkingCheckInterval;
@@ -1259,9 +1263,9 @@ void CppHeap::StartIncrementalGarbageCollection(cppgc::internal::GCConfig) {
 size_t CppHeap::epoch() const { UNIMPLEMENTED(); }
 
 #ifdef V8_ENABLE_ALLOCATION_TIMEOUT
-v8::base::Optional<int> CppHeap::UpdateAllocationTimeout() {
+std::optional<int> CppHeap::UpdateAllocationTimeout() {
   if (!v8_flags.cppgc_random_gc_interval) {
-    return v8::base::nullopt;
+    return std::nullopt;
   }
   if (!allocation_timeout_rng_) {
     allocation_timeout_rng_.emplace(v8_flags.fuzzer_random_seed);

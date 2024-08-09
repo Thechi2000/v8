@@ -546,6 +546,7 @@ class V8_EXPORT Isolate {
     kInvalidatedStringWrapperToPrimitiveProtector = 140,
     kDocumentAllLegacyCall = 141,
     kDocumentAllLegacyConstruct = 142,
+    kConsoleContext = 143,
 
     // If you add new values here, you'll also need to update Chromium's:
     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
@@ -561,6 +562,21 @@ class V8_EXPORT Isolate {
     kMessageWarning = (1 << 4),
     kMessageAll = kMessageLog | kMessageDebug | kMessageInfo | kMessageError |
                   kMessageWarning,
+  };
+
+  // The different priorities that an isolate can have.
+  enum class Priority {
+    // The isolate does not relate to content that is currently important
+    // to the user. Lowest priority.
+    kBestEffort,
+
+    // The isolate contributes to content that is visible to the user, like a
+    // visible iframe that's not interacted directly with. High priority.
+    kUserVisible,
+
+    // The isolate contributes to content that is of the utmost importance to
+    // the user, like visible content in the focused window. Highest priority.
+    kUserBlocking,
   };
 
   using UseCounterCallback = void (*)(Isolate* isolate,
@@ -919,6 +935,12 @@ class V8_EXPORT Isolate {
    * https://html.spec.whatwg.org/multipage/webappapis.html#incumbent
    */
   Local<Context> GetIncumbentContext();
+
+  /**
+   * Returns the host defined options set for currently running script or
+   * module, if available.
+   */
+  MaybeLocal<Data> GetCurrentHostDefinedOptions();
 
   /**
    * Schedules a v8::Exception::Error with the given message.
@@ -1380,13 +1402,21 @@ class V8_EXPORT Isolate {
    * Optional notification that the isolate switched to the foreground.
    * V8 uses these notifications to guide heuristics.
    */
+  V8_DEPRECATE_SOON("Use SetPriority(Priority::kUserBlocking) instead")
   void IsolateInForegroundNotification();
 
   /**
    * Optional notification that the isolate switched to the background.
    * V8 uses these notifications to guide heuristics.
    */
+  V8_DEPRECATE_SOON("Use SetPriority(Priority::kBestEffort) instead")
   void IsolateInBackgroundNotification();
+
+  /**
+   * Optional notification that the isolate changed `priority`.
+   * V8 uses the priority value to guide heuristics.
+   */
+  void SetPriority(Priority priority);
 
   /**
    * Optional notification to tell V8 the current performance requirements
@@ -1571,6 +1601,9 @@ class V8_EXPORT Isolate {
    * Register callback to control whether compile hints magic comments are
    * enabled.
    */
+  V8_DEPRECATED(
+      "Will be removed, use ScriptCompiler::CompileOptions for enabling the "
+      "compile hints magic comments")
   void SetJavaScriptCompileHintsMagicEnabledCallback(
       JavaScriptCompileHintsMagicEnabledCallback callback);
 

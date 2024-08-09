@@ -110,6 +110,14 @@
       },
     ],
   },
+  'v8_linux_full_dbg': {
+    'swarming_dimensions': {
+      'os': 'Ubuntu-22.04',
+    },
+    'tests': [
+      {'name': 'v8testing', 'variant': 'default', 'shards': 6},
+    ],
+  },
   'v8_linux_gc_stress_dbg': {
     'swarming_dimensions' : {
       'os': 'Ubuntu-22.04',
@@ -546,6 +554,14 @@
       {'name': 'v8testing'},
     ],
   },
+  'v8_linux64_jammy_gcc_rel': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+    },
+    'tests': [
+      {'name': 'v8testing'},
+    ],
+  },
   'v8_linux64_minor_mc_dbg': {
     'swarming_dimensions' : {
       'cpu': 'x86-64-avx2',
@@ -598,6 +614,14 @@
     ],
   },
   'v8_linux64_perfetto_dbg': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+    },
+    'tests': [
+      {'name': 'v8testing', 'shards': 3},
+    ],
+  },
+  'v8_linux64_no_leaptiering_dbg': {
     'swarming_dimensions' : {
       'os': 'Ubuntu-22.04',
     },
@@ -1631,6 +1655,14 @@
       {'name': 'v8testing'},
     ],
   },
+  'V8 Linux64 - jammy - gcc': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+    },
+    'tests': [
+      {'name': 'v8testing'},
+    ],
+  },
   'V8 Linux64 - gc stress': {
     'swarming_dimensions': {
       'cpu': 'x86-64-avx2',
@@ -1668,6 +1700,14 @@
     },
     'tests': [
       {'name': 'v8testing'},
+    ],
+  },
+  'V8 Linux64 - no leaptiering - debug': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+    },
+    'tests': [
+      {'name': 'v8testing', 'shards': 2},
     ],
   },
   'V8 Linux64 - no shared cage - debug': {
@@ -2655,6 +2695,40 @@
         'suffix': 'deopt',
         'test_args': ['--total-timeout-sec=900', '--stress-deopt=1'],
       },
+    ],
+  },
+  # PGO
+  'v8_linux_pgo_rel' : {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+    },
+    'tests': [
+      {'name': 'pgo_instrumentation'}
+    ],
+  },
+  'v8_linux64_pgo_rel' : {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+    },
+    'tests': [
+      {'name': 'pgo_instrumentation'}
+    ],
+  },
+  'v8_win_pgo_rel' : {
+    'swarming_dimensions' : {
+      'cpu': 'x86-64',
+      'os': 'Windows-10-19045',
+    },
+    'tests': [
+      {'name': 'pgo_instrumentation'}
+    ],
+  },
+  'v8_win64_pgo_rel' : {
+    'swarming_dimensions' : {
+      'os': 'Windows-10-19045',
+    },
+    'tests': [
+      {'name': 'pgo_instrumentation'}
     ],
   },
   # Try perf bots

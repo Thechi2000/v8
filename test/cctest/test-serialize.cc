@@ -896,6 +896,7 @@ void TestCustomSnapshotDataBlobWithIrregexpCode(
 
   // Test-appropriate equivalent of v8::Isolate::New.
   v8::Isolate* isolate1 = TestSerializer::NewIsolate(params1);
+  Isolate* i_isolate1 = reinterpret_cast<Isolate*>(isolate1);
   {
     v8::Isolate::Scope i_scope(isolate1);
     v8::HandleScope h_scope(isolate1);
@@ -906,7 +907,7 @@ void TestCustomSnapshotDataBlobWithIrregexpCode(
       // serialization.
       i::DirectHandle<i::JSRegExp> re =
           Utils::OpenDirectHandle(*CompileRun("re1").As<v8::RegExp>());
-      CHECK(!re->HasCompiledCode());
+      CHECK(!re->data(i_isolate1)->HasCompiledCode());
     }
     {
       v8::Maybe<int32_t> result =
@@ -927,8 +928,9 @@ void TestCustomSnapshotDataBlobWithIrregexpCode(
       // Check that ATOM regexp remains valid.
       i::DirectHandle<i::JSRegExp> re =
           Utils::OpenDirectHandle(*CompileRun("re2").As<v8::RegExp>());
-      CHECK_EQ(re->type_tag(), JSRegExp::ATOM);
-      CHECK(!re->HasCompiledCode());
+      i::Tagged<i::RegExpData> data = re->data(i_isolate1);
+      CHECK_EQ(data->type_tag(), RegExpData::Type::ATOM);
+      CHECK(!data->HasCompiledCode());
     }
   }
   isolate1->Dispose();
@@ -3323,9 +3325,10 @@ static void CodeSerializerMergeDeserializedScript(bool retain_toplevel_sfi) {
 
   Handle<HeapObject> retained_toplevel_sfi;
   if (retain_toplevel_sfi) {
-    retained_toplevel_sfi = handle(
-        script->shared_function_infos()->get(0).GetHeapObjectAssumeWeak(),
-        isolate);
+    retained_toplevel_sfi = handle(script->infos()
+                                       ->get(kFunctionLiteralIdTopLevel)
+                                       .GetHeapObjectAssumeWeak(),
+                                   isolate);
   }
 
   // GC twice in case incremental marking had already marked the bytecode array.
@@ -5771,15 +5774,16 @@ UNINITIALIZED_TEST(ClassFieldsWithBindings) {
   FreeCurrentEmbeddedBlob();
 }
 
-void CheckSFIsAreWeak(Tagged<WeakFixedArray> sfis, Isolate* isolate) {
+void CheckInfosAreWeak(Tagged<WeakFixedArray> sfis, Isolate* isolate) {
   CHECK_GT(sfis->length(), 0);
   int no_of_weak = 0;
   for (int i = 0; i < sfis->length(); ++i) {
     Tagged<MaybeObject> maybe_object = sfis->get(i);
     Tagged<HeapObject> heap_object;
-    CHECK(maybe_object.IsWeakOrCleared() ||
+    CHECK(!maybe_object.GetHeapObjectIfWeak(isolate, &heap_object) ||
           (maybe_object.GetHeapObjectIfStrong(&heap_object) &&
-           IsUndefined(heap_object, isolate)));
+           IsUndefined(heap_object, isolate)) ||
+          Is<SharedFunctionInfo>(heap_object) || Is<ScopeInfo>(heap_object));
     if (maybe_object.IsWeak()) {
       ++no_of_weak;
     }
@@ -5831,10 +5835,10 @@ UNINITIALIZED_TEST(WeakArraySerializationInSnapshot) {
     DirectHandle<JSFunction> function =
         Cast<JSFunction>(v8::Utils::OpenDirectHandle(*x));
 
-    // Verify that the pointers in shared_function_infos are weak.
+    // Verify that the pointers in infos are weak.
     Tagged<WeakFixedArray> sfis =
-        Cast<Script>(function->shared()->script())->shared_function_infos();
-    CheckSFIsAreWeak(sfis, reinterpret_cast<i::Isolate*>(isolate));
+        Cast<Script>(function->shared()->script())->infos();
+    CheckInfosAreWeak(sfis, reinterpret_cast<i::Isolate*>(isolate));
   }
   isolate->Dispose();
   delete[] blob.data;
@@ -5864,10 +5868,9 @@ TEST(WeakArraySerializationInCodeCache) {
       CompileScript(isolate, src, script_details, cache,
                     v8::ScriptCompiler::kConsumeCodeCache);
 
-  // Verify that the pointers in shared_function_infos are weak.
-  Tagged<WeakFixedArray> sfis =
-      Cast<Script>(copy->script())->shared_function_infos();
-  CheckSFIsAreWeak(sfis, isolate);
+  // Verify that the pointers in infos are weak.
+  Tagged<WeakFixedArray> sfis = Cast<Script>(copy->script())->infos();
+  CheckInfosAreWeak(sfis, isolate);
 
   delete cache;
 }

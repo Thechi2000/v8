@@ -127,6 +127,9 @@ class RootVisitor;
   V(Map, property_array_map, PropertyArrayMap)                                 \
   V(Map, accessor_info_map, AccessorInfoMap)                                   \
   V(Map, regexp_match_info_map, RegExpMatchInfoMap)                            \
+  V(Map, regexp_data_map, RegExpDataMap)                                       \
+  V(Map, atom_regexp_data_map, AtomRegExpDataMap)                              \
+  V(Map, ir_regexp_data_map, IrRegExpDataMap)                                  \
   V(Map, simple_number_dictionary_map, SimpleNumberDictionaryMap)              \
   V(Map, small_ordered_hash_map_map, SmallOrderedHashMapMap)                   \
   V(Map, small_ordered_hash_set_map, SmallOrderedHashSetMap)                   \
@@ -134,7 +137,7 @@ class RootVisitor;
   V(Map, source_text_module_map, SourceTextModuleMap)                          \
   V(Map, swiss_name_dictionary_map, SwissNameDictionaryMap)                    \
   V(Map, synthetic_module_map, SyntheticModuleMap)                             \
-  IF_WASM(V, Map, wasm_api_function_ref_map, WasmApiFunctionRefMap)            \
+  IF_WASM(V, Map, wasm_import_data_map, WasmImportDataMap)                     \
   IF_WASM(V, Map, wasm_capi_function_data_map, WasmCapiFunctionDataMap)        \
   IF_WASM(V, Map, wasm_continuation_object_map, WasmContinuationObjectMap)     \
   IF_WASM(V, Map, wasm_dispatch_table_map, WasmDispatchTableMap)               \
@@ -145,6 +148,7 @@ class RootVisitor;
   IF_WASM(V, Map, wasm_js_function_data_map, WasmJSFunctionDataMap)            \
   IF_WASM(V, Map, wasm_null_map, WasmNullMap)                                  \
   IF_WASM(V, Map, wasm_resume_data_map, WasmResumeDataMap)                     \
+  IF_WASM(V, Map, wasm_suspender_object_map, WasmSuspenderObjectMap)           \
   IF_WASM(V, Map, wasm_trusted_instance_data_map, WasmTrustedInstanceDataMap)  \
   IF_WASM(V, Map, wasm_type_info_map, WasmTypeInfoMap)                         \
   V(Map, weak_fixed_array_map, WeakFixedArrayMap)                              \
@@ -159,6 +163,7 @@ class RootVisitor;
   V(Map, protected_fixed_array_map, ProtectedFixedArrayMap)                    \
   V(Map, interpreter_data_map, InterpreterDataMap)                             \
   V(Map, shared_function_info_wrapper_map, SharedFunctionInfoWrapperMap)       \
+  V(Map, trusted_foreign_map, TrustedForeignMap)                               \
   /* String maps */                                                            \
   V(Map, seq_two_byte_string_map, SeqTwoByteStringMap)                         \
   V(Map, cons_two_byte_string_map, ConsTwoByteStringMap)                       \
@@ -361,6 +366,12 @@ class RootVisitor;
     AtomicsMutexAsyncUnlockRejectHandlerSFI)                                   \
   V(SharedFunctionInfo, atomics_condition_acquire_lock_sfi,                    \
     AtomicsConditionAcquireLockSFI)                                            \
+  V(SharedFunctionInfo, async_disposable_stack_on_fulfilled_shared_fun,        \
+    AsyncDisposableStackOnFulfilledSharedFun)                                  \
+  V(SharedFunctionInfo, async_disposable_stack_on_rejected_shared_fun,         \
+    AsyncDisposableStackOnRejectedSharedFun)                                   \
+  V(SharedFunctionInfo, async_dispose_from_sync_dispose_shared_fun,            \
+    AsyncDisposeFromSyncDisposeSharedFun)                                      \
   TRUSTED_ROOT_LIST(V)
 
 // These root references can be updated by the mutator.

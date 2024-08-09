@@ -6,6 +6,7 @@
 #define V8_COMPILER_TURBOSHAFT_INDEX_H_
 
 #include <cstddef>
+#include <optional>
 #include <type_traits>
 
 #include "src/base/logging.h"
@@ -14,6 +15,7 @@
 #include "src/compiler/turboshaft/fast-hash.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/js-function.h"
 #include "src/objects/oddball.h"
 #include "src/objects/string.h"
 #include "src/objects/tagged.h"
@@ -21,11 +23,6 @@
 #define TURBOSHAFT_ALLOW_IMPLICIT_OPINDEX_INITIALIZATION_FOR_V 1
 
 namespace v8::internal::compiler::turboshaft {
-
-namespace detail {
-template <typename T>
-struct lazy_false : std::false_type {};
-}  // namespace detail
 
 // Operations are stored in possibly muliple sequential storage slots.
 using OperationStorageSlot = std::aligned_storage_t<8, 8>;
@@ -55,7 +52,7 @@ class OpIndex {
   constexpr OpIndex() : offset_(std::numeric_limits<uint32_t>::max()) {}
   template <typename T, typename C>
   OpIndex(const ConstOrV<T, C>&) {  // NOLINT(runtime/explicit)
-    static_assert(detail::lazy_false<T>::value,
+    static_assert(base::tmp::lazy_false<T>::value,
                   "Cannot initialize OpIndex from ConstOrV<>. Did you forget "
                   "to resolve() it in the assembler?");
   }
@@ -535,8 +532,19 @@ using NumberOrUndefined = UnionOf<Number, Undefined>;
 
 using NonBigIntPrimitive = UnionOf<Symbol, PlainPrimitive>;
 using Primitive = UnionOf<BigInt, NonBigIntPrimitive>;
-using CallTarget = UntaggedUnion<WordPtr, Code>;
+using CallTarget = UntaggedUnion<WordPtr, Code, JSFunction>;
 using AnyOrNone = UntaggedUnion<Any, None>;
+
+#ifdef HAS_CPP_CONCEPTS
+template <typename T>
+concept IsUntagged =
+    !std::is_same_v<T, Any> &&
+    v_traits<Untagged>::implicitly_constructible_from<T>::value;
+
+template <typename T>
+concept IsTagged = !std::is_same_v<T, Any> &&
+                   v_traits<Object>::implicitly_constructible_from<T>::value;
+#endif
 
 #if V8_ENABLE_WEBASSEMBLY
 using WasmArrayNullable = Union<WasmArray, WasmNull>;
@@ -643,6 +651,10 @@ class OptionalV : public OptionalOpIndex {
   OptionalV(U index) : OptionalOpIndex(index) {}  // NOLINT(runtime/explicit)
 };
 
+// Deduction guide for `OptionalV`.
+template <typename T>
+OptionalV(V<T>) -> OptionalV<T>;
+
 // ConstOrV<> is a generalization of V<> that allows constexpr values
 // (constants) to be passed implicitly. This allows reducers to write things
 // like
@@ -695,9 +707,13 @@ class ConstOrV {
       : constant_value_(), value_(index) {}
 
  private:
-  base::Optional<constant_type> constant_value_;
+  std::optional<constant_type> constant_value_;
   V<type> value_;
 };
+
+// Deduction guide for `ConstOrV`.
+template <typename T>
+ConstOrV(V<T>) -> ConstOrV<T>;
 
 template <>
 struct fast_hash<OpIndex> {

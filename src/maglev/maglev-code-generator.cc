@@ -562,15 +562,8 @@ class ExceptionHandlerTrampolineBuilder {
     // values are tagged and b) the stack walk treats unknown stack slots as
     // tagged.
 
-    const DeoptFrame* target_frame = &deopt_info->top_frame();
-    for (int i = 0;; i++) {
-      while (target_frame->type() != DeoptFrame::FrameType::kInterpretedFrame) {
-        target_frame = target_frame->parent();
-      }
-      if (i == handler_info->depth) break;
-      target_frame = target_frame->parent();
-    }
-    const InterpretedDeoptFrame& lazy_frame = target_frame->as_interpreted();
+    const InterpretedDeoptFrame& lazy_frame =
+        deopt_info->GetFrameForExceptionHandler(handler_info);
 
     // TODO(v8:7700): Handle inlining.
     ParallelMoveResolver<Register, COMPRESS_POINTERS_BOOL> direct_moves(masm_);
@@ -583,8 +576,8 @@ class ExceptionHandlerTrampolineBuilder {
     EmitMaterialisationsAndPushResults(materialising_moves, save_accumulator);
 
     __ RecordComment("EmitMoves");
-    MaglevAssembler::ScratchRegisterScope temps(masm_);
-    Register scratch = temps.GetDefaultScratchRegister();
+    MaglevAssembler::TemporaryRegisterScope temps(masm_);
+    Register scratch = temps.AcquireScratch();
     direct_moves.EmitMoves(scratch);
     EmitPopMaterialisedResults(materialising_moves, save_accumulator, scratch);
     __ Jump(catch_block->label());
@@ -713,8 +706,8 @@ class ExceptionHandlerTrampolineBuilder {
 
 class MaglevCodeGeneratingNodeProcessor {
  public:
-  explicit MaglevCodeGeneratingNodeProcessor(MaglevAssembler* masm)
-      : masm_(masm) {}
+  MaglevCodeGeneratingNodeProcessor(MaglevAssembler* masm, Zone* zone)
+      : masm_(masm), zone_(zone) {}
 
   void PreProcessGraph(Graph* graph) {
     // TODO(victorgomes): I wonder if we want to create a struct that shares
@@ -735,6 +728,40 @@ class MaglevCodeGeneratingNodeProcessor {
       __ Prologue(graph);
     }
 
+    // "Deferred" computation has to be done before block removal, because
+    // block removal doesn't propagate deferredness of removed blocks.
+    int deferred_count = ComputeDeferred(graph);
+
+    // If we deferred the first block, un-defer it. This can happen because we
+    // defer a block if all its successors are deferred (i.e., lead to an
+    // unconditional deopt). E.g., if we only executed exception throwing code
+    // paths, the non-exception code paths might be untaken, and thus contain
+    // unconditional deopts, so we end up deferring all non-exception code
+    // paths, including the first block.
+    if (graph->blocks()[0]->is_deferred()) {
+      graph->blocks()[0]->set_deferred(false);
+      --deferred_count;
+    }
+
+    // Reorder the blocks so that dererred blocks are at the end.
+    int non_deferred_count = graph->num_blocks() - deferred_count;
+
+    ZoneVector<BasicBlock*> new_blocks(graph->num_blocks(), zone_);
+
+    size_t ix_non_deferred = 0;
+    size_t ix_deferred = non_deferred_count;
+    for (auto block_it = graph->begin(); block_it != graph->end(); ++block_it) {
+      BasicBlock* block = *block_it;
+      if (block->is_deferred()) {
+        new_blocks[ix_deferred++] = block;
+      } else {
+        new_blocks[ix_non_deferred++] = block;
+      }
+    }
+    CHECK_EQ(ix_deferred, graph->num_blocks());
+    CHECK_EQ(ix_non_deferred, non_deferred_count);
+    graph->set_blocks(new_blocks);
+
     // Remove empty blocks.
     ZoneVector<BasicBlock*>& blocks = graph->blocks();
     size_t current_ix = 0;
@@ -749,6 +776,7 @@ class MaglevCodeGeneratingNodeProcessor {
   }
 
   void PostProcessGraph(Graph* graph) {}
+  void PostPhiProcessing() {}
 
   void PreProcessBasicBlock(BasicBlock* block) {
     if (block->is_loop()) {
@@ -804,7 +832,7 @@ class MaglevCodeGeneratingNodeProcessor {
       }
     }
 
-    MaglevAssembler::ScratchRegisterScope scratch_scope(masm());
+    MaglevAssembler::TemporaryRegisterScope scratch_scope(masm());
     scratch_scope.Include(node->general_temporaries());
     scratch_scope.IncludeDouble(node->double_temporaries());
 
@@ -857,9 +885,9 @@ class MaglevCodeGeneratingNodeProcessor {
 
     int predecessor_id = state.block()->predecessor_id();
 
-    MaglevAssembler::ScratchRegisterScope temps(masm_);
-    Register scratch = temps.GetDefaultScratchRegister();
-    DoubleRegister double_scratch = temps.GetDefaultScratchDoubleRegister();
+    MaglevAssembler::TemporaryRegisterScope temps(masm_);
+    Register scratch = temps.AcquireScratch();
+    DoubleRegister double_scratch = temps.AcquireScratchDouble();
 
     // TODO(leszeks): Move these to fields, to allow their data structure
     // allocations to be reused. Will need some sort of state resetting.
@@ -1001,7 +1029,75 @@ class MaglevCodeGeneratingNodeProcessor {
     }
   }
 
+  int ComputeDeferred(Graph* graph) {
+    int deferred_count = 0;
+    // Propagate deferredness: If a block is deferred, defer all its successors,
+    // except if a successor has another predecessor which is not deferred.
+
+    // In addition, if all successors of a block are deferred, defer it too.
+
+    // Work queue is a queue of blocks which are deferred, so we'll need to
+    // check whether to defer their successors and predecessors.
+    SmallZoneVector<BasicBlock*, 32> work_queue(zone_);
+    for (auto block_it = graph->begin(); block_it != graph->end(); ++block_it) {
+      BasicBlock* block = *block_it;
+      if (block->is_deferred()) {
+        ++deferred_count;
+        work_queue.emplace_back(block);
+      }
+    }
+
+    // The algorithm below is O(N * e^2) where e is the maximum number of
+    // predecessors / successors. We check whether we should defer a block at
+    // most e times. When doing the check, we check each predecessor / successor
+    // once.
+    while (!work_queue.empty()) {
+      BasicBlock* block = work_queue.back();
+      work_queue.pop_back();
+      DCHECK(block->is_deferred());
+
+      // Check if we should defer any successor.
+      block->ForEachSuccessor([&work_queue,
+                               &deferred_count](BasicBlock* successor) {
+        if (successor->is_deferred()) {
+          return;
+        }
+        bool should_defer = true;
+        successor->ForEachPredecessor([&should_defer](BasicBlock* predecessor) {
+          if (!predecessor->is_deferred()) {
+            should_defer = false;
+          }
+        });
+        if (should_defer) {
+          ++deferred_count;
+          work_queue.emplace_back(successor);
+          successor->set_deferred(true);
+        }
+      });
+
+      // Check if we should defer any predecessor.
+      block->ForEachPredecessor([&work_queue,
+                                 &deferred_count](BasicBlock* predecessor) {
+        if (predecessor->is_deferred()) {
+          return;
+        }
+        bool should_defer = true;
+        predecessor->ForEachSuccessor([&should_defer](BasicBlock* successor) {
+          if (!successor->is_deferred()) {
+            should_defer = false;
+          }
+        });
+        if (should_defer) {
+          ++deferred_count;
+          work_queue.emplace_back(predecessor);
+          predecessor->set_deferred(true);
+        }
+      });
+    }
+    return deferred_count;
+  }
   MaglevAssembler* const masm_;
+  Zone* zone_;
 };
 
 class SafepointingNodeProcessor {
@@ -1012,6 +1108,7 @@ class SafepointingNodeProcessor {
   void PreProcessGraph(Graph* graph) {}
   void PostProcessGraph(Graph* graph) {}
   void PreProcessBasicBlock(BasicBlock* block) {}
+  void PostPhiProcessing() {}
   ProcessResult Process(NodeBase* node, const ProcessingState& state) {
     local_isolate_->heap()->Safepoint();
     return ProcessResult::kContinue;
@@ -1411,17 +1508,6 @@ class MaglevFrameTranslationBuilder {
         break;
       case Opcode::kVirtualObject:
         UNREACHABLE();
-      case Opcode::kInlinedAllocation: {
-        // If the object hasn't been snapshotted yet, then it's the most
-        // up-to-date version and we can directly use the object pointed to by
-        // the allocation.
-        VirtualObject* vobject = value->Cast<InlinedAllocation>()->object();
-        if (vobject->IsSnapshot()) {
-          vobject = virtual_objects.FindAllocatedWith(vobject->allocation());
-        }
-        BuildDeoptFrameSingleValue(vobject, input_location, virtual_objects);
-        break;
-      }
       default:
         BuildDeoptFrameSingleValue(value, input_location, virtual_objects);
         break;
@@ -1438,7 +1524,7 @@ class MaglevFrameTranslationBuilder {
         GetDuplicatedId(reinterpret_cast<intptr_t>(object->allocation()));
     if (dup_id != kNotDuplicated) {
       translation_array_builder_->DuplicateObject(dup_id);
-      input_location += object->InputLocationSizeNeeded();
+      input_location += object->InputLocationSizeNeeded(virtual_objects);
       return;
     }
     if (object->type() == VirtualObject::kFixedDoubleArray) {
@@ -1459,16 +1545,18 @@ class MaglevFrameTranslationBuilder {
                                   const InputLocation*& input_location,
                                   const VirtualObject::List& virtual_objects) {
     DCHECK(!value->Is<Identity>());
-    // The InlinedAllocation should have been patched by a VirtualObject.
-    DCHECK(!value->Is<InlinedAllocation>());
+    DCHECK(!value->Is<VirtualObject>());
     size_t input_locations_to_advance = 1;
-    if (const VirtualObject* vobject = value->TryCast<VirtualObject>()) {
-      if (vobject->allocation()->HasBeenElided()) {
+    if (const InlinedAllocation* alloc = value->TryCast<InlinedAllocation>()) {
+      VirtualObject* vobject = virtual_objects.FindAllocatedWith(alloc);
+      CHECK_NOT_NULL(vobject);
+      if (alloc->HasBeenElided()) {
         input_location++;
         BuildVirtualObject(vobject, input_location, virtual_objects);
         return;
       }
-      input_locations_to_advance += vobject->InputLocationSizeNeeded();
+      input_locations_to_advance +=
+          vobject->InputLocationSizeNeeded(virtual_objects);
     }
     if (input_location->operand().IsConstant()) {
       translation_array_builder_->StoreLiteral(
@@ -1596,7 +1684,8 @@ MaglevCodeGenerator::MaglevCodeGenerator(
       masm_(isolate->GetMainThreadIsolateUnsafe(), &code_gen_state_),
       graph_(graph),
       deopt_literals_(isolate->heap()->heap()),
-      retained_maps_(isolate->heap()) {
+      retained_maps_(isolate->heap()),
+      zone_(compilation_info->zone()) {
   DCHECK(maglev::IsMaglevEnabled());
   DCHECK_IMPLIES(compilation_info->toplevel_is_osr(),
                  maglev::IsMaglevOsrEnabled());
@@ -1653,7 +1742,7 @@ bool MaglevCodeGenerator::EmitCode() {
   GraphProcessor<NodeMultiProcessor<SafepointingNodeProcessor,
                                     MaglevCodeGeneratingNodeProcessor>>
       processor(SafepointingNodeProcessor{local_isolate_},
-                MaglevCodeGeneratingNodeProcessor{masm()});
+                MaglevCodeGeneratingNodeProcessor{masm(), zone_});
   RecordInlinedFunctions();
 
   if (graph_->is_osr()) {

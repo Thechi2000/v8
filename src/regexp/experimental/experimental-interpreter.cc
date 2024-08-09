@@ -6,6 +6,7 @@
 
 #include "src/objects/string-inl.h"
 #include "src/regexp/experimental/experimental.h"
+#include "src/sandbox/check.h"
 
 namespace v8 {
 namespace internal {
@@ -50,7 +51,8 @@ bool SatisfiesAssertion(RegExpAssertion::Type type,
 }
 
 base::Vector<RegExpInstruction> ToInstructionVector(
-    Tagged<ByteArray> raw_bytes, const DisallowGarbageCollection& no_gc) {
+    Tagged<TrustedByteArray> raw_bytes,
+    const DisallowGarbageCollection& no_gc) {
   RegExpInstruction* inst_begin =
       reinterpret_cast<RegExpInstruction*>(raw_bytes->begin());
   int inst_num = raw_bytes->length() / sizeof(RegExpInstruction);
@@ -332,8 +334,9 @@ class NfaInterpreter {
   // instruction.
  public:
   NfaInterpreter(Isolate* isolate, RegExp::CallOrigin call_origin,
-                 Tagged<ByteArray> bytecode, int register_count_per_match,
-                 Tagged<String> input, int32_t input_index, Zone* zone)
+                 Tagged<TrustedByteArray> bytecode,
+                 int register_count_per_match, Tagged<String> input,
+                 int32_t input_index, Zone* zone)
       : isolate_(isolate),
         call_origin_(call_origin),
         bytecode_object_(bytecode),
@@ -728,7 +731,8 @@ class NfaInterpreter {
     } else {
       DCHECK(call_origin_ == RegExp::CallOrigin::kFromRuntime);
       HandleScope handles(isolate_);
-      DirectHandle<ByteArray> bytecode_handle(bytecode_object_, isolate_);
+      DirectHandle<TrustedByteArray> bytecode_handle(bytecode_object_,
+                                                     isolate_);
       DirectHandle<String> input_handle(input_object_, isolate_);
 
       if (check.JsHasOverflowed()) {
@@ -843,7 +847,7 @@ class NfaInterpreter {
   int RunActiveThread(InterpreterThread t) {
     while (true) {
       SBXCHECK_GE(t.pc, 0);
-      SBXCHECK_LT(t.pc, bytecode_.length());
+      SBXCHECK_LT(t.pc, bytecode_.size());
 
       ++clock;
 
@@ -958,15 +962,14 @@ class NfaInterpreter {
           break;
 
         case RegExpInstruction::CLEAR_REGISTER:
-          SBXCHECK_GE(inst.payload.register_index, 0);
-          SBXCHECK_LT(inst.payload.register_index, register_count_per_match_);
+          SBXCHECK_BOUNDS(inst.payload.register_index, register_count_per_match_);
           GetRegisterArray(t)[inst.payload.register_index] =
               kUndefinedRegisterValue;
           ++t.pc;
           break;
         case RegExpInstruction::SET_REGISTER_TO_CP:
-          SBXCHECK_GE(inst.payload.register_index, 0);
-          SBXCHECK_LT(inst.payload.register_index, register_count_per_match_);
+          SBXCHECK_BOUNDS(inst.payload.register_index,
+                          register_count_per_match_);
           GetRegisterArray(t)[inst.payload.register_index] = input_index_;
           if (v8_flags.experimental_regexp_engine_capture_group_opt) {
             GetCaptureClockArray(t)[inst.payload.register_index] = clock;
@@ -1015,12 +1018,11 @@ class NfaInterpreter {
           // is verified at this position, we update the `lookaround_table_`.
 
           if (!only_captureless_lookbehinds_) {
-            DCHECK_NE(current_lookaround_, -1);
+            SBXCHECK_BOUNDS(current_lookaround_, lookaround_table_->size());
             (*lookaround_table_)[current_lookaround_][input_index_] = true;
           } else {
-            SBXCHECK_GE(inst.payload.lookaround_id, 0);
-            SBXCHECK_LT(inst.payload.lookaround_id,
-                        lookbehind_table_->length());
+            SBXCHECK_BOUNDS(inst.payload.lookaround_id,
+                            lookbehind_table_->length());
             lookbehind_table_->Set(inst.payload.lookaround_id, true);
           }
 
@@ -1033,6 +1035,9 @@ class NfaInterpreter {
           // ensures that all the relevant lookarounds has already been run.
 
           if (!only_captureless_lookbehinds_) {
+            SBXCHECK_BOUNDS(inst.payload.lookaround_id,
+                            lookaround_table_->size());
+
             if ((*lookaround_table_)[inst.payload.read_lookaround
                                          .lookaround_index()][input_index_] !=
                 inst.payload.read_lookaround.is_positive()) {
@@ -1055,8 +1060,7 @@ class NfaInterpreter {
           } else {
             const int32_t lookbehind_index =
                 inst.payload.read_lookaround.lookaround_index();
-            SBXCHECK_GE(lookbehind_index, 0);
-            SBXCHECK_LT(lookbehind_index, lookbehind_table_->length());
+            SBXCHECK_BOUNDS(lookbehind_index, lookbehind_table_->length());
 
             if (lookbehind_table_->at(lookbehind_index) !=
                 inst.payload.read_lookaround.is_positive()) {
@@ -1388,7 +1392,7 @@ class NfaInterpreter {
 
   DisallowGarbageCollection no_gc_;
 
-  Tagged<ByteArray> bytecode_object_;
+  Tagged<TrustedByteArray> bytecode_object_;
   base::Vector<const RegExpInstruction> bytecode_;
 
   // Number of registers used per thread.
@@ -1500,7 +1504,7 @@ class NfaInterpreter {
 
 int ExperimentalRegExpInterpreter::FindMatches(
     Isolate* isolate, RegExp::CallOrigin call_origin,
-    Tagged<ByteArray> bytecode, int register_count_per_match,
+    Tagged<TrustedByteArray> bytecode, int register_count_per_match,
     Tagged<String> input, int start_index, int32_t* output_registers,
     int output_register_count, Zone* zone) {
   DCHECK(input->IsFlat());

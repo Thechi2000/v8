@@ -605,6 +605,42 @@ constexpr uint8_t kExpectedDetachedValueForDetached =
 
 }  // namespace
 
+TEST_F(UnifiedHeapSnapshotTest, DetachedObjectsRetainedByJSReference) {
+  v8::Isolate* isolate = v8_isolate();
+  v8::HandleScope scope(isolate);
+  v8::HeapProfiler* heap_profiler = isolate->GetHeapProfiler();
+  heap_profiler->SetGetDetachednessCallback(
+      DetachednessHandler::GetDetachedness, nullptr);
+  // Test ensures that objects that are retained by a JS reference are obtained
+  // by the GetDetachedJSWrapperObjects() function
+  JsTestingScope testing_scope(v8_isolate());
+  cppgc::Persistent<GCedWithJSRef> gc_w_js_ref = SetupWrapperWrappablePair(
+      testing_scope, allocation_handle(), "Obj",
+      v8::EmbedderGraph::Node::Detachedness ::kDetached);
+  // Ensure we are obtaining a Detached Wrapper
+  CHECK_EQ(1, heap_profiler->GetDetachedJSWrapperObjects().size());
+
+  cppgc::Persistent<GCedWithJSRef> gc_w_js_ref_not_detached =
+      SetupWrapperWrappablePair(
+          testing_scope, allocation_handle(), "Obj",
+          v8::EmbedderGraph::Node::Detachedness ::kAttached);
+  cppgc::Persistent<GCedWithJSRef> gc_w_js_ref_unknown =
+      SetupWrapperWrappablePair(
+          testing_scope, allocation_handle(), "Obj",
+          v8::EmbedderGraph::Node::Detachedness ::kUnknown);
+  // Ensure we are only obtaining Wrappers that are Detached
+  CHECK_EQ(1, heap_profiler->GetDetachedJSWrapperObjects().size());
+
+  cppgc::Persistent<GCedWithJSRef> gc_w_js_ref2 = SetupWrapperWrappablePair(
+      testing_scope, allocation_handle(), "Obj",
+      v8::EmbedderGraph::Node::Detachedness ::kDetached);
+  cppgc::Persistent<GCedWithJSRef> gc_w_js_ref3 = SetupWrapperWrappablePair(
+      testing_scope, allocation_handle(), "Obj",
+      v8::EmbedderGraph::Node::Detachedness ::kDetached);
+  // Ensure we are obtaining all Detached Wrappers
+  CHECK_EQ(3, heap_profiler->GetDetachedJSWrapperObjects().size());
+}
+
 TEST_F(UnifiedHeapSnapshotTest, NoTriggerForStandAloneTracedReference) {
   // Test ensures that C++ objects with TracedReference have their V8 objects
   // not merged and queried for detachedness if the backreference is invalid.
@@ -789,8 +825,11 @@ class GCedWithDynamicName : public cppgc::GarbageCollected<GCedWithDynamicName>,
   const char* GetHumanReadableName() const final {
     v8::HeapProfiler* heap_profiler =
         v8::Isolate::GetCurrent()->GetHeapProfiler();
-    std::string name = "dynamic name " + std::to_string(value_);
-    return heap_profiler->CopyNameForHeapSnapshot(name.c_str());
+    if (heap_profiler->IsTakingSnapshot()) {
+      std::string name = "dynamic name " + std::to_string(value_);
+      return heap_profiler->CopyNameForHeapSnapshot(name.c_str());
+    }
+    return "static name";
   }
 
  private:
@@ -805,12 +844,19 @@ TEST_F(UnifiedHeapSnapshotTest, DynamicName) {
   cppgc::Persistent<GCedWithDynamicName> object_one =
       cppgc::MakeGarbageCollected<GCedWithDynamicName>(allocation_handle());
   object_one->SetValue(1);
+  std::string static_name =
+      cppgc::internal::HeapObjectHeader::FromObject(object_one.Get())
+          .GetName()
+          .value;
+  EXPECT_EQ(static_name, std::string("static name"));
   const v8::HeapSnapshot* snapshot = TakeHeapSnapshot();
   EXPECT_TRUE(IsValidSnapshot(snapshot));
   EXPECT_TRUE(ContainsRetainingPath(*snapshot,
                                     {kExpectedCppRootsName, "dynamic name 0"}));
   EXPECT_TRUE(ContainsRetainingPath(*snapshot,
                                     {kExpectedCppRootsName, "dynamic name 1"}));
+  EXPECT_FALSE(
+      ContainsRetainingPath(*snapshot, {kExpectedCppRootsName, "static name"}));
 }
 
 }  // namespace internal

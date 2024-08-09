@@ -34,11 +34,6 @@
 namespace v8::internal::wasm::fuzzing {
 
 namespace {
-constexpr CompileTimeImports CompileTimeImportsForFuzzing() {
-  return CompileTimeImports({CompileTimeImport::kJsString,
-                             CompileTimeImport::kTextEncoder,
-                             CompileTimeImport::kTextDecoder});
-}
 
 void CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
                                               int32_t* max_steps,
@@ -73,6 +68,14 @@ void CompileAllFunctionsForReferenceExecution(NativeModule* native_module,
 
 }  // namespace
 
+CompileTimeImports CompileTimeImportsForFuzzing() {
+  CompileTimeImports result;
+  result.Add(CompileTimeImport::kJsString);
+  result.Add(CompileTimeImport::kTextDecoder);
+  result.Add(CompileTimeImport::kTextEncoder);
+  return result;
+}
+
 // Compile a baseline module. We pass a pointer to a max step counter and a
 // nondeterminsm flag that are updated during execution by Liftoff.
 Handle<WasmModuleObject> CompileReferenceModule(
@@ -88,8 +91,9 @@ Handle<WasmModuleObject> CompileReferenceModule(
   CHECK(module_res.ok());
   std::shared_ptr<WasmModule> module = module_res.value();
   CHECK_NOT_NULL(module);
-  WasmError imports_error = ValidateAndSetBuiltinImports(
-      module.get(), wire_bytes, CompileTimeImportsForFuzzing());
+  CompileTimeImports compile_imports = CompileTimeImportsForFuzzing();
+  WasmError imports_error =
+      ValidateAndSetBuiltinImports(module.get(), wire_bytes, compile_imports);
   CHECK(!imports_error.has_error());  // The module was compiled before.
   native_module = GetWasmEngine()->NewNativeModule(
       isolate, enabled_features, CompileTimeImportsForFuzzing(), module, 0);
@@ -167,8 +171,14 @@ void ExecuteAgainstReference(Isolate* isolate,
   isolate->heap()->AddNearHeapLimitCallback(heap_limit_callback,
                                             &oom_callback_data);
 
+  Tagged<WasmExportedFunctionData> func_data =
+      main_function->shared()->wasm_exported_function_data();
+  const FunctionSig* sig = func_data->instance_data()
+                               ->module()
+                               ->functions[func_data->function_index()]
+                               .sig;
   base::OwnedVector<Handle<Object>> compiled_args =
-      testing::MakeDefaultArguments(isolate, main_function->sig());
+      testing::MakeDefaultArguments(isolate, sig);
   std::unique_ptr<const char[]> exception_ref;
   int32_t result_ref = testing::CallWasmFunctionForTesting(
       isolate, instance_ref, "main", compiled_args.as_vector(), &exception_ref);
@@ -269,6 +279,7 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
   const bool offsets = false;  // Not supported by MjsunitModuleDis.
   StdoutStream os;
   out.WriteTo(os, offsets);
+  os.flush();
 }
 
 void EnableExperimentalWasmFeatures(v8::Isolate* isolate) {
@@ -280,12 +291,17 @@ void EnableExperimentalWasmFeatures(v8::Isolate* isolate) {
       FOREACH_WASM_STAGING_FEATURE_FLAG(ENABLE_STAGED_FEATURES)
 #undef ENABLE_STAGED_FEATURES
 
-#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64
-      // Enable non-staged experimental features that we also want to fuzz.
-      v8_flags.wasm_memory64_trap_handling = true;
-#endif  // V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64
-      // Note: If you add something here, you will also have to add the
-      // respective flag(s) to the mjsunit/wasm/generate-random-module test.
+      // Enable non-staged experimental features or other experimental flags
+      // that we also want to fuzz, e.g., new optimizations.
+      // Note: If you add a Wasm feature here, you will also have to add the
+      // respective flag(s) to the mjsunit/wasm/generate-random-module.js test,
+      // otherwise that fails on an unsupported feature.
+      // You may also want to add the flag(s) to the JS file header in
+      // `PrintModule()` of `mjsunit-module-disassembler-impl.h`, to make bugs
+      // easier to reproduce with generated mjsunit test cases.
+
+      // See https://crbug.com/335082212.
+      v8_flags.wasm_inlining_call_indirect = true;
 
       // Enforce implications from enabling features.
       FlagList::EnforceFlagImplications();
@@ -373,10 +389,9 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
   ModuleWireBytes wire_bytes(buffer.begin(), buffer.end());
 
   auto enabled_features = WasmEnabledFeatures::FromIsolate(i_isolate);
-  CompileTimeImports compile_imports = CompileTimeImportsForFuzzing();
 
-  bool valid = GetWasmEngine()->SyncValidate(i_isolate, enabled_features,
-                                             compile_imports, wire_bytes);
+  bool valid = GetWasmEngine()->SyncValidate(
+      i_isolate, enabled_features, CompileTimeImportsForFuzzing(), wire_bytes);
 
   if (v8_flags.wasm_fuzzer_gen_test) {
     GenerateTestCase(i_isolate, wire_bytes, valid);
@@ -400,7 +415,8 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
 
   ErrorThrower thrower(i_isolate, "WasmFuzzerSyncCompile");
   MaybeHandle<WasmModuleObject> compiled_module = GetWasmEngine()->SyncCompile(
-      i_isolate, enabled_features, compile_imports, &thrower, wire_bytes);
+      i_isolate, enabled_features, CompileTimeImportsForFuzzing(), &thrower,
+      wire_bytes);
   CHECK_EQ(valid, !compiled_module.is_null());
   CHECK_EQ(!valid, thrower.error());
   if (require_valid && !valid) {

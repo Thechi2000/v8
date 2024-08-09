@@ -73,7 +73,7 @@ uint32_t MemoryChunk::MetadataTableIndex(Address chunk_address) {
     DCHECK_LT(offset >> kPageSizeBits, kPagesInTrustedCage);
     index = kTrustedSpaceMetadataOffset + (offset >> kPageSizeBits);
   } else {
-    CodeRange* code_range = CodeRange::GetProcessWideCodeRange();
+    CodeRange* code_range = IsolateGroup::current()->GetCodeRange();
     DCHECK(code_range->region().contains(chunk_address));
     uint32_t offset = static_cast<uint32_t>(chunk_address - code_range->base());
     DCHECK_LT(offset >> kPageSizeBits, kPagesInCodeCage);
@@ -259,12 +259,26 @@ void MemoryChunk::SetYoungGenerationPageFlags(MarkingMode marking_mode) {
 
 #ifdef V8_ENABLE_SANDBOX
 bool MemoryChunk::SandboxSafeInReadOnlySpace() const {
+  // For the sandbox only flags from writable pages can be corrupted so we can
+  // use the flag check as a fast path in this case.
+  // It also helps making TSAN happy, since it doesn't like the way we
+  // initialize the MemoryChunks.
+  // (See MemoryChunkMetadata::SynchronizedHeapLoad).
+  if (!InReadOnlySpace()) {
+    return false;
+  }
+
   // When the sandbox is enabled, only the ReadOnlyPageMetadata are stored
   // inline in the MemoryChunk.
   // ReadOnlyPageMetadata::ChunkAddress() is a special version that boils down
   // to `metadata_address - kMemoryChunkHeaderSize`.
-  return static_cast<const ReadOnlyPageMetadata*>(Metadata())->ChunkAddress() ==
-         address();
+  MemoryChunkMetadata* metadata =
+      metadata_pointer_table_[metadata_index_ & kMetadataPointerTableSizeMask];
+  SBXCHECK_EQ(
+      static_cast<const ReadOnlyPageMetadata*>(metadata)->ChunkAddress(),
+      address());
+
+  return true;
 }
 #endif
 

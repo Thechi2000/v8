@@ -5,6 +5,7 @@
 #include "src/interpreter/bytecode-generator.h"
 
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -31,6 +32,7 @@
 #include "src/logging/log.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/debug-objects.h"
+#include "src/objects/js-disposable-stack.h"
 #include "src/objects/objects.h"
 #include "src/objects/smi.h"
 #include "src/objects/template-objects.h"
@@ -974,8 +976,8 @@ class V8_NODISCARD BytecodeGenerator::MultipleEntryBlockContextScope {
     DCHECK(inner_context_.is_valid());
     DCHECK(outer_context_.is_valid());
     DCHECK(is_in_scope_);
-    context_scope_ = base::nullopt;
-    current_scope_ = base::nullopt;
+    context_scope_ = std::nullopt;
+    current_scope_ = std::nullopt;
     is_in_scope_ = false;
   }
 
@@ -984,8 +986,8 @@ class V8_NODISCARD BytecodeGenerator::MultipleEntryBlockContextScope {
   Register inner_context_;
   Register outer_context_;
   bool is_in_scope_;
-  base::Optional<CurrentScope> current_scope_;
-  base::Optional<ContextScope> context_scope_;
+  std::optional<CurrentScope> current_scope_;
+  std::optional<ContextScope> context_scope_;
 };
 
 class BytecodeGenerator::FeedbackSlotCache : public ZoneObject {
@@ -1716,9 +1718,11 @@ void BytecodeGenerator::GenerateBytecodeBody() {
 
 void BytecodeGenerator::GenerateBytecodeBodyWithoutImplicitFinalReturn() {
   if (v8_flags.js_explicit_resource_management && closure_scope() != nullptr &&
-      closure_scope()->has_using_declaration()) {
+      (closure_scope()->has_using_declaration() ||
+       closure_scope()->has_await_using_declaration())) {
     BuildDisposeScope(
-        [&]() { GenerateBytecodeBodyWithoutImplicitFinalReturnOrDispose(); });
+        [&]() { GenerateBytecodeBodyWithoutImplicitFinalReturnOrDispose(); },
+        closure_scope()->has_await_using_declaration());
   } else {
     GenerateBytecodeBodyWithoutImplicitFinalReturnOrDispose();
   }
@@ -1837,8 +1841,10 @@ void BytecodeGenerator::VisitBlock(Block* stmt) {
 
 void BytecodeGenerator::VisitBlockMaybeDispose(Block* stmt) {
   if (v8_flags.js_explicit_resource_management && stmt->scope() != nullptr &&
-      stmt->scope()->has_using_declaration()) {
-    BuildDisposeScope([&]() { VisitBlockDeclarationsAndStatements(stmt); });
+      (stmt->scope()->has_using_declaration() ||
+       stmt->scope()->has_await_using_declaration())) {
+    BuildDisposeScope([&]() { VisitBlockDeclarationsAndStatements(stmt); },
+                      stmt->scope()->has_await_using_declaration());
   } else {
     VisitBlockDeclarationsAndStatements(stmt);
   }
@@ -2424,7 +2430,7 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
     {
       // The comparisons linearly dominate, so no need to open a new elision
       // scope for each one.
-      base::Optional<HoleCheckElisionScope> elider;
+      std::optional<HoleCheckElisionScope> elider;
       bool first_jump_emitted = false;
       for (int i = 0; i < clauses->length(); ++i) {
         CaseClause* clause = clauses->at(i);
@@ -2618,22 +2624,33 @@ void BytecodeGenerator::BuildTryFinally(
 }
 
 template <typename WrappedFunc>
-void BytecodeGenerator::BuildDisposeScope(WrappedFunc wrapped_func) {
+void BytecodeGenerator::BuildDisposeScope(WrappedFunc wrapped_func,
+                                          bool has_await_using) {
   RegisterAllocationScope allocation_scope(this);
   DisposablesStackScope disposables_stack_scope(this);
+  if (has_await_using) {
+    set_catch_prediction(HandlerTable::ASYNC_AWAIT);
+  }
 
   BuildTryFinally(
       // Try block
       [&]() { wrapped_func(); },
       // Finally block
       [&](Register body_continuation_token, Register body_continuation_result) {
-        RegisterList args = register_allocator()->NewRegisterList(3);
+        RegisterList args = register_allocator()->NewRegisterList(4);
         builder()
             ->MoveRegister(current_disposables_stack_, args[0])
             .MoveRegister(body_continuation_token, args[1])
-            .MoveRegister(body_continuation_result, args[2]);
-
+            .MoveRegister(body_continuation_result, args[2])
+            .LoadLiteral(Smi::FromEnum(
+                has_await_using ? DisposableStackResourcesType::kAtLeastOneAsync
+                                : DisposableStackResourcesType::kAllSync))
+            .StoreAccumulatorInRegister(args[3]);
         builder()->CallRuntime(Runtime::kDisposeDisposableStack, args);
+
+        if (has_await_using) {
+          BuildAwait();
+        }
       },
       catch_prediction());
 }
@@ -3253,7 +3270,7 @@ void BytecodeGenerator::VisitClassLiteral(ClassLiteral* expr, Register name) {
     //
     //  * `new class x {};` will break on `new` which is outside the
     //    class scope, so we expect the BlockContext to not be pushed yet.
-    base::Optional<BytecodeSourceInfo> source_info =
+    std::optional<BytecodeSourceInfo> source_info =
         builder()->MaybePopSourcePosition(expr->scope()->start_position());
     BuildNewLocalBlockContext(expr->scope());
     ContextScope scope(this, expr->scope());
@@ -3421,7 +3438,10 @@ void BytecodeGenerator::BuildInstanceMemberInitialization(Register constructor,
 void BytecodeGenerator::VisitNativeFunctionLiteral(
     NativeFunctionLiteral* expr) {
   size_t entry = builder()->AllocateDeferredConstantPoolEntry();
-  int index = feedback_spec()->AddCreateClosureSlot();
+  // Native functions don't use argument adaption and so have the special
+  // kDontAdaptArgumentsSentinel as their parameter count.
+  int index = feedback_spec()->AddCreateClosureParameterCount(
+      kDontAdaptArgumentsSentinel);
   uint8_t flags = CreateClosureFlags::Encode(false, false, false);
   builder()->CreateClosure(entry, index, flags);
   native_function_literals_.push_back(std::make_pair(expr, entry));
@@ -4339,20 +4359,28 @@ void BytecodeGenerator::BuildVariableAssignment(
         builder()->LoadAccumulatorWithRegister(value_temp);
       }
 
-      if ((mode != VariableMode::kConst && mode != VariableMode::kUsing) ||
+      if ((mode != VariableMode::kConst && mode != VariableMode::kUsing &&
+           mode != VariableMode::kAwaitUsing) ||
           op == Token::kInit) {
-        if (op == Token::kInit &&
-            variable->HasHoleCheckUseInSameClosureScope()) {
-          // After initializing a variable it won't be the hole anymore, so
-          // elide subsequent checks.
-          RememberHoleCheckInCurrentBlock(variable);
-        }
-        if (op == Token::kInit && mode == VariableMode::kUsing) {
-          RegisterList args = register_allocator()->NewRegisterList(2);
-          builder()
-              ->MoveRegister(current_disposables_stack_, args[0])
-              .StoreAccumulatorInRegister(args[1])
-              .CallRuntime(Runtime::kAddDisposableValue, args);
+        if (op == Token::kInit) {
+          if (variable->HasHoleCheckUseInSameClosureScope()) {
+            // After initializing a variable it won't be the hole anymore, so
+            // elide subsequent checks.
+            RememberHoleCheckInCurrentBlock(variable);
+          }
+          if (mode == VariableMode::kUsing) {
+            RegisterList args = register_allocator()->NewRegisterList(2);
+            builder()
+                ->MoveRegister(current_disposables_stack_, args[0])
+                .StoreAccumulatorInRegister(args[1])
+                .CallRuntime(Runtime::kAddDisposableValue, args);
+          } else if (mode == VariableMode::kAwaitUsing) {
+            RegisterList args = register_allocator()->NewRegisterList(2);
+            builder()
+                ->MoveRegister(current_disposables_stack_, args[0])
+                .StoreAccumulatorInRegister(args[1])
+                .CallRuntime(Runtime::kAddAsyncDisposableValue, args);
+          }
         }
         builder()->StoreAccumulatorInRegister(destination);
       } else if (variable->throw_on_const_assignment(language_mode()) &&
@@ -6267,7 +6295,7 @@ void BytecodeGenerator::VisitCall(Call* expr) {
         .MoveRegister(Register::function_closure(), runtime_call_args[2])
         .LoadLiteral(Smi::FromEnum(language_mode()))
         .StoreAccumulatorInRegister(runtime_call_args[3])
-        .LoadLiteral(Smi::FromInt(current_scope()->start_position()))
+        .LoadLiteral(Smi::FromInt(expr->eval_scope_info_index()))
         .StoreAccumulatorInRegister(runtime_call_args[4])
         .LoadLiteral(Smi::FromInt(expr->position()))
         .StoreAccumulatorInRegister(runtime_call_args[5]);
@@ -8270,7 +8298,8 @@ int BytecodeGenerator::GetCachedCreateClosureSlot(FunctionLiteral* literal) {
   if (index != -1) {
     return index;
   }
-  index = feedback_spec()->AddCreateClosureSlot();
+  index = feedback_spec()->AddCreateClosureParameterCount(
+      JSParameterCount(literal->parameter_count()));
   feedback_slot_cache()->Put(slot_kind, literal, index);
   return index;
 }

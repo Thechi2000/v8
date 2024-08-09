@@ -123,27 +123,33 @@ void MacroAssembler::LoadRootRegisterOffset(Register destination,
 
 MemOperand MacroAssembler::ExternalReferenceAsOperand(
     ExternalReference reference, Register scratch) {
-  if (root_array_available_ && options().enable_root_relative_access) {
-    int64_t offset =
-        RootRegisterOffsetForExternalReference(isolate(), reference);
-    if (is_int32(offset)) {
-      return MemOperand(kRootRegister, static_cast<int32_t>(offset));
+  if (root_array_available()) {
+    if (reference.IsIsolateFieldId()) {
+      return MemOperand(kRootRegister, reference.offset_from_root_register());
     }
-  }
-  if (root_array_available_ && options().isolate_independent_code) {
-    if (IsAddressableThroughRootRegister(isolate(), reference)) {
-      // Some external references can be efficiently loaded as an offset from
-      // kRootRegister.
+    if (options().enable_root_relative_access) {
       intptr_t offset =
           RootRegisterOffsetForExternalReference(isolate(), reference);
-      CHECK(is_int32(offset));
-      return MemOperand(kRootRegister, static_cast<int32_t>(offset));
-    } else {
-      // Otherwise, do a memory load from the external reference table.
-      ldr(scratch, MemOperand(kRootRegister,
-                              RootRegisterOffsetForExternalReferenceTableEntry(
-                                  isolate(), reference)));
-      return MemOperand(scratch, 0);
+      if (is_int32(offset)) {
+        return MemOperand(kRootRegister, static_cast<int32_t>(offset));
+      }
+    }
+    if (options().isolate_independent_code) {
+      if (IsAddressableThroughRootRegister(isolate(), reference)) {
+        // Some external references can be efficiently loaded as an offset from
+        // kRootRegister.
+        intptr_t offset =
+            RootRegisterOffsetForExternalReference(isolate(), reference);
+        CHECK(is_int32(offset));
+        return MemOperand(kRootRegister, static_cast<int32_t>(offset));
+      } else {
+        // Otherwise, do a memory load from the external reference table.
+        ldr(scratch,
+            MemOperand(kRootRegister,
+                       RootRegisterOffsetForExternalReferenceTableEntry(
+                           isolate(), reference)));
+        return MemOperand(scratch, 0);
+      }
     }
   }
   Move(scratch, reference);
@@ -511,14 +517,25 @@ void MacroAssembler::Move(Register dst, Handle<HeapObject> value) {
 }
 
 void MacroAssembler::Move(Register dst, ExternalReference reference) {
-  // TODO(jgruber,v8:8887): Also consider a root-relative load when generating
-  // non-isolate-independent code. In many cases it might be cheaper than
-  // embedding the relocatable value.
-  if (root_array_available_ && options().isolate_independent_code) {
-    IndirectLoadExternalReference(dst, reference);
-    return;
+  if (root_array_available()) {
+    if (reference.IsIsolateFieldId()) {
+      add(dst, kRootRegister, Operand(reference.offset_from_root_register()));
+      return;
+    }
+    if (options().isolate_independent_code) {
+      IndirectLoadExternalReference(dst, reference);
+      return;
+    }
   }
+
+  // External references should not get created with IDs if
+  // `!root_array_available()`.
+  CHECK(!reference.IsIsolateFieldId());
   mov(dst, Operand(reference));
+}
+
+void MacroAssembler::LoadIsolateField(Register dst, IsolateFieldId id) {
+  Move(dst, ExternalReference::Create(id));
 }
 
 void MacroAssembler::Move(Register dst, Register src, Condition cond) {
@@ -1808,19 +1825,26 @@ void MacroAssembler::CompareObjectType(Register object, Register map,
   CompareInstanceType(map, temp, type);
 }
 
+void MacroAssembler::CompareObjectTypeRange(Register object, Register map,
+                                            Register type_reg, Register scratch,
+                                            InstanceType lower_limit,
+                                            InstanceType upper_limit) {
+  ASM_CODE_COMMENT(this);
+  LoadMap(map, object);
+  CompareInstanceTypeRange(map, type_reg, scratch, lower_limit, upper_limit);
+}
+
 void MacroAssembler::CompareInstanceType(Register map, Register type_reg,
                                          InstanceType type) {
   ldrh(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
   cmp(type_reg, Operand(type));
 }
 
-void MacroAssembler::CompareRange(Register value, unsigned lower_limit,
-                                  unsigned higher_limit) {
+void MacroAssembler::CompareRange(Register value, Register scratch,
+                                  unsigned lower_limit, unsigned higher_limit) {
   ASM_CODE_COMMENT(this);
   DCHECK_LT(lower_limit, higher_limit);
   if (lower_limit != 0) {
-    UseScratchRegisterScope temps(this);
-    Register scratch = temps.Acquire();
     sub(scratch, value, Operand(lower_limit));
     cmp(scratch, Operand(higher_limit - lower_limit));
   } else {
@@ -1828,12 +1852,13 @@ void MacroAssembler::CompareRange(Register value, unsigned lower_limit,
   }
 }
 void MacroAssembler::CompareInstanceTypeRange(Register map, Register type_reg,
+                                              Register scratch,
                                               InstanceType lower_limit,
                                               InstanceType higher_limit) {
   ASM_CODE_COMMENT(this);
   DCHECK_LT(lower_limit, higher_limit);
   ldrh(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
-  CompareRange(type_reg, lower_limit, higher_limit);
+  CompareRange(type_reg, scratch, lower_limit, higher_limit);
 }
 
 void MacroAssembler::CompareTaggedRoot(Register obj, RootIndex index) {
@@ -1848,11 +1873,12 @@ void MacroAssembler::CompareRoot(Register obj, RootIndex index) {
   cmp(obj, scratch);
 }
 
-void MacroAssembler::JumpIfIsInRange(Register value, unsigned lower_limit,
+void MacroAssembler::JumpIfIsInRange(Register value, Register scratch,
+                                     unsigned lower_limit,
                                      unsigned higher_limit,
                                      Label* on_in_range) {
   ASM_CODE_COMMENT(this);
-  CompareRange(value, lower_limit, higher_limit);
+  CompareRange(value, scratch, lower_limit, higher_limit);
   b(ls, on_in_range);
 }
 
@@ -2202,7 +2228,7 @@ void MacroAssembler::AssertFunction(Register object) {
   Check(ne, AbortReason::kOperandIsASmiAndNotAFunction);
   push(object);
   LoadMap(object, object);
-  CompareInstanceTypeRange(object, object, FIRST_JS_FUNCTION_TYPE,
+  CompareInstanceTypeRange(object, object, object, FIRST_JS_FUNCTION_TYPE,
                            LAST_JS_FUNCTION_TYPE);
   pop(object);
   Check(ls, AbortReason::kOperandIsNotAFunction);
@@ -2216,7 +2242,8 @@ void MacroAssembler::AssertCallableFunction(Register object) {
   Check(ne, AbortReason::kOperandIsASmiAndNotAFunction);
   push(object);
   LoadMap(object, object);
-  CompareInstanceTypeRange(object, object, FIRST_CALLABLE_JS_FUNCTION_TYPE,
+  CompareInstanceTypeRange(object, object, object,
+                           FIRST_CALLABLE_JS_FUNCTION_TYPE,
                            LAST_CALLABLE_JS_FUNCTION_TYPE);
   pop(object);
   Check(ls, AbortReason::kOperandIsNotACallableFunction);
@@ -2246,8 +2273,9 @@ void MacroAssembler::AssertGeneratorObject(Register object) {
   LoadMap(map, object);
 
   // Check if JSGeneratorObject
-  Register instance_type = object;
-  CompareInstanceTypeRange(map, instance_type, FIRST_JS_GENERATOR_OBJECT_TYPE,
+  Register scratch = object;
+  CompareInstanceTypeRange(map, scratch, scratch,
+                           FIRST_JS_GENERATOR_OBJECT_TYPE,
                            LAST_JS_GENERATOR_OBJECT_TYPE);
   // Restore generator object to register and perform assertion
   pop(object);
@@ -2739,25 +2767,10 @@ int MacroAssembler::CallCFunction(Register function, int num_reg_arguments,
 
     // Save the frame pointer and PC so that the stack layout remains iterable,
     // even without an ExitFrame which normally exists between JS and C frames.
-    // See x64 code for reasoning about how to address the isolate data fields.
-    if (root_array_available()) {
-      str(pc_scratch, MemOperand(kRootRegister,
-                                 IsolateData::fast_c_call_caller_pc_offset()));
-      str(fp, MemOperand(kRootRegister,
-                         IsolateData::fast_c_call_caller_fp_offset()));
-    } else {
-      DCHECK_NOT_NULL(isolate());
-      Register addr_scratch = r4;
-      Push(addr_scratch);
-
-      Move(addr_scratch,
-           ExternalReference::fast_c_call_caller_pc_address(isolate()));
-      str(pc_scratch, MemOperand(addr_scratch));
-      Move(addr_scratch,
-           ExternalReference::fast_c_call_caller_fp_address(isolate()));
-      str(fp, MemOperand(addr_scratch));
-      Pop(addr_scratch);
-    }
+    CHECK(root_array_available());
+    str(pc_scratch,
+        ExternalReferenceAsOperand(IsolateFieldId::kFastCCallCallerPC));
+    str(fp, ExternalReferenceAsOperand(IsolateFieldId::kFastCCallCallerFP));
 
     Pop(pc_scratch);
   }
@@ -2776,19 +2789,8 @@ int MacroAssembler::CallCFunction(Register function, int num_reg_arguments,
     Push(zero_scratch);
     mov(zero_scratch, Operand::Zero());
 
-    if (root_array_available()) {
-      str(zero_scratch,
-          MemOperand(kRootRegister,
-                     IsolateData::fast_c_call_caller_fp_offset()));
-    } else {
-      DCHECK_NOT_NULL(isolate());
-      Register addr_scratch = r4;
-      Push(addr_scratch);
-      Move(addr_scratch,
-           ExternalReference::fast_c_call_caller_fp_address(isolate()));
-      str(zero_scratch, MemOperand(addr_scratch));
-      Pop(addr_scratch);
-    }
+    str(zero_scratch,
+        ExternalReferenceAsOperand(IsolateFieldId::kFastCCallCallerFP));
 
     Pop(zero_scratch);
   }
@@ -3144,8 +3146,8 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
   Label profiler_or_side_effects_check_enabled, done_api_call;
   if (with_profiling) {
     __ RecordComment("Check if profiler or side effects check is enabled");
-    __ ldrb(scratch, __ ExternalReferenceAsOperand(
-                         ER::execution_mode_address(isolate), no_reg));
+    __ ldrb(scratch,
+            __ ExternalReferenceAsOperand(IsolateFieldId::kExecutionMode));
     __ cmp(scratch, Operand(0));
     __ b(ne, &profiler_or_side_effects_check_enabled);
 #ifdef V8_RUNTIME_CALL_STATS
@@ -3227,7 +3229,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     // Additional parameter is the address of the actual callback function.
     if (thunk_arg.is_valid()) {
       MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
-          ER::api_callback_thunk_argument_address(isolate), no_reg);
+          IsolateFieldId::kApiCallbackThunkArgument);
       __ str(thunk_arg, thunk_arg_mem_op);
     }
     __ Move(scratch, thunk_ref);
@@ -3247,7 +3249,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     Register saved_result = prev_limit_reg;
     __ mov(saved_result, return_value);
     __ PrepareCallCFunction(1);
-    __ Move(kCArgRegs[0], ER::isolate_address(isolate));
+    __ Move(kCArgRegs[0], ER::isolate_address());
     __ CallCFunction(ER::delete_handle_scope_extensions(), 1);
     __ mov(return_value, saved_result);
     __ jmp(&leave_exit_frame);

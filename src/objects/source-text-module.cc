@@ -419,6 +419,14 @@ bool SourceTextModule::MaybeTransitionComponent(
     ZoneForwardList<Handle<SourceTextModule>>* stack, Status new_status) {
   DCHECK(new_status == kLinked || new_status == kEvaluated);
 
+#ifdef DEBUG
+  if (v8_flags.trace_module_status) {
+    StdoutStream os;
+    os << "Transitioning strongly connected module graph component to "
+       << Module::StatusString(new_status) << " {\n";
+  }
+#endif  // DEBUG
+
   // Below, N/M means step N in InnerModuleEvaluation and step M in
   // InnerModuleLinking.
 
@@ -463,26 +471,32 @@ bool SourceTextModule::MaybeTransitionComponent(
     //   iii. Assert: requiredModule is a Cyclic Module Record.
     //    iv. Set requiredModule.[[Status]] to LINKED.
     //     v. If requiredModule and module are the same Module Record, set done
-    //     to
-    //        true.
+    //        to true.
     do {
       ancestor = stack->front();
       stack->pop_front();
       DCHECK_EQ(ancestor->status(),
                 new_status == kLinked ? kLinking : kEvaluating);
       if (new_status == kLinked) {
-        if (!SourceTextModule::RunInitializationCode(isolate, ancestor))
+        if (!SourceTextModule::RunInitializationCode(isolate, ancestor)) {
           return false;
-      } else if (new_status == kEvaluated) {
+        }
+        ancestor->SetStatus(kLinked);
+      } else {
         DCHECK(IsTheHole(ancestor->cycle_root(), isolate));
         ancestor->set_cycle_root(*cycle_root);
-        if (ancestor->HasAsyncEvaluationOrdinal()) {
-          new_status = kEvaluatingAsync;
-        }
+        ancestor->SetStatus(ancestor->HasAsyncEvaluationOrdinal()
+                                ? kEvaluatingAsync
+                                : kEvaluated);
       }
-      ancestor->SetStatus(new_status);
     } while (*ancestor != *module);
   }
+#ifdef DEBUG
+  if (v8_flags.trace_module_status) {
+    StdoutStream os;
+    os << "}\n";
+  }
+#endif  // DEBUG
   return true;
 }
 
@@ -1015,9 +1029,15 @@ Maybe<bool> SourceTextModule::ExecuteAsyncModule(
   // 8. Perform ! PerformPromiseThen(capability.[[Promise]],
   //                                 onFulfilled, onRejected).
   Handle<Object> argv[] = {on_fulfilled, on_rejected};
-  Execution::CallBuiltin(isolate, isolate->promise_then(), capability,
-                         arraysize(argv), argv)
-      .ToHandleChecked();
+  if (V8_UNLIKELY(Execution::CallBuiltin(isolate, isolate->promise_then(),
+                                         capability, arraysize(argv), argv)
+                      .is_null())) {
+    // TODO(349961173): We assume the builtin call can only fail with a
+    // termination exception. If this check fails in the wild investigate why
+    // the call fails. Otherwise turn this into a DCHECK in the future.
+    CHECK(isolate->is_execution_terminating());
+    return Nothing<bool>();
+  }
 
   // 9. Perform ! module.ExecuteModule(capability).
   // Note: In V8 we have broken module.ExecuteModule into
@@ -1115,11 +1135,6 @@ MaybeHandle<Object> SourceTextModule::InnerModuleEvaluation(
 
     // 8. Set module.[[PendingAsyncDependencies]] to 0.
     DCHECK(!raw_module->HasPendingAsyncDependencies());
-
-    // (We initialize the list here but in the spec it's done at Source Text
-    // Module Record creation time.)
-    raw_module->set_async_parent_modules(
-        ReadOnlyRoots(isolate).empty_array_list());
 
     // 9. Set index to index + 1.
     (*dfs_index)++;

@@ -4,6 +4,7 @@
 
 #include "src/objects/map-updater.h"
 
+#include <optional>
 #include <queue>
 
 #include "src/base/platform/mutex.h"
@@ -18,8 +19,7 @@
 #include "src/objects/property-details.h"
 #include "src/objects/transitions.h"
 
-namespace v8 {
-namespace internal {
+namespace v8::internal {
 
 namespace {
 
@@ -348,9 +348,9 @@ IntegrityLevelTransitionInfo DetectIntegrityLevelTransitions(
 }  // namespace
 
 // static
-base::Optional<Tagged<Map>> MapUpdater::TryUpdateNoLock(Isolate* isolate,
-                                                        Tagged<Map> old_map,
-                                                        ConcurrencyMode cmode) {
+std::optional<Tagged<Map>> MapUpdater::TryUpdateNoLock(Isolate* isolate,
+                                                       Tagged<Map> old_map,
+                                                       ConcurrencyMode cmode) {
   DisallowGarbageCollection no_gc;
 
   // Check the state of the root map.
@@ -406,21 +406,19 @@ base::Optional<Tagged<Map>> MapUpdater::TryUpdateNoLock(Isolate* isolate,
   }
 
   // Replay the transitions as they were before the integrity level transition.
-  Tagged<Map> replay = root_map->TryReplayPropertyTransitions(
+  Tagged<Map> result = root_map->TryReplayPropertyTransitions(
       isolate, info.integrity_level_source_map, cmode);
-  if (replay.is_null()) return {};
+  if (result.is_null()) return {};
 
-  std::optional<Tagged<Map>> result = replay;
   if (info.has_integrity_level_transition) {
     // Now replay the integrity level transition.
     result = TransitionsAccessor(isolate, *result, IsConcurrent(cmode))
                  .SearchSpecial(info.integrity_level_symbol);
   }
+  if (result.is_null()) return {};
 
-  if (result) {
-    DCHECK_EQ(old_map->elements_kind(), (*result)->elements_kind());
-    DCHECK_EQ(old_map->instance_type(), (*result)->instance_type());
-  }
+  DCHECK_EQ(old_map->elements_kind(), (*result)->elements_kind());
+  DCHECK_EQ(old_map->instance_type(), (*result)->instance_type());
   return result;
 }
 
@@ -470,8 +468,9 @@ void MapUpdater::CompleteInobjectSlackTracking(Isolate* isolate,
     };
   } else {
     // Stop slack tracking for this map.
-    callback = [](Tagged<Map> map) {
+    callback = [&](Tagged<Map> map) {
       map->set_construction_counter(Map::kNoSlackTracking);
+      DCHECK(!TransitionsAccessor(isolate, map).HasSideStepTransitions());
     };
   }
 
@@ -777,9 +776,9 @@ MapUpdater::State MapUpdater::FindTargetMap() {
     }
 
     // We try to replay the integrity level transition here.
-    if (auto maybe_transition = TransitionsAccessor::SearchSpecial(
-            isolate_, target_map_, *integrity_level_symbol_)) {
-      result_map_ = *maybe_transition;
+    MaybeHandle<Map> maybe_transition = TransitionsAccessor::SearchSpecial(
+        isolate_, target_map_, *integrity_level_symbol_);
+    if (maybe_transition.ToHandle(&result_map_)) {
       state_ = kEnd;
       return state_;  // Done.
     }
@@ -1222,7 +1221,7 @@ void MapUpdater::UpdateFieldType(Isolate* isolate, DirectHandle<Map> map,
 
   std::queue<Tagged<Map>> backlog;
   backlog.push(*map);
-  std::unordered_set<Tagged<Map>, Object::Hasher> sidestep_transition;
+  std::vector<Tagged<Map>> sidestep_transition;
 
   ReadOnlyRoots roots(isolate);
   while (!backlog.empty()) {
@@ -1230,68 +1229,69 @@ void MapUpdater::UpdateFieldType(Isolate* isolate, DirectHandle<Map> map,
     backlog.pop();
 
     TransitionsAccessor transitions(isolate, current);
-    transitions.ForEachTransitionWithKey(
-        &no_gc,
-        [&](Tagged<Name> key, Tagged<Map> target) {
-          if (TransitionsAccessor::IsSpecialSidestepTransition(roots, key)) {
-            if (sidestep_transition.count(target)) {
-              return;
-            }
-            sidestep_transition.insert(target);
-          }
-          backlog.push(target);
-        },
+    transitions.ForEachTransition(
+        &no_gc, [&](Tagged<Map> target) { backlog.push(target); },
         [&](Tagged<Map> target) {
           if (v8_flags.move_prototype_transitions_first) {
             backlog.push(target);
           }
         },
-        TransitionsAccessor::IterationMode::kIncludeSideStepTransitions);
+        [&](Tagged<Object> target) {
+          if (!target.IsSmi() && !Cast<Map>(target)->is_deprecated()) {
+            sidestep_transition.push_back(Cast<Map>(target));
+          }
+        });
 
     Tagged<DescriptorArray> descriptors =
         current->instance_descriptors(isolate);
     details = descriptors->GetDetails(descriptor);
 
-    PropertyConstness cur_new_constness = new_constness;
-    Representation cur_new_representation = new_representation;
-    Handle<FieldType> cur_new_type = new_type;
-    // Through side-steps we can reach transition trees which are already more
-    // generalized. Ensure we don't re-concretize them.
-    if (!sidestep_transition.empty()) {
-      cur_new_constness =
-          GeneralizeConstness(new_constness, details.constness());
-      cur_new_representation =
-          new_representation.generalize(details.representation());
-      cur_new_type = GeneralizeFieldType(
-          details.representation(),
-          handle(descriptors->GetFieldType(descriptor), isolate),
-          cur_new_representation, new_type, isolate);
-      DCHECK(new_representation.fits_into(cur_new_representation));
-    }
-
     // It is allowed to change representation here only from None
     // to something or from Smi or HeapObject to Tagged.
-    CHECK(
-        details.representation().Equals(cur_new_representation) ||
-        details.representation().CanBeInPlaceChangedTo(cur_new_representation));
+    CHECK(details.representation().Equals(new_representation) ||
+          details.representation().CanBeInPlaceChangedTo(new_representation));
 
     // Skip if we already updated the shared descriptor or the target was more
     // general in the first place.
-    if (cur_new_constness == details.constness() &&
-        cur_new_representation.Equals(details.representation()) &&
-        FieldType::Equals(descriptors->GetFieldType(descriptor),
-                          *cur_new_type)) {
+    if (new_constness == details.constness() &&
+        new_representation.Equals(details.representation()) &&
+        FieldType::Equals(descriptors->GetFieldType(descriptor), *new_type)) {
       continue;
     }
 
-    DCHECK_IMPLIES(IsClass(*cur_new_type),
-                   cur_new_representation.IsHeapObject());
-    MaybeObjectHandle wrapped_type(Map::WrapFieldType(cur_new_type));
+    DCHECK_IMPLIES(IsClass(*new_type), new_representation.IsHeapObject());
+    MaybeObjectHandle wrapped_type(Map::WrapFieldType(new_type));
     Descriptor d = Descriptor::DataField(
         name, descriptors->GetFieldIndex(descriptor), details.attributes(),
-        cur_new_constness, cur_new_representation, wrapped_type);
+        new_constness, new_representation, wrapped_type);
     DCHECK_EQ(descriptors->GetKey(descriptor), *d.key_);
     descriptors->Replace(descriptor, &d);
+  }
+
+  for (Tagged<Map> current : sidestep_transition) {
+    Tagged<DescriptorArray> descriptors =
+        current->instance_descriptors(isolate);
+    details = descriptors->GetDetails(descriptor);
+    // Through side-steps we can reach transition trees which are already more
+    // generalized. Ensure we don't re-concretize them.
+    PropertyConstness cur_new_constness =
+        GeneralizeConstness(new_constness, details.constness());
+    Representation cur_new_representation =
+        new_representation.generalize(details.representation());
+    Handle<FieldType> cur_new_type = GeneralizeFieldType(
+        details.representation(),
+        handle(descriptors->GetFieldType(descriptor), isolate),
+        cur_new_representation, new_type, isolate);
+    DCHECK(new_representation.fits_into(cur_new_representation));
+    // Skip if we already updated the shared descriptor or the target was more
+    // general in the first place.
+    if (cur_new_constness != details.constness() ||
+        !cur_new_representation.Equals(details.representation()) ||
+        !FieldType::Equals(descriptors->GetFieldType(descriptor),
+                           *cur_new_type)) {
+      GeneralizeField(isolate, handle(current, isolate), descriptor,
+                      cur_new_constness, cur_new_representation, cur_new_type);
+    }
   }
 }
 
@@ -1371,5 +1371,4 @@ void MapUpdater::GeneralizeField(Isolate* isolate, DirectHandle<Map> map,
   }
 }
 
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal

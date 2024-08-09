@@ -4,9 +4,11 @@
 
 #include "src/objects/js-objects.h"
 
+#include <limits>
+#include <optional>
+
 #include "src/api/api-arguments-inl.h"
 #include "src/api/api-natives.h"
-#include "src/base/optional.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/date/date.h"
@@ -35,47 +37,25 @@
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-atomics-synchronization.h"
-#include "src/objects/lookup.h"
-#include "src/objects/map-updater.h"
-#include "src/objects/objects-body-descriptors-inl.h"
-#include "src/objects/objects-inl.h"
-#include "src/objects/tagged.h"
-#ifdef V8_INTL_SUPPORT
-#include "src/objects/js-break-iterator.h"
-#include "src/objects/js-collator.h"
-#endif  // V8_INTL_SUPPORT
 #include "src/objects/js-collection.h"
-#ifdef V8_INTL_SUPPORT
-#include "src/objects/js-date-time-format.h"
-#include "src/objects/js-display-names.h"
-#include "src/objects/js-duration-format.h"
-#endif  // V8_INTL_SUPPORT
 #include "src/objects/js-disposable-stack.h"
 #include "src/objects/js-generator-inl.h"
 #include "src/objects/js-iterator-helpers-inl.h"
-#ifdef V8_INTL_SUPPORT
-#include "src/objects/js-list-format.h"
-#include "src/objects/js-locale.h"
-#include "src/objects/js-number-format.h"
-#include "src/objects/js-plural-rules.h"
-#endif  // V8_INTL_SUPPORT
 #include "src/objects/js-promise.h"
+#include "src/objects/js-raw-json-inl.h"
 #include "src/objects/js-regexp-inl.h"
 #include "src/objects/js-regexp-string-iterator.h"
 #include "src/objects/js-shadow-realm.h"
-#ifdef V8_INTL_SUPPORT
-#include "src/objects/js-relative-time-format.h"
-#include "src/objects/js-segment-iterator.h"
-#include "src/objects/js-segmenter.h"
-#include "src/objects/js-segments.h"
-#endif  // V8_INTL_SUPPORT
-#include "src/objects/js-raw-json-inl.h"
 #include "src/objects/js-shared-array-inl.h"
 #include "src/objects/js-struct-inl.h"
 #include "src/objects/js-temporal-objects-inl.h"
 #include "src/objects/js-weak-refs.h"
+#include "src/objects/lookup.h"
 #include "src/objects/map-inl.h"
+#include "src/objects/map-updater.h"
 #include "src/objects/module.h"
+#include "src/objects/objects-body-descriptors-inl.h"
+#include "src/objects/objects-inl.h"
 #include "src/objects/oddball.h"
 #include "src/objects/property-cell.h"
 #include "src/objects/property-descriptor.h"
@@ -84,6 +64,7 @@
 #include "src/objects/prototype.h"
 #include "src/objects/shared-function-info.h"
 #include "src/objects/swiss-name-dictionary-inl.h"
+#include "src/objects/tagged.h"
 #include "src/objects/transitions.h"
 #include "src/strings/string-builder-inl.h"
 #include "src/strings/string-stream.h"
@@ -94,8 +75,23 @@
 #include "src/wasm/wasm-objects.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-namespace v8 {
-namespace internal {
+#ifdef V8_INTL_SUPPORT
+#include "src/objects/js-break-iterator.h"
+#include "src/objects/js-collator.h"
+#include "src/objects/js-date-time-format.h"
+#include "src/objects/js-display-names.h"
+#include "src/objects/js-duration-format.h"
+#include "src/objects/js-list-format.h"
+#include "src/objects/js-locale.h"
+#include "src/objects/js-number-format.h"
+#include "src/objects/js-plural-rules.h"
+#include "src/objects/js-relative-time-format.h"
+#include "src/objects/js-segment-iterator.h"
+#include "src/objects/js-segmenter.h"
+#include "src/objects/js-segments.h"
+#endif  // V8_INTL_SUPPORT
+
+namespace v8::internal {
 
 // static
 Maybe<bool> JSReceiver::HasProperty(LookupIterator* it) {
@@ -1200,12 +1196,11 @@ MaybeHandle<JSAny> GetPropertyWithInterceptorInternal(
                                  *holder, Just(kDontThrow));
 
   if (it->IsElement(*holder)) {
-    result =
-        Cast<JSAny>(args.CallIndexedGetter(interceptor, it->array_index()));
+    result = args.CallIndexedGetter(interceptor, it->array_index());
   } else {
-    result = Cast<JSAny>(args.CallNamedGetter(interceptor, it->name()));
+    result = args.CallNamedGetter(interceptor, it->name());
   }
-
+  // An exception was thrown in the interceptor. Propagate.
   RETURN_VALUE_IF_EXCEPTION_DETECTOR(isolate, args, kNullMaybeHandle);
   if (result.is_null()) return isolate->factory()->undefined_value();
   *done = true;
@@ -1240,13 +1235,17 @@ Maybe<PropertyAttributes> GetPropertyAttributesWithInterceptorInternal(
     } else {
       result = args.CallNamedQuery(interceptor, it->name());
     }
+    // An exception was thrown in the interceptor. Propagate.
+    RETURN_VALUE_IF_EXCEPTION_DETECTOR(isolate, args,
+                                       Nothing<PropertyAttributes>());
+
     if (!result.is_null()) {
       int32_t value;
       CHECK(Object::ToInt32(*result, &value));
       DCHECK_IMPLIES((value & ~PropertyAttributes::ALL_ATTRIBUTES_MASK) != 0,
                      value == PropertyAttributes::ABSENT);
       // In case of absent property side effects are not allowed.
-      // TODO(ishell): the PropertyAttributes::ABSENT is not exposed in the Api,
+      // TODO(ishell): PropertyAttributes::ABSENT is not exposed in the Api,
       // so it can't be officially returned. We should fix the tests instead.
       if (value != PropertyAttributes::ABSENT) {
         args.AcceptSideEffects();
@@ -1261,15 +1260,15 @@ Maybe<PropertyAttributes> GetPropertyAttributesWithInterceptorInternal(
     } else {
       result = args.CallNamedGetter(interceptor, it->name());
     }
+    // An exception was thrown in the interceptor. Propagate.
+    RETURN_VALUE_IF_EXCEPTION_DETECTOR(isolate, args,
+                                       Nothing<PropertyAttributes>());
 
     if (!result.is_null()) {
       args.AcceptSideEffects();
       return Just(DONT_ENUM);
     }
   }
-
-  RETURN_VALUE_IF_EXCEPTION_DETECTOR(isolate, args,
-                                     Nothing<PropertyAttributes>());
   return Just(ABSENT);
 }
 
@@ -1381,7 +1380,7 @@ Maybe<bool> JSReceiver::OrdinaryDefineOwnProperty(
   LookupIterator it(isolate, object, key, LookupIterator::OWN);
 
   // Deal with access checks first.
-  if (it.state() == LookupIterator::ACCESS_CHECK) {
+  while (it.state() == LookupIterator::ACCESS_CHECK) {
     if (!it.HasAccess()) {
       RETURN_ON_EXCEPTION_VALUE(
           isolate, isolate->ReportFailedAccessCheck(it.GetHolder<JSObject>()),
@@ -1404,7 +1403,7 @@ Maybe<bool> JSReceiver::OrdinaryDefineOwnProperty(
   it.Restart();
 
   // Skip over the access check after restarting -- we've already checked it.
-  if (it.state() == LookupIterator::ACCESS_CHECK) {
+  while (it.state() == LookupIterator::ACCESS_CHECK) {
     DCHECK(it.HasAccess());
     it.Next();
   }
@@ -1429,7 +1428,7 @@ Maybe<bool> JSReceiver::OrdinaryDefineOwnProperty(
           // Proceed lookup.
           break;
       }
-      // We need to restart the lookup in case the accessor ran with side
+      // We need to restart the lookup in case the interceptor ran with side
       // effects.
       it.Restart();
     }
@@ -1826,7 +1825,7 @@ Maybe<bool> GetPropertyDescriptorWithInterceptor(LookupIterator* it,
                                                  PropertyDescriptor* desc) {
   Handle<InterceptorInfo> interceptor;
 
-  if (it->state() == LookupIterator::ACCESS_CHECK) {
+  while (it->state() == LookupIterator::ACCESS_CHECK) {
     if (it->HasAccess()) {
       it->Next();
     } else {
@@ -1836,6 +1835,7 @@ Maybe<bool> GetPropertyDescriptorWithInterceptor(LookupIterator* it,
         return Just(false);
       }
       CHECK(!interceptor.is_null());
+      break;
     }
   }
   if (it->state() == LookupIterator::INTERCEPTOR) {
@@ -2490,8 +2490,12 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSPrimitiveWrapper::kHeaderSize;
     case JS_DATE_TYPE:
       return JSDate::kHeaderSize;
-    case JS_DISPOSABLE_STACK_TYPE:
-      return JSDisposableStack::kHeaderSize;
+    case JS_DISPOSABLE_STACK_BASE_TYPE:
+      return JSDisposableStackBase::kHeaderSize;
+    case JS_ASYNC_DISPOSABLE_STACK_TYPE:
+      return JSAsyncDisposableStack::kHeaderSize;
+    case JS_SYNC_DISPOSABLE_STACK_TYPE:
+      return JSSyncDisposableStack::kHeaderSize;
     case JS_ARRAY_TYPE:
       return JSArray::kHeaderSize;
     case JS_ARRAY_BUFFER_TYPE:
@@ -2620,8 +2624,6 @@ int JSObject::GetHeaderSize(InstanceType type,
       return WasmMemoryObject::kHeaderSize;
     case WASM_MODULE_OBJECT_TYPE:
       return WasmModuleObject::kHeaderSize;
-    case WASM_SUSPENDER_OBJECT_TYPE:
-      return WasmSuspenderObject::kHeaderSize;
     case WASM_TABLE_OBJECT_TYPE:
       return WasmTableObject::kHeaderSize;
     case WASM_VALUE_OBJECT_TYPE:
@@ -4479,9 +4481,9 @@ Maybe<bool> JSObject::PreventExtensionsWithTransition(
   Handle<Map> old_map(object->map(), isolate);
   old_map = Map::Update(isolate, old_map);
   Handle<Map> transition_map;
-  if (auto maybe_transition_map = TransitionsAccessor::SearchSpecial(
-          isolate, old_map, *transition_marker)) {
-    transition_map = *maybe_transition_map;
+  MaybeHandle<Map> maybe_transition_map =
+      TransitionsAccessor::SearchSpecial(isolate, old_map, *transition_marker);
+  if (maybe_transition_map.ToHandle(&transition_map)) {
     DCHECK(transition_map->has_dictionary_elements() ||
            transition_map->has_typed_array_or_rab_gsab_typed_array_elements() ||
            transition_map->elements_kind() == SLOW_STRING_WRAPPER_ELEMENTS ||
@@ -4610,14 +4612,14 @@ Handle<Object> JSObject::DictionaryPropertyAt(Isolate* isolate,
 }
 
 // static
-base::Optional<Tagged<Object>> JSObject::DictionaryPropertyAt(
+std::optional<Tagged<Object>> JSObject::DictionaryPropertyAt(
     DirectHandle<JSObject> object, InternalIndex dict_index, Heap* heap) {
   Tagged<Object> backing_store = object->raw_properties_or_hash(kRelaxedLoad);
   if (!IsHeapObject(backing_store)) return {};
   if (heap->IsPendingAllocation(Cast<HeapObject>(backing_store))) return {};
 
   if (!IsPropertyDictionary(backing_store)) return {};
-  base::Optional<Tagged<Object>> maybe_obj =
+  std::optional<Tagged<Object>> maybe_obj =
       Cast<PropertyDictionary>(backing_store)->TryValueAt(dict_index);
 
   if (!maybe_obj) return {};
@@ -4725,7 +4727,7 @@ MaybeHandle<Object> JSObject::DefineOwnAccessorIgnoreAttributes(
 
   it->UpdateProtector();
 
-  if (it->state() == LookupIterator::ACCESS_CHECK) {
+  while (it->state() == LookupIterator::ACCESS_CHECK) {
     if (!it->HasAccess()) {
       RETURN_ON_EXCEPTION(
           isolate, isolate->ReportFailedAccessCheck(it->GetHolder<JSObject>()));
@@ -4760,7 +4762,7 @@ MaybeHandle<Object> JSObject::SetAccessor(Handle<JSObject> object,
 
   // Duplicate ACCESS_CHECK outside of GetPropertyAttributes for the case that
   // the FailedAccessCheckCallbackFunction doesn't throw an exception.
-  if (it.state() == LookupIterator::ACCESS_CHECK) {
+  while (it.state() == LookupIterator::ACCESS_CHECK) {
     if (!it.HasAccess()) {
       RETURN_ON_EXCEPTION(isolate, isolate->ReportFailedAccessCheck(object));
       UNREACHABLE();
@@ -5615,7 +5617,7 @@ Tagged<Object> JSObject::RawFastPropertyAtCompareAndSwap(
     SeqCstAccessTag tag) {
   return HeapObject::SeqCst_CompareAndSwapField(
       expected, value,
-      [=](Tagged<Object> expected_value, Tagged<Object> new_value) {
+      [=, this](Tagged<Object> expected_value, Tagged<Object> new_value) {
         return RawFastPropertyAtCompareAndSwapInternal(index, expected_value,
                                                        new_value, tag);
       });
@@ -5645,19 +5647,17 @@ void JSGlobalObject::InvalidatePropertyCell(DirectHandle<JSGlobalObject> global,
 // static
 MaybeHandle<JSDate> JSDate::New(Handle<JSFunction> constructor,
                                 Handle<JSReceiver> new_target, double tv) {
-  Isolate* const isolate = constructor->GetIsolate();
-  Handle<JSObject> result;
+  Handle<JSDate> result;
   ASSIGN_RETURN_ON_EXCEPTION(
-      isolate, result,
-      JSObject::New(constructor, new_target, Handle<AllocationSite>::null()));
-  if (-DateCache::kMaxTimeInMs <= tv && tv <= DateCache::kMaxTimeInMs) {
-    tv = DoubleToInteger(tv) + 0.0;
+      constructor->GetIsolate(), result,
+      Cast<JSDate>(JSObject::New(constructor, new_target,
+                                 Handle<AllocationSite>::null())));
+  if (DateCache::TryTimeClip(&tv)) {
+    result->SetValue(tv);
   } else {
-    tv = std::numeric_limits<double>::quiet_NaN();
+    result->SetNanValue();
   }
-  DirectHandle<Number> value = isolate->factory()->NewNumber(tv);
-  Cast<JSDate>(result)->SetValue(*value, std::isnan(tv));
-  return Cast<JSDate>(result);
+  return result;
 }
 
 // static
@@ -5688,16 +5688,14 @@ Address JSDate::GetField(Isolate* isolate, Address raw_object,
 }
 
 Tagged<Object> JSDate::DoGetField(Isolate* isolate, FieldIndex index) {
-  DCHECK_NE(index, kDateValue);
-
   DateCache* date_cache = isolate->date_cache();
 
   if (index < kFirstUncachedField) {
     Tagged<Object> stamp = cache_stamp();
     if (stamp != date_cache->stamp() && IsSmi(stamp)) {
       // Since the stamp is not NaN, the value is also not NaN.
-      int64_t local_time_ms = date_cache->ToLocal(
-          static_cast<int64_t>(Object::NumberValue(Cast<Number>(value()))));
+      int64_t local_time_ms =
+          date_cache->ToLocal(static_cast<int64_t>(value()));
       SetCachedFields(local_time_ms, date_cache);
     }
     switch (index) {
@@ -5721,11 +5719,10 @@ Tagged<Object> JSDate::DoGetField(Isolate* isolate, FieldIndex index) {
   }
 
   if (index >= kFirstUTCField) {
-    return GetUTCField(index, Object::NumberValue(Cast<Number>(value())),
-                       date_cache);
+    return GetUTCField(index, value(), date_cache);
   }
 
-  double time = Object::NumberValue(Cast<Number>(value()));
+  double time = value();
   if (std::isnan(time)) return GetReadOnlyRoots().nan_value();
 
   int64_t local_time_ms = date_cache->ToLocal(static_cast<int64_t>(time));
@@ -5786,29 +5783,28 @@ Tagged<Object> JSDate::GetUTCField(FieldIndex index, double value,
 }
 
 // static
-Handle<Object> JSDate::SetValue(DirectHandle<JSDate> date, double v) {
-  Isolate* const isolate = date->GetIsolate();
-  Handle<Number> value = isolate->factory()->NewNumber(v);
-  bool value_is_nan = std::isnan(v);
-  date->SetValue(*value, value_is_nan);
-  return value;
-}
-
-void JSDate::SetValue(Tagged<Number> value, bool is_value_nan) {
+void JSDate::SetValue(double value) {
+#ifdef DEBUG
+  DCHECK(!std::isnan(value));
+  double clipped_value = value;
+  DCHECK(DateCache::TryTimeClip(&clipped_value));
+  DCHECK_EQ(value, clipped_value);
+#endif
   set_value(value);
-  if (is_value_nan) {
-    Tagged<HeapNumber> nan = GetReadOnlyRoots().nan_value();
-    set_cache_stamp(nan, SKIP_WRITE_BARRIER);
-    set_year(nan, SKIP_WRITE_BARRIER);
-    set_month(nan, SKIP_WRITE_BARRIER);
-    set_day(nan, SKIP_WRITE_BARRIER);
-    set_hour(nan, SKIP_WRITE_BARRIER);
-    set_min(nan, SKIP_WRITE_BARRIER);
-    set_sec(nan, SKIP_WRITE_BARRIER);
-    set_weekday(nan, SKIP_WRITE_BARRIER);
-  } else {
-    set_cache_stamp(Smi::FromInt(DateCache::kInvalidStamp), SKIP_WRITE_BARRIER);
-  }
+  set_cache_stamp(Smi::FromInt(DateCache::kInvalidStamp), SKIP_WRITE_BARRIER);
+}
+void JSDate::SetNanValue() {
+  set_value(std::numeric_limits<double>::quiet_NaN());
+
+  Tagged<HeapNumber> nan = GetReadOnlyRoots().nan_value();
+  set_cache_stamp(nan, SKIP_WRITE_BARRIER);
+  set_year(nan, SKIP_WRITE_BARRIER);
+  set_month(nan, SKIP_WRITE_BARRIER);
+  set_day(nan, SKIP_WRITE_BARRIER);
+  set_hour(nan, SKIP_WRITE_BARRIER);
+  set_min(nan, SKIP_WRITE_BARRIER);
+  set_sec(nan, SKIP_WRITE_BARRIER);
+  set_weekday(nan, SKIP_WRITE_BARRIER);
 }
 
 void JSDate::SetCachedFields(int64_t local_time_ms, DateCache* date_cache) {
@@ -5916,5 +5912,4 @@ Handle<String> JSMessageObject::GetSourceLine() const {
   return isolate->factory()->NewSubString(src, info.line_start, info.line_end);
 }
 
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal

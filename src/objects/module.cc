@@ -42,8 +42,10 @@ void PrintModuleName(Tagged<Module> module, std::ostream& os) {
 void PrintStatusTransition(Tagged<Module> module, Module::Status old_status) {
   if (!v8_flags.trace_module_status) return;
   StdoutStream os;
-  os << "Changing module status from " << old_status << " to "
-     << module->status() << " for ";
+  os << "Changing module status from " << Module::StatusString(old_status)
+     << " to "
+     << Module::StatusString(static_cast<Module::Status>(module->status()))
+     << " for ";
   PrintModuleName(module, os);
 }
 
@@ -67,6 +69,30 @@ void SetStatusInternal(Tagged<Module> module, Module::Status new_status) {
 }
 
 }  // end namespace
+
+#ifdef DEBUG
+// static
+const char* Module::StatusString(Module::Status status) {
+  switch (status) {
+    case Module::kUnlinked:
+      return "Unlinked";
+    case Module::kPreLinking:
+      return "PreLinking";
+    case Module::kLinking:
+      return "Linking";
+    case Module::kLinked:
+      return "Linked";
+    case Module::kEvaluating:
+      return "Evaluating";
+    case Module::kEvaluatingAsync:
+      return "EvaluatingAsync";
+    case Module::kEvaluated:
+      return "Evaluated";
+    case Module::kErrored:
+      return "Errored";
+  }
+}
+#endif  // DEBUG
 
 void Module::SetStatus(Status new_status) {
   DisallowGarbageCollection no_gc;
@@ -256,17 +282,19 @@ MaybeHandle<Object> Module::Evaluate(Isolate* isolate, Handle<Module> module) {
   }
 
   // Start of Evaluate () Concrete Method
-  // 2. Assert: module.[[Status]] is "linked" or "evaluated".
-  CHECK(module_status == kLinked || module_status == kEvaluated);
+  // 2. Assert: module.[[Status]] is one of LINKED, EVALUATING-ASYNC, or
+  //    EVALUATED.
+  CHECK(module_status == kLinked || module_status == kEvaluatingAsync ||
+        module_status == kEvaluated);
 
-  // 3. If module.[[Status]] is "evaluated", set module to
-  //    module.[[CycleRoot]].
+  // 3. If module.[[Status]] is either EVALUATING-ASYNC or EVALUATED, set module
+  //    to module.[[CycleRoot]].
   // A Synthetic Module has no children so it is its own cycle root.
-  if (module_status == kEvaluated && IsSourceTextModule(*module)) {
+  if (module_status >= kEvaluatingAsync && IsSourceTextModule(*module)) {
     module = Cast<SourceTextModule>(module)->GetCycleRoot(isolate);
   }
 
-  // 4. If module.[[TopLevelCapability]] is not undefined, then
+  // 4. If module.[[TopLevelCapability]] is not EMPTY, then
   //    a. Return module.[[TopLevelCapability]].[[Promise]].
   if (IsJSPromise(module->top_level_capability())) {
     return handle(Cast<JSPromise>(module->top_level_capability()), isolate);

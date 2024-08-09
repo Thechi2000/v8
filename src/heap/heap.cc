@@ -8,6 +8,7 @@
 #include <cinttypes>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -18,7 +19,6 @@
 #include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/once.h"
-#include "src/base/optional.h"
 #include "src/base/platform/memory.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/platform/time.h"
@@ -873,8 +873,11 @@ void Heap::DumpJSONHeapStatistics(std::stringstream& stream) {
 
 void Heap::ReportStatisticsAfterGC() {
   if (deferred_counters_.empty()) return;
-  isolate()->CountUsage(base::VectorOf(deferred_counters_));
-  deferred_counters_.clear();
+  // Move the contents into a new SmallVector first, in case
+  // {Isolate::CountUsage} puts the counters into {deferred_counters_} again.
+  decltype(deferred_counters_) to_report = std::move(deferred_counters_);
+  DCHECK(deferred_counters_.empty());
+  isolate()->CountUsage(base::VectorOf(to_report));
 }
 
 class Heap::AllocationTrackerForDebugging final
@@ -1268,6 +1271,9 @@ void Heap::GarbageCollectionEpilogueInSafepoint(GarbageCollector collector) {
     // Discard pooled pages for scavenger if needed.
     if (ShouldReduceMemory()) {
       memory_allocator_->pool()->ReleasePooledChunks();
+#if V8_ENABLE_WEBASSEMBLY
+      isolate_->stack_pool().ReleaseFinishedStacks();
+#endif
     }
   }
 
@@ -1741,9 +1747,8 @@ void Heap::CollectGarbage(AllocationSpace space,
     {
       GCTracer::RecordGCPhasesInfo record_gc_phases_info(this, collector,
                                                          gc_reason);
-      base::Optional<TimedHistogramScope> histogram_timer_scope;
-      base::Optional<OptionalTimedHistogramScope>
-          histogram_timer_priority_scope;
+      std::optional<TimedHistogramScope> histogram_timer_scope;
+      std::optional<OptionalTimedHistogramScope> histogram_timer_priority_scope;
       TRACE_EVENT0("v8", record_gc_phases_info.trace_event_name());
       if (record_gc_phases_info.type_timer()) {
         histogram_timer_scope.emplace(record_gc_phases_info.type_timer(),
@@ -1981,7 +1986,7 @@ void Heap::StartIncrementalMarking(GCFlags gc_flags,
     CompleteSweepingFull();
   }
 
-  base::Optional<SafepointScope> safepoint_scope;
+  std::optional<SafepointScope> safepoint_scope;
 
   {
     AllowGarbageCollection allow_shared_gc;
@@ -1998,8 +2003,6 @@ void Heap::StartIncrementalMarking(GCFlags gc_flags,
   std::vector<Isolate*> paused_clients =
       PauseConcurrentThreadsInClients(collector);
 
-  RecomputeLimitsAfterLoadingIfNeeded();
-
   // Now that sweeping is completed, we can start the next full GC cycle.
   tracer()->StartCycle(collector, gc_reason, nullptr,
                        GCTracer::MarkingType::kIncremental);
@@ -2008,6 +2011,12 @@ void Heap::StartIncrementalMarking(GCFlags gc_flags,
   current_gc_callback_flags_ = gc_callback_flags;
 
   incremental_marking()->Start(collector, gc_reason);
+
+  if (collector == GarbageCollector::MARK_COMPACTOR) {
+    is_full_gc_during_loading_ = update_allocation_limits_after_loading_;
+    RecomputeLimitsAfterLoadingIfNeeded();
+    DCHECK(!update_allocation_limits_after_loading_);
+  }
 
   if (isolate()->is_shared_space_isolate()) {
     for (Isolate* client : paused_clients) {
@@ -2307,7 +2316,7 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
 
   const base::TimeTicks atomic_pause_start_time = base::TimeTicks::Now();
 
-  base::Optional<SafepointScope> safepoint_scope;
+  std::optional<SafepointScope> safepoint_scope;
   {
     AllowGarbageCollection allow_shared_gc;
 
@@ -2421,8 +2430,12 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
   ResumeConcurrentThreadsInClients(std::move(paused_clients));
 
   RecomputeLimits(collector, atomic_pause_end_time);
-  if (ShouldOptimizeForLoadTime()) {
-    update_allocation_limits_after_loading_ = true;
+  if ((collector == GarbageCollector::MARK_COMPACTOR) &&
+      is_full_gc_during_loading_) {
+    if (ShouldOptimizeForLoadTime()) {
+      update_allocation_limits_after_loading_ = true;
+    }
+    is_full_gc_during_loading_ = false;
   }
 
   // After every full GC the old generation allocation limit should be
@@ -2641,10 +2654,10 @@ void Heap::RecomputeLimits(GarbageCollector collector, base::TimeTicks time) {
 }
 
 void Heap::RecomputeLimitsAfterLoadingIfNeeded() {
-  if (!v8_flags.update_allocation_limits_after_loading) return;
-
   if (!update_allocation_limits_after_loading_) return;
   update_allocation_limits_after_loading_ = false;
+
+  if (!v8_flags.update_allocation_limits_after_loading) return;
 
   if ((OldGenerationSpaceAvailable() > 0) && (GlobalMemoryAvailable() > 0)) {
     // Only recompute limits if memory accumulated during loading may lead to
@@ -3547,7 +3560,7 @@ Tagged<FixedArrayBase> Heap::LeftTrimFixedArray(Tagged<FixedArrayBase> object,
   if (v8_flags.enable_slow_asserts) {
     // Make sure the stack or other roots (e.g., Handles) don't contain pointers
     // to the original FixedArray (which is now the filler object).
-    base::Optional<IsolateSafepointScope> safepoint_scope;
+    std::optional<IsolateSafepointScope> safepoint_scope;
 
     {
       AllowGarbageCollection allow_gc;
@@ -4262,14 +4275,14 @@ void Heap::MemoryPressureNotification(MemoryPressureLevel level,
 }
 
 void Heap::EagerlyFreeExternalMemoryAndWasmCode() {
-  // Flush all Liftoff code.
 #if V8_ENABLE_WEBASSEMBLY
   if (v8_flags.flush_liftoff_code) {
-    wasm::GetWasmEngine()->FlushCode();
-    int liftoff_codesize =
-        static_cast<int>(wasm::GetWasmEngine()->GetLiftoffCodeSize());
+    // Flush Liftoff code and record the flushed code size.
+    auto [code_size, metadata_size] = wasm::GetWasmEngine()->FlushLiftoffCode();
     isolate_->counters()->wasm_flushed_liftoff_code_size_bytes()->AddSample(
-        liftoff_codesize);
+        static_cast<int>(code_size));
+    isolate_->counters()->wasm_flushed_liftoff_metadata_size_bytes()->AddSample(
+        static_cast<int>(metadata_size));
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   CompleteArrayBufferSweeping(this);
@@ -5535,6 +5548,13 @@ Heap::IncrementalMarkingLimit Heap::IncrementalMarkingLimitReached() {
     return IncrementalMarkingLimit::kNoLimit;
   }
 
+#if defined(V8_USE_PERFETTO)
+  TRACE_COUNTER(
+      TRACE_DISABLED_BY_DEFAULT("v8.gc"), "OldGenerationConsumedBytes",
+      OldGenerationConsumedBytes() + AllocatedExternalMemorySinceMarkCompact());
+  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"), "GlobalConsumedBytes",
+                GlobalConsumedBytes());
+#endif
   size_t old_generation_space_available = OldGenerationSpaceAvailable();
   size_t global_memory_available = GlobalMemoryAvailable();
 
@@ -5614,13 +5634,12 @@ void Heap::SetUp(LocalHeap* main_thread_local_heap) {
     // When a target requires the code range feature, we put all code objects in
     // a contiguous range of virtual address space, so that they can call each
     // other with near calls.
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
-    // When sharing a pointer cage among Isolates, also share the
-    // CodeRange. isolate_->page_allocator() is the process-wide pointer
-    // compression cage's PageAllocator.
-    code_range_ = CodeRange::EnsureProcessWideCodeRange(
-        isolate_->page_allocator(), requested_size);
+#ifdef V8_COMPRESS_POINTERS
+    // When pointer compression is enabled, isolates in the same group share the
+    // same CodeRange, owned by the IsolateGroup.
+    code_range_ = isolate_->isolate_group()->EnsureCodeRange(requested_size);
 #else
+    // Otherwise, each isolate has its own CodeRange, owned by the heap.
     code_range_ = std::make_unique<CodeRange>();
     if (!code_range_->InitReservation(isolate_->page_allocator(),
                                       requested_size)) {
@@ -6459,30 +6478,6 @@ void Heap::CheckHandleCount() {
   isolate_->handle_scope_implementer()->Iterate(&v);
 }
 
-void Heap::ClearRecordedSlot(Tagged<HeapObject> object, ObjectSlot slot) {
-#ifndef V8_DISABLE_WRITE_BARRIERS
-  DCHECK(!IsLargeObject(object));
-  MemoryChunk* chunk = MemoryChunk::FromAddress(slot.address());
-  if (!chunk->InYoungGeneration()) {
-    PageMetadata* page = PageMetadata::cast(chunk->Metadata());
-    DCHECK_EQ(page->owner_identity(), OLD_SPACE);
-
-    // We only need to remove that slot when sweeping is still in progress.
-    // Because in that case, a concurrent sweeper could find that memory and
-    // reuse it for subsequent allocations. The runtime could install another
-    // property at this slot but without unboxed doubles this will always be a
-    // tagged pointer.
-    if (!page->SweepingDone()) {
-      // No need to update old-to-old here since that remembered set is gone
-      // after a full GC and not re-recorded until sweeping is finished.
-      RememberedSet<OLD_TO_NEW>::Remove(page, slot.address());
-      RememberedSet<OLD_TO_NEW_BACKGROUND>::Remove(page, slot.address());
-      RememberedSet<OLD_TO_SHARED>::Remove(page, slot.address());
-    }
-  }
-#endif
-}
-
 // static
 int Heap::InsertIntoRememberedSetFromCode(MutablePageMetadata* chunk,
                                           size_t slot_offset) {
@@ -6509,14 +6504,14 @@ void Heap::ClearRecordedSlotRange(Address start, Address end) {
   MemoryChunk* chunk = MemoryChunk::FromAddress(start);
   DCHECK(!chunk->IsLargePage());
 #if !V8_ENABLE_STICKY_MARK_BITS_BOOL
-  if (!chunk->InYoungGeneration()) {
-#else
-  if (true) {
+  if (!chunk->InYoungGeneration())
 #endif
+  {
     PageMetadata* page = PageMetadata::cast(chunk->Metadata());
     // This method will be invoked on objects in shared space for
     // internalization and string forwarding during GC.
     DCHECK(page->owner_identity() == OLD_SPACE ||
+           page->owner_identity() == TRUSTED_SPACE ||
            page->owner_identity() == SHARED_SPACE);
 
     if (!page->SweepingDone()) {
@@ -6642,7 +6637,7 @@ class UnreachableObjectsFilter : public HeapObjectsFilter {
       // Treat weak references as strong.
       for (TSlot p = start; p < end; ++p) {
         typename TSlot::TObject object = p.load(cage_base());
-#ifdef V8_ENABLE_DIRECT_LOCAL
+#ifdef V8_ENABLE_DIRECT_HANDLE
         if (object.ptr() == kTaggedNullAddress) continue;
 #endif
         Tagged<HeapObject> heap_object;
@@ -7161,14 +7156,14 @@ bool Heap::GcSafeInstructionStreamContains(Tagged<InstructionStream> istream,
   return start <= addr && addr < end;
 }
 
-base::Optional<Tagged<InstructionStream>>
+std::optional<Tagged<InstructionStream>>
 Heap::GcSafeTryFindInstructionStreamForInnerPointer(Address inner_pointer) {
   if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) {
     Address start = tp_heap_->GetObjectFromInnerPointer(inner_pointer);
     return UncheckedCast<InstructionStream>(HeapObject::FromAddress(start));
   }
 
-  base::Optional<Address> start =
+  std::optional<Address> start =
       ThreadIsolation::StartOfJitAllocationAt(inner_pointer);
   if (start.has_value()) {
     return UncheckedCast<InstructionStream>(HeapObject::FromAddress(*start));
@@ -7177,7 +7172,7 @@ Heap::GcSafeTryFindInstructionStreamForInnerPointer(Address inner_pointer) {
   return {};
 }
 
-base::Optional<Tagged<GcSafeCode>> Heap::GcSafeTryFindCodeForInnerPointer(
+std::optional<Tagged<GcSafeCode>> Heap::GcSafeTryFindCodeForInnerPointer(
     Address inner_pointer) {
   Builtin maybe_builtin =
       OffHeapInstructionStream::TryLookupCode(isolate(), inner_pointer);
@@ -7185,7 +7180,7 @@ base::Optional<Tagged<GcSafeCode>> Heap::GcSafeTryFindCodeForInnerPointer(
     return Cast<GcSafeCode>(isolate()->builtins()->code(maybe_builtin));
   }
 
-  base::Optional<Tagged<InstructionStream>> maybe_istream =
+  std::optional<Tagged<InstructionStream>> maybe_istream =
       GcSafeTryFindInstructionStreamForInnerPointer(inner_pointer);
   if (!maybe_istream) return {};
 
@@ -7197,19 +7192,19 @@ Tagged<Code> Heap::FindCodeForInnerPointer(Address inner_pointer) {
 }
 
 Tagged<GcSafeCode> Heap::GcSafeFindCodeForInnerPointer(Address inner_pointer) {
-  base::Optional<Tagged<GcSafeCode>> maybe_code =
+  std::optional<Tagged<GcSafeCode>> maybe_code =
       GcSafeTryFindCodeForInnerPointer(inner_pointer);
   // Callers expect that the code object is found.
   CHECK(maybe_code.has_value());
   return UncheckedCast<GcSafeCode>(maybe_code.value());
 }
 
-base::Optional<Tagged<Code>> Heap::TryFindCodeForInnerPointerForPrinting(
+std::optional<Tagged<Code>> Heap::TryFindCodeForInnerPointerForPrinting(
     Address inner_pointer) {
   if (InSpaceSlow(inner_pointer, i::CODE_SPACE) ||
       InSpaceSlow(inner_pointer, i::CODE_LO_SPACE) ||
       i::OffHeapInstructionStream::PcIsOffHeap(isolate(), inner_pointer)) {
-    base::Optional<Tagged<GcSafeCode>> maybe_code =
+    std::optional<Tagged<GcSafeCode>> maybe_code =
         GcSafeTryFindCodeForInnerPointer(inner_pointer);
     if (maybe_code.has_value()) {
       return maybe_code.value()->UnsafeCastToCode();

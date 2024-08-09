@@ -9,6 +9,8 @@
 #ifndef V8_CODEGEN_MIPS64_MACRO_ASSEMBLER_MIPS64_H_
 #define V8_CODEGEN_MIPS64_MACRO_ASSEMBLER_MIPS64_H_
 
+#include <optional>
+
 #include "src/codegen/assembler.h"
 #include "src/codegen/mips64/assembler-mips64.h"
 #include "src/common/globals.h"
@@ -233,6 +235,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // that is guaranteed not to be clobbered.
   MemOperand ExternalReferenceAsOperand(ExternalReference reference,
                                         Register scratch);
+  MemOperand ExternalReferenceAsOperand(IsolateFieldId id) {
+    return ExternalReferenceAsOperand(ExternalReference::Create(id), no_reg);
+  }
 
   inline void Move(Register output, MemOperand operand) { Ld(output, operand); }
 
@@ -726,6 +731,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Float64MinOutOfLine(FPURegister dst, FPURegister src1, FPURegister src2);
 
   bool IsDoubleZeroRegSet() { return has_double_zero_reg_set_; }
+
+  void LoadIsolateField(Register dst, IsolateFieldId id);
 
   void mov(Register rd, Register rt) { or_(rd, rt, zero_reg); }
 
@@ -1316,9 +1323,9 @@ struct MoveCycleState {
   // {MoveToTempLocation}.
   RegList scratch_regs;
   // Available scratch registers during the move cycle resolution scope.
-  base::Optional<UseScratchRegisterScope> temps;
+  std::optional<UseScratchRegisterScope> temps;
   // Scratch register picked by {MoveToTempLocation}.
-  base::Optional<Register> scratch_reg;
+  std::optional<Register> scratch_reg;
 };
 
 // Provides access to exit frame parameters (GC-ed).

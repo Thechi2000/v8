@@ -238,6 +238,9 @@ class V8_EXPORT Object : public Value {
    */
   V8_WARN_UNUSED_RESULT Maybe<bool> Set(Local<Context> context,
                                         Local<Value> key, Local<Value> value);
+  V8_WARN_UNUSED_RESULT Maybe<bool> Set(Local<Context> context,
+                                        Local<Value> key, Local<Value> value,
+                                        MaybeLocal<Object> receiver);
 
   V8_WARN_UNUSED_RESULT Maybe<bool> Set(Local<Context> context, uint32_t index,
                                         Local<Value> value);
@@ -293,6 +296,9 @@ class V8_EXPORT Object : public Value {
 
   V8_WARN_UNUSED_RESULT MaybeLocal<Value> Get(Local<Context> context,
                                               Local<Value> key);
+  V8_WARN_UNUSED_RESULT MaybeLocal<Value> Get(Local<Context> context,
+                                              Local<Value> key,
+                                              MaybeLocal<Object> receiver);
 
   V8_WARN_UNUSED_RESULT MaybeLocal<Value> Get(Local<Context> context,
                                               uint32_t index);
@@ -684,14 +690,17 @@ class V8_EXPORT Object : public Value {
   int GetIdentityHash();
 
   /**
-   * Clone this object with a fast but shallow copy.  Values will point
-   * to the same values as the original object.
+   * Clone this object with a fast but shallow copy. Values will point to the
+   * same values as the original object.
+   *
+   * Prefer using version with Isolate parameter.
    */
-  // TODO(dcarney): take an isolate and optionally bail out?
+  Local<Object> Clone(v8::Isolate* isolate);
   Local<Object> Clone();
 
   /**
    * Returns the context in which the object was created.
+   *
    * Prefer using version with Isolate parameter.
    */
   MaybeLocal<Context> GetCreationContext(v8::Isolate* isolate);
@@ -699,6 +708,7 @@ class V8_EXPORT Object : public Value {
 
   /**
    * Shortcut for GetCreationContext(...).ToLocalChecked().
+   *
    * Prefer using version with Isolate parameter.
    **/
   Local<Context> GetCreationContextChecked(v8::Isolate* isolate);

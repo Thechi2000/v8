@@ -143,7 +143,7 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // Give the compiler a chance to perform low-latency initialization tasks of
   // the given {function} on its instantiation. Note that only the runtime will
   // offer this chance, optimized closure instantiation will not call this.
-  static void PostInstantiation(Handle<JSFunction> function,
+  static void PostInstantiation(Isolate* isolate, Handle<JSFunction> function,
                                 IsCompiledScope* is_compiled_scope);
 
   // ===========================================================================
@@ -159,8 +159,7 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   V8_WARN_UNUSED_RESULT static MaybeHandle<JSFunction> GetFunctionFromEval(
       Handle<String> source, Handle<SharedFunctionInfo> outer_info,
       Handle<Context> context, LanguageMode language_mode,
-      ParseRestriction restriction, int parameters_end_pos,
-      int eval_scope_position, int eval_position,
+      ParseRestriction restriction, int parameters_end_pos, int eval_position,
       ParsingWhileDebugging parsing_while_debugging =
           ParsingWhileDebugging::kNo);
 
@@ -175,7 +174,7 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // Create a (bound) function for a String source within a context for eval.
   V8_WARN_UNUSED_RESULT static MaybeHandle<JSFunction> GetFunctionFromString(
       Handle<NativeContext> context, Handle<i::Object> source,
-      ParseRestriction restriction, int parameters_end_pos, bool is_code_like);
+      int parameters_end_pos, bool is_code_like);
 
   // Decompose GetFunctionFromString into two functions, to allow callers to
   // deal seperately with a case of object not handled by the embedder.
@@ -277,7 +276,7 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
  private:
   static std::unique_ptr<v8::tracing::TracedValue> AddScriptCompiledTrace(
       Isolate* isolate, DirectHandle<SharedFunctionInfo> shared);
-  static std::unique_ptr<v8::tracing::TracedValue> AddScriptSourceTextTrace(
+  static void EmitScriptSourceTextTrace(
       Isolate* isolate, DirectHandle<SharedFunctionInfo> shared);
 };
 

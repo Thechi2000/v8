@@ -6,6 +6,7 @@
 #define V8_COMPILER_BACKEND_INSTRUCTION_SELECTOR_H_
 
 #include <map>
+#include <optional>
 
 #include "src/codegen/cpu-features.h"
 #include "src/codegen/machine-type.h"
@@ -111,7 +112,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
 
   ~InstructionSelector();
 
-  base::Optional<BailoutReason> SelectInstructions();
+  std::optional<BailoutReason> SelectInstructions();
 
   bool IsSupported(CpuFeature feature) const;
 
@@ -492,7 +493,7 @@ class InstructionSelectorT final : public Adapter {
           InstructionSelector::kDisableTraceTurboJson);
 
   // Visit code for the entire graph with the included schedule.
-  base::Optional<BailoutReason> SelectInstructions();
+  std::optional<BailoutReason> SelectInstructions();
 
   void StartBlock(RpoNumber rpo);
   void EndBlock(RpoNumber rpo);
@@ -1124,6 +1125,10 @@ class InstructionSelectorT final : public Adapter {
 #endif  // V8_TARGET_ARCH_X64
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
+#ifdef V8_TARGET_ARCH_X64
+  bool CanOptimizeF64x2PromoteLowF32x4(node_t node);
+#endif
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   // ===========================================================================
@@ -1242,7 +1247,7 @@ class InstructionSelectorT final : public Adapter {
   size_t* max_pushed_argument_count_;
 
   // Turboshaft-adapter only.
-  base::Optional<turboshaft::UseMap> turboshaft_use_map_;
+  std::optional<turboshaft::UseMap> turboshaft_use_map_;
 
 #if V8_TARGET_ARCH_64_BIT
   // Holds lazily-computed results for whether phi nodes guarantee their upper

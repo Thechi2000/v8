@@ -95,6 +95,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // that is guaranteed not to be clobbered.
   MemOperand ExternalReferenceAsOperand(ExternalReference reference,
                                         Register scratch);
+  MemOperand ExternalReferenceAsOperand(IsolateFieldId id) {
+    return ExternalReferenceAsOperand(ExternalReference::Create(id), no_reg);
+  }
 
   // Jump, Call, and Ret pseudo instructions implementing inter-working.
   void Jump(Register target, Condition cond = al);
@@ -173,6 +176,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Move(Register dst, Handle<HeapObject> source,
             RelocInfo::Mode rmode = RelocInfo::FULL_EMBEDDED_OBJECT);
   void Move(Register dst, ExternalReference reference);
+  void LoadIsolateField(Register dst, IsolateFieldId id);
   void Move(Register dst, const MemOperand& src);
   void Move(Register dst, Register src, Condition cond = al);
   void Move(DoubleRegister dst, DoubleRegister src);
@@ -284,7 +288,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // Add Logical (Register - Immediate)
   void AddU32(Register dst, const Operand& imm);
   void AddU64(Register dst, const Operand& imm);
+  void AddU64(Register dst, int imm) { AddU64(dst, Operand(imm)); }
   void AddU64(Register dst, Register src1, Register src2);
+  void AddU64(Register dst, Register src) { algr(dst, src); }
 
   // Add Logical (Register - Mem)
   void AddU32(Register dst, const MemOperand& opnd);
@@ -550,8 +556,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
                   DoubleRegister scratch);
   void DivFloat64(DoubleRegister dst, const MemOperand& opnd,
                   DoubleRegister scratch);
-  void LoadF32AsF64(DoubleRegister dst, const MemOperand& opnd,
-                    DoubleRegister scratch);
+  void LoadF32AsF64(DoubleRegister dst, const MemOperand& opnd);
 
   // Load On Condition
   void LoadOnConditionP(Condition cond, Register dst, Register src);
@@ -953,19 +958,23 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   int CallCFunction(
       ExternalReference function, int num_arguments,
       SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes,
+      bool has_function_descriptor = ABI_USES_FUNCTION_DESCRIPTORS,
       Label* return_label = nullptr);
   int CallCFunction(
       Register function, int num_arguments,
       SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes,
+      bool has_function_descriptor = ABI_USES_FUNCTION_DESCRIPTORS,
       Label* return_label = nullptr);
   int CallCFunction(
       ExternalReference function, int num_reg_arguments,
       int num_double_arguments,
       SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes,
+      bool has_function_descriptor = ABI_USES_FUNCTION_DESCRIPTORS,
       Label* return_label = nullptr);
   int CallCFunction(
       Register function, int num_reg_arguments, int num_double_arguments,
       SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes,
+      bool has_function_descriptor = ABI_USES_FUNCTION_DESCRIPTORS,
       Label* return_label = nullptr);
 
   void MovFromFloatParameter(DoubleRegister dst);
@@ -1178,6 +1187,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // instruction following the call.
   // The return address on the stack is used by frame iteration.
   void StoreReturnAddressAndCall(Register target);
+#if V8_OS_ZOS
+  void zosStoreReturnAddressAndCall(Register target, Register scratch);
+#endif
 
   // ---------------------------------------------------------------------------
   // Simd Support.
@@ -1598,6 +1610,14 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
     LoadMap(map, heap_object);
     CompareInstanceType<use_unsigned_cmp>(map, temp, type);
   }
+  // Variant of the above, which compares against a type range rather than a
+  // single type (lower_limit and higher_limit are inclusive).
+  //
+  // Always use unsigned comparisons: ls for a positive result.
+  void CompareObjectTypeRange(Register heap_object, Register map,
+                              Register type_reg, Register scratch,
+                              InstanceType lower_limit,
+                              InstanceType higher_limit);
 
   // Compare instance type in a map.  map contains a valid map object whose
   // object type should be compared with the given type.  This both
@@ -1606,10 +1626,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void CompareInstanceType(Register map, Register type_reg, InstanceType type) {
     static_assert(Map::kInstanceTypeOffset < 4096);
     static_assert(LAST_TYPE <= 0xFFFF);
-    LoadS16(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
     if (use_unsigned_cmp) {
+      LoadU16(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
       CmpU64(type_reg, Operand(type));
     } else {
+      LoadS16(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
       CmpS64(type_reg, Operand(type));
     }
   }
@@ -1619,7 +1640,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   //
   // Always use unsigned comparisons: ls for a positive result.
   void CompareInstanceTypeRange(Register map, Register type_reg,
-                                InstanceType lower_limit,
+                                Register scratch, InstanceType lower_limit,
                                 InstanceType higher_limit);
 
   // Compare the object in a register to a value from the root list.
@@ -1664,9 +1685,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // Checks if value is in range [lower_limit, higher_limit] using a single
   // comparison.
-  void CompareRange(Register value, unsigned lower_limit,
+  void CompareRange(Register value, Register scratch, unsigned lower_limit,
                     unsigned higher_limit);
-  void JumpIfIsInRange(Register value, unsigned lower_limit,
+  void JumpIfIsInRange(Register value, Register scratch, unsigned lower_limit,
                        unsigned higher_limit, Label* on_in_range);
 
   // ---------------------------------------------------------------------------
@@ -1810,7 +1831,17 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   template <typename Field>
   void DecodeField(Register dst, Register src) {
-    ExtractBitRange(dst, src, Field::kShift + Field::kSize - 1, Field::kShift);
+    int shift = Field::kShift;
+    int mask = Field::kMask >> Field::kShift;
+    if (base::bits::IsPowerOfTwo(mask + 1)) {
+      ExtractBitRange(dst, src, Field::kShift + Field::kSize - 1,
+                      Field::kShift);
+    } else if (shift != 0) {
+      ShiftLeftU64(dst, src, Operand(shift));
+      AndP(dst, Operand(mask));
+    } else {
+      AndP(dst, src, Operand(mask));
+    }
   }
 
   template <typename Field>

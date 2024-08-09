@@ -118,6 +118,7 @@ let kWasmF64 = 0x7c;
 let kWasmS128 = 0x7b;
 let kWasmI8 = 0x78;
 let kWasmI16 = 0x77;
+let kWasmF16 = 0x76;
 
 // These are defined as negative integers to distinguish them from positive type
 // indices.
@@ -186,9 +187,11 @@ let kSig_l_l = makeSig([kWasmI64], [kWasmI64]);
 let kSig_i_l = makeSig([kWasmI64], [kWasmI32]);
 let kSig_i_ii = makeSig([kWasmI32, kWasmI32], [kWasmI32]);
 let kSig_i_iii = makeSig([kWasmI32, kWasmI32, kWasmI32], [kWasmI32]);
+let kSig_i_iiii = makeSig([kWasmI32, kWasmI32, kWasmI32, kWasmI32], [kWasmI32]);
 let kSig_v_iiii = makeSig([kWasmI32, kWasmI32, kWasmI32, kWasmI32], []);
 let kSig_l_i = makeSig([kWasmI32], [kWasmI64]);
 let kSig_f_ff = makeSig([kWasmF32, kWasmF32], [kWasmF32]);
+let kSig_f_ffff = makeSig([kWasmF32, kWasmF32, kWasmF32, kWasmF32], [kWasmF32]);
 let kSig_d_dd = makeSig([kWasmF64, kWasmF64], [kWasmF64]);
 let kSig_l_ll = makeSig([kWasmI64, kWasmI64], [kWasmI64]);
 let kSig_i_dd = makeSig([kWasmF64, kWasmF64], [kWasmI32]);
@@ -525,10 +528,6 @@ let kExprRefCast = 0x16;
 let kExprRefCastNull = 0x17;
 let kExprBrOnCast = 0x18;
 let kExprBrOnCastFail = 0x19;
-// TODO(mliedtke): Drop by 07/2024 or later.
-// (Just keeping it temporarily for bisection.)
-let kExprBrOnCastGeneric = kExprBrOnCast;
-let kExprBrOnCastFailGeneric = kExprBrOnCastFail;
 let kExprAnyConvertExtern = 0x1a;
 let kExprExternConvertAny = 0x1b;
 let kExprRefI31 = 0x1c;
@@ -1543,7 +1542,8 @@ class WasmModuleBuilder {
     return mem_index;
   }
 
-  addImportedTable(module, name, initial, maximum, type, is_table64) {
+  addImportedTable(
+      module, name, initial, maximum, type = kWasmFuncRef, is_table64 = false) {
     if (this.tables.length != 0) {
       throw new Error('Imported tables must be declared before local ones');
     }
@@ -1553,7 +1553,7 @@ class WasmModuleBuilder {
       kind: kExternalTable,
       initial: initial,
       maximum: maximum,
-      type: type || kWasmFuncRef,
+      type: type,
       is_table64: !!is_table64
     };
     this.imports.push(o);
@@ -2318,20 +2318,6 @@ let [wasmBrOnCast, wasmBrOnCastFail] = (function() {
 
 function getOpcodeName(opcode) {
   return globalThis.kWasmOpcodeNames?.[opcode] ?? 'unknown';
-}
-
-// Make a wasm export "promising" using JS Promise Integration.
-function ToPromising(wasm_export) {
-  let sig = wasm_export.type();
-  assertTrue(sig.parameters.length > 0);
-  assertEquals('externref', sig.parameters[0]);
-  let wrapper_sig = {
-    parameters: sig.parameters.slice(1),
-    results: ['externref']
-  };
-  return new WebAssembly.Function(
-      wrapper_sig, wasm_export, {promising: 'first'});
-
 }
 
 function wasmF32ConstSignalingNaN() {

@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 namespace runtime {
-extern runtime TierUpWasmToJSWrapper(NoContext, WasmApiFunctionRef): JSAny;
+extern runtime TierUpWasmToJSWrapper(NoContext, WasmImportData): JSAny;
 extern runtime WasmThrowJSTypeError(Context): never;
 }  // namespace runtime
 
@@ -17,8 +17,8 @@ struct WasmToJSResult {
   result3: float64;
 }
 
-extern macro SwitchToTheCentralStackIfNeeded(JSAny): RawPtr;
-extern macro SwitchFromTheCentralStack(RawPtr, JSAny): void;
+extern macro SwitchToTheCentralStackIfNeeded(): RawPtr;
+extern macro SwitchFromTheCentralStack(RawPtr): void;
 
 extern builtin IterableToFixedArrayForWasm(Context, JSAny, Smi): FixedArray;
 
@@ -51,9 +51,9 @@ macro HandleF32Returns(
 }
 
 @export
-transitioning macro WasmToJSWrapper(ref: WasmApiFunctionRef): WasmToJSResult {
-  const oldSP = SwitchToTheCentralStackIfNeeded(ref.callable);
-  dcheck(Is<WasmApiFunctionRef>(ref));
+transitioning macro WasmToJSWrapper(ref: WasmImportData): WasmToJSResult {
+  const oldSP = SwitchToTheCentralStackIfNeeded();
+  dcheck(Is<WasmImportData>(ref));
   // Spill the signature on the stack so that it can be read by the GC. This is
   // done in the very beginning before a GC could be triggered.
   // Caller FP + return address.
@@ -314,7 +314,7 @@ transitioning macro WasmToJSWrapper(ref: WasmApiFunctionRef): WasmToJSResult {
     result3: *GetRefAt<float64>(fpRegSlots, torque_internal::SizeOf<float64>())
   };
   if (Convert<uintptr>(oldSP) != 0) {
-    SwitchFromTheCentralStack(oldSP, ref.callable);
+    SwitchFromTheCentralStack(oldSP);
   }
   return wasmToJSResult;
 }

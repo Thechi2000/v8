@@ -9,6 +9,8 @@
 #ifndef V8_CODEGEN_LOONG64_MACRO_ASSEMBLER_LOONG64_H_
 #define V8_CODEGEN_LOONG64_MACRO_ASSEMBLER_LOONG64_H_
 
+#include <optional>
+
 #include "src/codegen/assembler.h"
 #include "src/codegen/loong64/assembler-loong64.h"
 #include "src/common/globals.h"
@@ -184,6 +186,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // that is guaranteed not to be clobbered.
   MemOperand ExternalReferenceAsOperand(ExternalReference reference,
                                         Register scratch);
+  MemOperand ExternalReferenceAsOperand(IsolateFieldId id) {
+    return ExternalReferenceAsOperand(ExternalReference::Create(id), no_reg);
+  }
 
   inline void Move(Register output, MemOperand operand) {
     Ld_d(output, operand);
@@ -578,8 +583,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Trunc_uw_s(Register rd, FPURegister fj, FPURegister scratch);
 
   // Change endianness
-  void ByteSwapSigned(Register dest, Register src, int operand_size);
-  void ByteSwapUnsigned(Register dest, Register src, int operand_size);
+  void ByteSwap(Register dest, Register src, int operand_size);
 
   void Ld_b(Register rd, const MemOperand& rj);
   void Ld_bu(Register rd, const MemOperand& rj);
@@ -634,6 +638,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
       mov(dst, src);
     }
   }
+  void LoadIsolateField(Register dst, IsolateFieldId id);
 
   inline void FmoveLow(Register dst_low, FPURegister src) {
     movfr2gr_s(dst_low, src);
@@ -1249,10 +1254,10 @@ struct MoveCycleState {
   RegList scratch_regs;
   DoubleRegList scratch_fpregs;
   // Available scratch registers during the move cycle resolution scope.
-  base::Optional<UseScratchRegisterScope> temps;
+  std::optional<UseScratchRegisterScope> temps;
   // Scratch register picked by {MoveToTempLocation}.
-  base::Optional<Register> scratch_reg;
-  base::Optional<DoubleRegister> scratch_fpreg;
+  std::optional<Register> scratch_reg;
+  std::optional<DoubleRegister> scratch_fpreg;
 };
 
 // Provides access to exit frame parameters (GC-ed).

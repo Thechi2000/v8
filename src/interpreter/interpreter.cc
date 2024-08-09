@@ -212,7 +212,7 @@ void InterpreterCompilationJob::CheckAndPrintBytecodeMismatch(
   int first_mismatch = generator()->CheckBytecodeMatches(*bytecode);
   if (first_mismatch >= 0) {
     parse_info()->ast_value_factory()->Internalize(isolate);
-    DeclarationScope::AllocateScopeInfos(parse_info(), isolate);
+    DeclarationScope::AllocateScopeInfos(parse_info(), script, isolate);
 
     DirectHandle<BytecodeArray> new_bytecode =
         generator()->FinalizeBytecode(isolate, script);
@@ -293,6 +293,9 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::DoFinalizeJobImpl(
   }
 
 #ifdef DEBUG
+  if (parse_info()->literal()->shared_function_info().is_null()) {
+    parse_info()->literal()->set_shared_function_info(shared_info);
+  }
   CheckAndPrintBytecodeMismatch(
       isolate, handle(Cast<Script>(shared_info->script()), isolate), bytecodes);
 #endif
@@ -347,7 +350,7 @@ void Interpreter::Initialize() {
   interpreter_entry_trampoline_instruction_start_ = code->instruction_start();
 
   // Initialize the dispatch table.
-  ForEachBytecode([=](Bytecode bytecode, OperandScale operand_scale) {
+  ForEachBytecode([=, this](Bytecode bytecode, OperandScale operand_scale) {
     Builtin builtin = BuiltinIndexFromBytecode(bytecode, operand_scale);
     Tagged<Code> handler = builtins->code(builtin);
     if (Bytecodes::BytecodeHasHandler(bytecode, operand_scale)) {

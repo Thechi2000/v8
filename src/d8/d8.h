@@ -8,6 +8,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <unordered_map>
@@ -22,6 +23,7 @@
 #include "src/base/platform/time.h"
 #include "src/base/platform/wrappers.h"
 #include "src/d8/async-hooks-wrapper.h"
+#include "src/handles/global-handles.h"
 #include "src/heap/parked-scope.h"
 
 namespace v8 {
@@ -150,7 +152,7 @@ class SerializationData {
   const std::vector<CompiledWasmModule>& compiled_wasm_modules() {
     return compiled_wasm_modules_;
   }
-  const base::Optional<v8::SharedValueConveyor>& shared_value_conveyor() {
+  const std::optional<v8::SharedValueConveyor>& shared_value_conveyor() {
     return shared_value_conveyor_;
   }
 
@@ -164,7 +166,7 @@ class SerializationData {
   std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
   std::vector<std::shared_ptr<v8::BackingStore>> sab_backing_stores_;
   std::vector<CompiledWasmModule> compiled_wasm_modules_;
-  base::Optional<v8::SharedValueConveyor> shared_value_conveyor_;
+  std::optional<v8::SharedValueConveyor> shared_value_conveyor_;
 
  private:
   friend class Serializer;
@@ -186,7 +188,7 @@ class Worker : public std::enable_shared_from_this<Worker> {
  public:
   static constexpr i::ExternalPointerTag kManagedTag = i::kGenericManagedTag;
 
-  explicit Worker(const char* script);
+  explicit Worker(Isolate* parent_isolate, const char* script);
   ~Worker();
 
   // Post a message to the worker. The worker will take ownership of the
@@ -199,6 +201,11 @@ class Worker : public std::enable_shared_from_this<Worker> {
   // return nullptr.
   // This function should only be called by the thread that created the Worker.
   std::unique_ptr<SerializationData> GetMessage(Isolate* requester);
+  // Synchronously retrieve messages from the worker's outgoing message queue.
+  // If there is no message in the queue, or the worker is no longer running,
+  // return nullptr.
+  // This function should only be called by the thread that created the Worker.
+  std::unique_ptr<SerializationData> TryGetMessage();
   // Terminate the worker's event loop. Messages from the worker that have been
   // queued can still be read via GetMessage().
   // This function can be called by any thread.
@@ -214,6 +221,7 @@ class Worker : public std::enable_shared_from_this<Worker> {
 
   // Enters State::kTerminated for the Worker and resets the task runner.
   void EnterTerminatedState();
+  bool IsTerminated() const { return state_ == State::kTerminated; }
 
   // Returns the Worker instance for this thread.
   static Worker* GetCurrentWorker();
@@ -249,12 +257,14 @@ class Worker : public std::enable_shared_from_this<Worker> {
 
   void ExecuteInThread();
   static void PostMessageOut(const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void ImportScripts(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void Close(const v8::FunctionCallbackInfo<v8::Value>& info);
 
   static void SetCurrentWorker(Worker* worker);
 
   i::ParkingSemaphore out_semaphore_{0};
   SerializationDataQueue out_queue_;
+
   base::Thread* thread_ = nullptr;
   char* script_;
   std::atomic<State> state_;
@@ -273,6 +283,7 @@ class Worker : public std::enable_shared_from_this<Worker> {
   // The isolate should only be accessed by the worker itself, or when holding
   // the worker_mutex_ and after checking the worker state.
   Isolate* isolate_ = nullptr;
+  Isolate* parent_isolate_;
 
   // Only accessed by the worker thread.
   Global<Context> context_;
@@ -331,6 +342,15 @@ class PerIsolateData {
   Local<FunctionTemplate> GetDomNodeCtor() const;
   void SetDomNodeCtor(Local<FunctionTemplate> ctor);
 
+  bool HasRunningSubscribedWorkers();
+  void RegisterWorker(std::shared_ptr<Worker> worker);
+  void SubscribeWorkerOnMessage(const std::shared_ptr<Worker>& worker,
+                                Local<Context> context,
+                                Local<Function> callback);
+  std::pair<Local<Context>, Local<Function>> GetWorkerOnMessage(
+      const std::shared_ptr<Worker>& worker) const;
+  void UnregisterWorker(const std::shared_ptr<Worker>& worker);
+
  private:
   friend class Shell;
   friend class RealmScope;
@@ -349,6 +369,14 @@ class PerIsolateData {
 #endif
   Global<FunctionTemplate> test_api_object_ctor_;
   Global<FunctionTemplate> dom_node_ctor_;
+  // Track workers and their callbacks separately, so that we know both which
+  // workers are still registered, and which of them have callbacks. We can't
+  // rely on Shell::running_workers_ or worker.IsTerminated(), because these are
+  // set concurrently and may race with callback subscription.
+  std::set<std::shared_ptr<Worker>> registered_workers_;
+  std::map<std::shared_ptr<Worker>,
+           std::pair<Global<Context>, Global<Function>>>
+      worker_message_callbacks_;
 
   int RealmIndexOrThrow(const v8::FunctionCallbackInfo<v8::Value>& info,
                         int arg_offset);
@@ -635,6 +663,10 @@ class Shell : public i::AllStatic {
   static void WorkerPostMessage(
       const v8::FunctionCallbackInfo<v8::Value>& info);
   static void WorkerGetMessage(const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void WorkerOnMessageGetter(
+      const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void WorkerOnMessageSetter(
+      const v8::FunctionCallbackInfo<v8::Value>& info);
   static void WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void WorkerTerminateAndWait(
       const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -671,6 +703,15 @@ class Shell : public i::AllStatic {
   // the "mkdir -p" command.
   static void MakeDirectory(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void RemoveDirectory(const v8::FunctionCallbackInfo<v8::Value>& info);
+
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+  static void GetContinuationPreservedEmbedderData(
+      const v8::FunctionCallbackInfo<v8::Value>& info);
+#endif  // V8_ENABLE_CONTINUATION_PRESERVER_EMBEDDER_DATA
+
+  static void GetExtrasBindingObject(
+      const v8::FunctionCallbackInfo<v8::Value>& info);
+
   static MaybeLocal<Promise> HostImportModuleDynamically(
       Local<Context> context, Local<Data> host_defined_options,
       Local<Value> resource_name, Local<String> specifier,
@@ -702,8 +743,6 @@ class Shell : public i::AllStatic {
   static ArrayBuffer::Allocator* array_buffer_allocator;
 
   static void SetWaitUntilDone(Isolate* isolate, bool value);
-  static void NotifyStartStreamingTask(Isolate* isolate);
-  static void NotifyFinishStreamingTask(Isolate* isolate);
 
   static char* ReadCharsFromTcpPort(const char* name, int* size_out);
 

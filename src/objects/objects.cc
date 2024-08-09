@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <vector>
 
@@ -23,6 +24,7 @@
 #include "src/builtins/accessors.h"
 #include "src/builtins/builtins.h"
 #include "src/codegen/compiler.h"
+#include "src/codegen/source-position-table.h"
 #include "src/common/globals.h"
 #include "src/common/message-template.h"
 #include "src/date/date.h"
@@ -69,51 +71,28 @@
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
-#include "src/objects/js-disposable-stack-inl.h"
-#include "src/objects/keys.h"
-#include "src/objects/lookup-inl.h"
-#include "src/objects/map-updater.h"
-#include "src/objects/objects-body-descriptors-inl.h"
-#include "src/objects/objects-inl.h"
-#include "src/objects/promise.h"
-#include "src/objects/property-details.h"
-#include "src/roots/roots.h"
-#include "src/snapshot/deserializer.h"
-#include "src/utils/identity-map.h"
-#ifdef V8_INTL_SUPPORT
-#include "src/objects/js-break-iterator.h"
-#include "src/objects/js-collator.h"
-#endif  // V8_INTL_SUPPORT
 #include "src/objects/js-collection-inl.h"
-#ifdef V8_INTL_SUPPORT
-#include "src/objects/js-date-time-format.h"
-#endif  // V8_INTL_SUPPORT
+#include "src/objects/js-disposable-stack-inl.h"
 #include "src/objects/js-generator-inl.h"
-#ifdef V8_INTL_SUPPORT
-#include "src/objects/js-list-format.h"
-#include "src/objects/js-locale.h"
-#include "src/objects/js-number-format.h"
-#include "src/objects/js-plural-rules.h"
-#endif  // V8_INTL_SUPPORT
 #include "src/objects/js-regexp-inl.h"
 #include "src/objects/js-regexp-string-iterator.h"
-#ifdef V8_INTL_SUPPORT
-#include "src/objects/js-relative-time-format.h"
-#include "src/objects/js-segment-iterator.h"
-#include "src/objects/js-segmenter.h"
-#include "src/objects/js-segments.h"
-#endif  // V8_INTL_SUPPORT
-#include "src/codegen/source-position-table.h"
 #include "src/objects/js-weak-refs-inl.h"
+#include "src/objects/keys.h"
 #include "src/objects/literal-objects-inl.h"
+#include "src/objects/lookup-inl.h"
 #include "src/objects/map-inl.h"
+#include "src/objects/map-updater.h"
 #include "src/objects/map.h"
 #include "src/objects/megadom-handler-inl.h"
 #include "src/objects/microtask-inl.h"
 #include "src/objects/module-inl.h"
+#include "src/objects/objects-body-descriptors-inl.h"
+#include "src/objects/objects-inl.h"
 #include "src/objects/promise-inl.h"
+#include "src/objects/promise.h"
 #include "src/objects/property-descriptor-object-inl.h"
 #include "src/objects/property-descriptor.h"
+#include "src/objects/property-details.h"
 #include "src/objects/prototype.h"
 #include "src/objects/slots-atomic-inl.h"
 #include "src/objects/string-comparator.h"
@@ -123,12 +102,15 @@
 #include "src/objects/transitions-inl.h"
 #include "src/parsing/preparse-data.h"
 #include "src/regexp/regexp.h"
+#include "src/roots/roots.h"
+#include "src/snapshot/deserializer.h"
 #include "src/strings/string-builder-inl.h"
 #include "src/strings/string-search.h"
 #include "src/strings/string-stream.h"
 #include "src/strings/unicode-decoder.h"
 #include "src/strings/unicode-inl.h"
 #include "src/utils/hex-format.h"
+#include "src/utils/identity-map.h"
 #include "src/utils/ostreams.h"
 #include "src/utils/sha-256.h"
 #include "src/utils/utils-inl.h"
@@ -138,8 +120,21 @@
 #include "src/wasm/wasm-objects.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-namespace v8 {
-namespace internal {
+#ifdef V8_INTL_SUPPORT
+#include "src/objects/js-break-iterator.h"
+#include "src/objects/js-collator.h"
+#include "src/objects/js-date-time-format.h"
+#include "src/objects/js-list-format.h"
+#include "src/objects/js-locale.h"
+#include "src/objects/js-number-format.h"
+#include "src/objects/js-plural-rules.h"
+#include "src/objects/js-relative-time-format.h"
+#include "src/objects/js-segment-iterator.h"
+#include "src/objects/js-segmenter.h"
+#include "src/objects/js-segments.h"
+#endif  // V8_INTL_SUPPORT
+
+namespace v8::internal {
 
 ShouldThrow GetShouldThrow(Isolate* isolate, Maybe<ShouldThrow> should_throw) {
   if (should_throw.IsJust()) return should_throw.FromJust();
@@ -1464,7 +1459,6 @@ MaybeHandle<JSAny> Object::GetPropertyWithAccessor(LookupIterator* it) {
                                    Just(kDontThrow));
     Handle<JSAny> result = args.CallAccessorGetter(info, name);
     RETURN_EXCEPTION_IF_EXCEPTION(isolate);
-    if (result.is_null()) return isolate->factory()->undefined_value();
     Handle<JSAny> reboxed_result = handle(*result, isolate);
     if (info->replace_on_access() && IsJSReceiver(*receiver)) {
       RETURN_ON_EXCEPTION(isolate,
@@ -1932,8 +1926,7 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
     return UncheckedCast<TrustedByteArray>(*this)->AllocatedSize();
   }
   if (instance_type == FEEDBACK_METADATA_TYPE) {
-    return FeedbackMetadata::SizeFor(
-        UncheckedCast<FeedbackMetadata>(*this)->slot_count(kAcquireLoad));
+    return UncheckedCast<FeedbackMetadata>(*this)->AllocatedSize();
   }
   if (base::IsInRange(instance_type, FIRST_DESCRIPTOR_ARRAY_TYPE,
                       LAST_DESCRIPTOR_ARRAY_TYPE)) {
@@ -4603,14 +4596,13 @@ MaybeHandle<SharedFunctionInfo> Script::FindSharedFunctionInfo(
     FunctionLiteral* function_literal) {
   DCHECK(function_literal->shared_function_info().is_null());
   int function_literal_id = function_literal->function_literal_id();
-  CHECK_NE(function_literal_id, kFunctionLiteralIdInvalid);
+  CHECK_NE(function_literal_id, kInvalidInfoId);
   // If this check fails, the problem is most probably the function id
   // renumbering done by AstFunctionLiteralIdReindexer; in particular, that
   // AstTraversalVisitor doesn't recurse properly in the construct which
   // triggers the mismatch.
-  CHECK_LT(function_literal_id, script->shared_function_info_count());
-  Tagged<MaybeObject> shared =
-      script->shared_function_infos()->get(function_literal_id);
+  CHECK_LT(function_literal_id, script->infos()->length());
+  Tagged<MaybeObject> shared = script->infos()->get(function_literal_id);
   Tagged<HeapObject> heap_object;
   if (!shared.GetHeapObject(&heap_object) ||
       IsUndefined(heap_object, isolate)) {
@@ -5409,7 +5401,7 @@ InternalIndex HashTable<Derived, Shape>::FindInsertionEntry(
   }
 }
 
-base::Optional<Tagged<PropertyCell>>
+std::optional<Tagged<PropertyCell>>
 GlobalDictionary::TryFindPropertyCellForConcurrentLookupIterator(
     Isolate* isolate, DirectHandle<Name> name, RelaxedLoadTag tag) {
   // This reimplements HashTable::FindEntry for use in a concurrent setting.
@@ -6185,8 +6177,8 @@ Handle<JSArray> JSWeakCollection::GetEntries(
   return isolate->factory()->NewJSArrayWithElements(entries);
 }
 
-void JSDisposableStack::Initialize(
-    Isolate* isolate, DirectHandle<JSDisposableStack> disposable_stack) {
+void JSDisposableStackBase::InitializeJSDisposableStackBase(
+    Isolate* isolate, DirectHandle<JSDisposableStackBase> disposable_stack) {
   DirectHandle<FixedArray> array = isolate->factory()->NewFixedArray(0);
   disposable_stack->set_stack(*array);
   disposable_stack->set_length(0);
@@ -6657,5 +6649,4 @@ EXTERN_DEFINE_BASE_NAME_DICTIONARY(GlobalDictionary, GlobalDictionaryShape)
 #undef EXTERN_DEFINE_DICTIONARY
 #undef EXTERN_DEFINE_BASE_NAME_DICTIONARY
 
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal

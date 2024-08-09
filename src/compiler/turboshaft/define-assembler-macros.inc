@@ -15,6 +15,9 @@
 
 #define V8_COMPILER_TURBOSHAFT_ASSEMBLER_MACROS_DEFINED 1
 
+#define TSA_DCHECK(assembler, condition) \
+  (assembler)->Asm().Dcheck(condition, #condition, __FILE__, __LINE__ )
+
 #define LIKELY(...) ConditionWithHint(__VA_ARGS__, BranchHint::kTrue)
 #define UNLIKELY(...) ConditionWithHint(__VA_ARGS__, BranchHint::kFalse)
 
@@ -32,13 +35,35 @@
 #define WHILE(...)                                                            \
     for (auto [CONCAT(run_loop_, __LINE__), loop_header_xx, loop_exit_xx]     \
               = Asm().ControlFlowHelper_While([&]() {                         \
-           return __VA_ARGS__;                                                \
+           return Asm().resolve(ConstOrV<Word32>(__VA_ARGS__));               \
          });                                                                  \
          CONCAT(run_loop_, __LINE__);                                         \
          Asm().ControlFlowHelper_EndWhileLoop(loop_header_xx, loop_exit_xx),  \
               CONCAT(run_loop_, __LINE__) = false)
+#define FOREACH_IMPL_2(arg, iterable)                                    \
+  for (auto [CONCAT(run_loop_, __LINE__), iterable_xx, loop_header_yy,   \
+             loop_exit_xx, current_iterator_xx, arg] =                   \
+           Asm().ControlFlowHelper_Foreach(iterable);                    \
+       CONCAT(run_loop_, __LINE__);                                      \
+       Asm().ControlFlowHelper_EndForeachLoop(                           \
+           std::move(iterable_xx), loop_header_yy, loop_exit_xx,         \
+           current_iterator_xx),                                         \
+       CONCAT(run_loop_, __LINE__) = false)
+#define FOREACH_IMPL_3(arg0, arg1, iterable)                             \
+  for (auto [CONCAT(run_loop_, __LINE__), iterable_xx, loop_header_yy,   \
+             loop_exit_xx, current_iterator_xx, arg0, arg1] =            \
+           Asm().ControlFlowHelper_Foreach(iterable);                    \
+       CONCAT(run_loop_, __LINE__);                                      \
+       Asm().ControlFlowHelper_EndForeachLoop(                           \
+           std::move(iterable_xx), loop_header_yy, loop_exit_xx,         \
+           current_iterator_xx),                                         \
+       CONCAT(run_loop_, __LINE__) = false)
+// TODO(nicohartmann): Add more `FOREACH_IMPL_N` versions when we see need.
+#define FOREACH(...)                                                  \
+    CONCAT(FOREACH_IMPL_, COUNT_MACRO_ARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #define BREAK Asm().ControlFlowHelper_Goto(loop_exit_xx, {})
+// TODO(nicohartmann): CONTINUE currently doesn't work for FOREACH.
 #define CONTINUE Asm().ControlFlowHelper_Goto(loop_header_xx, {})
 
 #define GOTO(label, ...)                             \
@@ -53,10 +78,12 @@
 // warning with Pragmas. Clang and GCC helpfully disagree on where the warning
 // is (on the if or the else), so they need separate macros.
 #if defined(__clang__)
-#if defined(DEBUG)
+#if defined(DEBUG) || defined(GOOGLE3)
 // TODO(dmercadier,leszeks): re-enable forced unrolling in DEBUG build. This
 // requires figuring out why Clang doesn't manage to unroll the loop in DEBUG
-// builds.
+// builds. In google3, forced unrolling also caused problems. Disable it there
+// for now as well.
+// TODO(349411321): re-enable forced unrolling in google3 again.
 #define FORCE_UNROLL_LOOP
 #else
 #define FORCE_UNROLL_LOOP _Pragma("clang loop unroll(full)")

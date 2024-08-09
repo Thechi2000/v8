@@ -5,14 +5,15 @@
 #ifndef V8_OBJECTS_CALL_SITE_INFO_H_
 #define V8_OBJECTS_CALL_SITE_INFO_H_
 
+#include <optional>
+
 #include "src/objects/struct.h"
 #include "torque-generated/bit-fields.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
 
-namespace v8 {
-namespace internal {
+namespace v8::internal {
 
 class MessageLocation;
 class WasmInstanceObject;
@@ -29,6 +30,9 @@ class CallSiteInfo : public TorqueGeneratedCallSiteInfo<CallSiteInfo, Struct> {
   inline bool IsWasm() const;
   inline bool IsAsmJsWasm() const;
   inline bool IsAsmJsAtNumberConversion() const;
+#if V8_ENABLE_DRUMBRAKE
+  inline bool IsWasmInterpretedFrame() const;
+#endif  // V8_ENABLE_DRUMBRAKE
   inline bool IsBuiltin() const;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -102,7 +106,7 @@ class CallSiteInfo : public TorqueGeneratedCallSiteInfo<CallSiteInfo, Struct> {
  private:
   static int ComputeSourcePosition(DirectHandle<CallSiteInfo> info, int offset);
 
-  base::Optional<Tagged<Script>> GetScript() const;
+  std::optional<Tagged<Script>> GetScript() const;
   Tagged<SharedFunctionInfo> GetSharedFunctionInfo() const;
 
   TQ_OBJECT_CONSTRUCTORS(CallSiteInfo)
@@ -115,8 +119,7 @@ V8_EXPORT_PRIVATE
 MaybeHandle<String> SerializeCallSiteInfo(Isolate* isolate,
                                           Handle<CallSiteInfo> frame);
 
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal
 
 #include "src/objects/object-macros-undef.h"
 

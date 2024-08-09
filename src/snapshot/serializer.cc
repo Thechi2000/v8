@@ -1011,8 +1011,8 @@ void Serializer::ObjectSerializer::VisitPointers(Tagged<HeapObject> host,
       if (repeat_end < end &&
           serializer_->root_index_map()->Lookup(*obj, &root_index) &&
           RootsTable::IsImmortalImmovable(root_index) &&
-          current.load(cage_base) == repeat_end.load(cage_base)) {
-        DCHECK_EQ(reference_type, HeapObjectReferenceType::STRONG);
+          current.load(cage_base) == repeat_end.load(cage_base) &&
+          reference_type == HeapObjectReferenceType::STRONG) {
         DCHECK(!Heap::InYoungGeneration(*obj));
         while (repeat_end < end &&
                repeat_end.load(cage_base) == current.load(cage_base)) {
@@ -1256,6 +1256,31 @@ void Serializer::ObjectSerializer::VisitProtectedPointer(
   CHECK(!serializer_->SerializePendingObject(*object));
   sink_->Put(kProtectedPointerPrefix, "ProtectedPointer");
   serializer_->SerializeObject(object, SlotType::kAnySlot);
+}
+
+void Serializer::ObjectSerializer::VisitJSDispatchTableEntry(
+    Tagged<HeapObject> host, JSDispatchHandle handle) {
+#ifdef V8_ENABLE_LEAPTIERING
+  // New dispatch table entries will be allocated during deserialization if
+  // necessary. Here we just serialize an empty handle.
+  // TODO(saelo): we could also emit a kInitializeJSDispatchHandle opcode here
+  // and then allocate a dispatch entry during deserialization when we
+  // encounter that. That way we don't need to hook into object post
+  // processing. If the dispatch handle is empty, we would just skip it here
+  // (and would then serialize the raw null handle, which is correct).
+  // TODO(saelo): we might want to call OutputRawData here, but for that we
+  // first need to pass the slot address to this method (e.g. as part of a
+  // JSDispatchHandleSlot struct).
+  static_assert(kJSDispatchHandleSize % kTaggedSize == 0);
+  sink_->Put(
+      FixedRawDataWithSize::Encode(kJSDispatchHandleSize >> kTaggedSizeLog2),
+      "FixedRawData");
+  sink_->PutRaw(reinterpret_cast<const uint8_t*>(&kNullJSDispatchHandle),
+                kJSDispatchHandleSize, "empty js dispatch handle");
+  bytes_processed_so_far_ += kJSDispatchHandleSize;
+#else
+  UNREACHABLE();
+#endif  // V8_ENABLE_LEAPTIERING
 }
 namespace {
 

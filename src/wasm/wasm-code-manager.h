@@ -85,7 +85,15 @@ class V8_EXPORT_PRIVATE DisjointAllocationPool final {
 
 class V8_EXPORT_PRIVATE WasmCode final {
  public:
-  enum Kind { kWasmFunction, kWasmToCapiWrapper, kWasmToJsWrapper, kJumpTable };
+  enum Kind {
+    kWasmFunction,
+    kWasmToCapiWrapper,
+    kWasmToJsWrapper,
+#if V8_ENABLE_DRUMBRAKE
+    kInterpreterEntry,
+#endif  // V8_ENABLE_DRUMBRAKE
+    kJumpTable
+  };
 
   static constexpr Builtin GetRecordWriteBuiltin(SaveFPRegsMode fp_mode) {
     switch (fp_mode) {
@@ -417,7 +425,12 @@ class V8_EXPORT_PRIVATE WasmCode final {
 
   const uint8_t flags_;  // Bit field, see below.
   // Bits encoded in {flags_}:
+#if !V8_ENABLE_DRUMBRAKE
   using KindField = base::BitField8<Kind, 0, 2>;
+#else   // !V8_ENABLE_DRUMBRAKE
+  // We have an additional kind: Wasm interpreter.
+  using KindField = base::BitField8<Kind, 0, 3>;
+#endif  // !V8_ENABLE_DRUMBRAKE
   using ExecutionTierField = KindField::Next<ExecutionTier, 2>;
   using ForDebuggingField = ExecutionTierField::Next<ForDebugging, 2>;
   using FrameHasFeedbackSlotField = ForDebuggingField::Next<bool, 1>;
@@ -705,7 +718,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   }
 
   WasmEnabledFeatures enabled_features() const { return enabled_features_; }
-  CompileTimeImports compile_imports() const { return compile_imports_; }
+  const CompileTimeImports& compile_imports() const { return compile_imports_; }
 
   // Returns the builtin that corresponds to the given address (which
   // must be a far jump table slot). Returns {kNoBuiltinId} on failure.
@@ -736,12 +749,13 @@ class V8_EXPORT_PRIVATE NativeModule final {
     kRemoveTurbofanCode,
     kRemoveAllCode,
   };
-  // Remove all compiled code from the {NativeModule} and replace it with
-  // {CompileLazy} builtins.
-  void RemoveCompiledCode(RemoveFilter filter);
+  // Remove all compiled code based on the `filter` from the {NativeModule},
+  // replace it with {CompileLazy} builtins and return the sizes of the removed
+  // (executable) code and the removed metadata.
+  std::pair<size_t, size_t> RemoveCompiledCode(RemoveFilter filter);
 
   // Returns the code size of all Liftoff compiled functions.
-  size_t SumLiftoffCodeSize();
+  size_t SumLiftoffCodeSizeForTesting() const;
 
   // Free a set of functions of this module. Uncommits whole pages if possible.
   // The given vector must be ordered by the instruction start address, and all
@@ -762,7 +776,9 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Get or create the NamesProvider. Requires {HasWireBytes()}.
   NamesProvider* GetNamesProvider();
 
-  uint32_t* tiering_budget_array() const { return tiering_budgets_.get(); }
+  std::atomic<uint32_t>* tiering_budget_array() const {
+    return tiering_budgets_.get();
+  }
 
   Counters* counters() const { return code_allocator_.counters(); }
 
@@ -782,30 +798,53 @@ class V8_EXPORT_PRIVATE NativeModule final {
     kLazyCompileTable,
   };
 
-  bool TrySetFastApiCallTarget(int index, Address target) {
-    Address old_val = fast_api_targets_[index].load(std::memory_order_relaxed);
+  // This function tries to set the fast API call target of function import
+  // `index`. If the call target has been set before with a different value,
+  // then this function returns false, and this import will be marked as not
+  // suitable for wellknown imports, i.e. all existing compiled code of the
+  // module gets flushed, and future calls to this import will not use fast API
+  // calls.
+  bool TrySetFastApiCallTarget(int func_index, Address target) {
+    Address old_val =
+        fast_api_targets_[func_index].load(std::memory_order_relaxed);
     if (old_val == target) {
       return true;
     }
     if (old_val != kNullAddress) {
       // If already a different target is stored, then there are conflicting
-      // targets and fast api calls are not possible.
+      // targets and fast api calls are not possible. In that case the import
+      // will be marked as not suitable for wellknown imports, and the
+      // `fast_api_target` of this import will never be used anymore in the
+      // future.
       return false;
     }
-    return fast_api_targets_[index].compare_exchange_weak(
-        old_val, target, std::memory_order_relaxed);
+    if (fast_api_targets_[func_index].compare_exchange_strong(
+            old_val, target, std::memory_order_relaxed)) {
+      return true;
+    }
+    // If a concurrent call to `TrySetFastAPICallTarget` set the call target to
+    // the same value as this call, we consider also this call successful.
+    return old_val == target;
   }
 
   std::atomic<Address>* fast_api_targets() const {
     return fast_api_targets_.get();
   }
 
-  void set_fast_api_return_is_bool(int index, bool return_is_bool) {
-    fast_api_return_is_bool_[index] = return_is_bool;
+  // Stores the signature of the C++ call target of an imported web API
+  // function. The signature got copied from the `FunctionTemplateInfo` object
+  // of the web API function into the `signature_zone` of the `WasmModule` so
+  // that it stays alive as long as the `WasmModule` exists.
+  void set_fast_api_signature(int func_index, const MachineSignature* sig) {
+    fast_api_signatures_[func_index] = sig;
   }
 
-  std::atomic<bool>* fast_api_return_is_bool() const {
-    return fast_api_return_is_bool_.get();
+  bool has_fast_api_signature(int index) {
+    return fast_api_signatures_[index] != nullptr;
+  }
+
+  std::atomic<const MachineSignature*>* fast_api_signatures() const {
+    return fast_api_signatures_.get();
   }
 
  private:
@@ -869,10 +908,6 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Transfer owned code from {new_owned_code_} to {owned_code_}.
   void TransferNewOwnedCodeLocked() const;
 
-  // Add code to the code cache, if it meets criteria for being cached and we do
-  // not have code in the cache yet.
-  void InsertToCodeCache(WasmCode* code);
-
   bool should_update_code_table(WasmCode* new_code, WasmCode* prior_code) const;
 
   // -- Fields of {NativeModule} start here.
@@ -927,7 +962,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   WasmImportWrapperCache import_wrapper_cache_;
 
   // Array to handle number of function calls.
-  std::unique_ptr<uint32_t[]> tiering_budgets_;
+  std::unique_ptr<std::atomic<uint32_t>[]> tiering_budgets_;
 
   // This mutex protects concurrent calls to {AddCode} and friends.
   // TODO(dlehmann): Revert this to a regular {Mutex} again.
@@ -969,12 +1004,6 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   DebugState debug_state_ = kNotDebugging;
 
-  // Cache both baseline and top-tier code if we are debugging, to speed up
-  // repeated enabling/disabling of the debugger or profiler.
-  // Maps <tier, function_index> to WasmCode.
-  std::unique_ptr<std::map<std::pair<ExecutionTier, int>, WasmCode*>>
-      cached_code_;
-
   // End of fields protected by {allocation_mutex_}.
   //////////////////////////////////////////////////////////////////////////////
 
@@ -1001,7 +1030,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   std::atomic<bool> log_code_{false};
 
   std::unique_ptr<std::atomic<Address>[]> fast_api_targets_;
-  std::unique_ptr<std::atomic<bool>[]> fast_api_return_is_bool_;
+  std::unique_ptr<std::atomic<const MachineSignature*>[]> fast_api_signatures_;
 };
 
 class V8_EXPORT_PRIVATE WasmCodeManager final {
@@ -1045,8 +1074,8 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
                                              int code_section_length,
                                              bool include_liftoff,
                                              DynamicTiering dynamic_tiering);
-  // Estimate the size of meta data needed for the NativeModule, excluding
-  // generated code. This data still be stored on the C++ heap.
+  // Estimate the size of metadata needed for the NativeModule, excluding
+  // generated code. This data is stored on the C++ heap.
   static size_t EstimateNativeModuleMetaDataSize(const WasmModule* module);
 
   // Returns true if there is hardware support for PKU. Use

@@ -37,9 +37,13 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   assertEquals(expectedSum, wasm.main(...values, wasm.add));
   %WasmTierUpFunction(wasm.main);
   assertEquals(expectedSum, wasm.main(...values, wasm.add));
-  assertTrue(%IsTurboFanFunction(wasm.main));
+  if (%IsWasmTieringPredictable()) {
+    assertTrue(%IsTurboFanFunction(wasm.main));
+  }
   assertEquals(expectedDiff, wasm.main(...values, wasm.sub));
-  assertFalse(%IsTurboFanFunction(wasm.main));
+  if (%IsWasmTieringPredictable()) {
+    assertFalse(%IsTurboFanFunction(wasm.main));
+  }
 
 
   function generateCalleeBody(binop) {

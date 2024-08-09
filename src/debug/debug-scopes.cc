@@ -300,7 +300,7 @@ void ScopeIterator::TryParseAndRetrieveScopes(ReparseStrategy strategy) {
     DCHECK(script->origin_options().IsModule());
     DCHECK(flags.is_module());
   } else {
-    DCHECK(scope_info->scope_type() == SCRIPT_SCOPE ||
+    DCHECK(scope_info->is_script_scope() ||
            scope_info->scope_type() == FUNCTION_SCOPE);
   }
 
@@ -552,6 +552,7 @@ ScopeIterator::ScopeType ScopeIterator::Type() const {
         DCHECK_IMPLIES(NeedsContext(), context_->IsModuleContext());
         return ScopeTypeModule;
       case SCRIPT_SCOPE:
+      case REPL_MODE_SCOPE:
         DCHECK_IMPLIES(NeedsContext(), context_->IsScriptContext() ||
                                            IsNativeContext(*context_));
         return ScopeTypeScript;
@@ -615,8 +616,8 @@ Handle<JSObject> ScopeIterator::ScopeObject(Mode mode) {
   }
 
   Handle<JSObject> scope = isolate_->factory()->NewSlowJSObjectWithNullProto();
-  auto visitor = [=](Handle<String> name, Handle<Object> value,
-                     ScopeType scope_type) {
+  auto visitor = [=, this](Handle<String> name, Handle<Object> value,
+                           ScopeType scope_type) {
     if (IsOptimizedOut(*value, isolate_)) {
       JSObject::SetAccessor(
           scope, name, isolate_->factory()->value_unavailable_accessor(), NONE)

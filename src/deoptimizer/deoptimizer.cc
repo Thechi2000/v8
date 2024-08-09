@@ -4,6 +4,8 @@
 
 #include "src/deoptimizer/deoptimizer.h"
 
+#include <optional>
+
 #include "src/base/memory.h"
 #include "src/codegen/interface-descriptors.h"
 #include "src/codegen/register-configuration.h"
@@ -31,6 +33,7 @@
 #include "src/wasm/baseline/liftoff-varstate.h"
 #include "src/wasm/compilation-environment-inl.h"
 #include "src/wasm/function-compiler.h"
+#include "src/wasm/signature-hashing.h"
 #include "src/wasm/wasm-deopt-data.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-linkage.h"
@@ -279,13 +282,15 @@ Deoptimizer* Deoptimizer::Grab(Isolate* isolate) {
   return result;
 }
 
-void Deoptimizer::DeleteForWasm(Isolate* isolate) {
+size_t Deoptimizer::DeleteForWasm(Isolate* isolate) {
   // The deoptimizer disallows garbage collections.
   DCHECK(!AllowGarbageCollection::IsAllowed());
   Deoptimizer* deoptimizer = Deoptimizer::Grab(isolate);
+  int output_count = deoptimizer->output_count();
   delete deoptimizer;
   // Now garbage collections are allowed again.
   DCHECK(AllowGarbageCollection::IsAllowed());
+  return output_count;
 }
 
 DeoptimizedFrameInfo* Deoptimizer::DebuggerInspectableFrame(
@@ -591,13 +596,16 @@ Deoptimizer::Deoptimizer(Isolate* isolate, Tagged<JSFunction> function,
     // pointers as well as the incoming parameter stack slots are going to be
     // copied into the outgoing FrameDescription which will "push" them back
     // onto the stack. (This is consistent with how JS handles this.)
-    const int parameter_slots = code->first_tagged_parameter_slot() +
-                                code->num_tagged_parameter_slots();
+    const wasm::FunctionSig* sig =
+        code->native_module()->module()->functions[code->index()].sig;
+    int parameter_stack_slots, return_stack_slots;
+    GetWasmStackSlotsCounts(sig, &parameter_stack_slots, &return_stack_slots);
+
     unsigned input_frame_size = fp_to_sp_delta +
-                                parameter_slots * kSystemPointerSize +
+                                parameter_stack_slots * kSystemPointerSize +
                                 CommonFrameConstants::kFixedFrameSizeAboveFp;
-    input_ =
-        FrameDescription::Create(input_frame_size, parameter_slots, isolate_);
+    input_ = FrameDescription::Create(input_frame_size, parameter_stack_slots,
+                                      isolate_);
     return;
   }
 #endif
@@ -879,10 +887,23 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
 
   DCHECK(liftoff_description);
 
+  int parameter_stack_slots, return_stack_slots;
+  const wasm::FunctionSig* sig =
+      native_module->module()->functions[frame.wasm_function_index()].sig;
+  GetWasmStackSlotsCounts(sig, &parameter_stack_slots, &return_stack_slots);
+
+  // Allocate and populate the FrameDescription describing the output frame.
+  const uint32_t output_frame_size = liftoff_description->total_frame_size;
+  const uint32_t total_output_frame_size =
+      output_frame_size + parameter_stack_slots * kSystemPointerSize +
+      CommonFrameConstants::kFixedFrameSizeAboveFp;
+
   if (verbose_tracing_enabled()) {
     std::ostringstream outstream;
     outstream << "  Liftoff stack & register state for function index "
-              << frame.wasm_function_index() << '\n';
+              << frame.wasm_function_index() << ", frame size "
+              << output_frame_size << ", total frame size "
+              << total_output_frame_size << '\n';
     size_t index = 0;
     for (const wasm::LiftoffVarState& state : liftoff_description->var_state) {
       outstream << "     " << index++ << ": " << state << '\n';
@@ -891,40 +912,58 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
     PrintF(file, "%s", outstream.str().c_str());
   }
 
-  const uint32_t parameter_stack_slots =
-      wasm_code->first_tagged_parameter_slot() +
-      wasm_code->num_tagged_parameter_slots();
-
-  // Allocate and populate the FrameDescription describing the output frame.
-  const uint32_t output_frame_size = liftoff_description->total_frame_size;
-  const uint32_t total_output_frame_size =
-      output_frame_size + parameter_stack_slots * kSystemPointerSize +
-      CommonFrameConstants::kFixedFrameSizeAboveFp;
   FrameDescription* output_frame = FrameDescription::Create(
       total_output_frame_size, parameter_stack_slots, isolate());
 
   // Copy the parameter stack slots.
   static_assert(CommonFrameConstants::kFixedFrameSizeAboveFp ==
                 2 * kSystemPointerSize);
-  uint32_t input_offset = input_->GetFrameSize();
   uint32_t output_offset = total_output_frame_size;
+  // Zero out the incoming parameter slots. This will make sure that tagged
+  // values are safely ignored by the gc.
+  // Note that zero is clearly not the correct value. Still, liftoff copies
+  // all parameters into "its own" stack slots at the beginning and always
+  // uses these slots to restore parameters from the stack.
+  for (int i = 0; i < parameter_stack_slots; ++i) {
+    output_offset -= kSystemPointerSize;
+    output_frame->SetFrameSlot(output_offset, 0);
+  }
+
+  // Calculate top and update previous caller's pc.
+  Address top = is_bottommost ? caller_frame_top_ - total_output_frame_size
+                              : output_[frame_index - 1]->GetTop() -
+                                    total_output_frame_size;
+  output_frame->SetTop(top);
+  Address pc = wasm_code->instruction_start() + liftoff_description->pc_offset;
+  // Sign the PC. Note that for the non-topmost frames the stack pointer at
+  // which the PC is stored as the "caller pc" / return address depends on the
+  // amount of parameter stack slots of the callee. To simplify the code, we
+  // just sign it as if there weren't any parameter stack slots.
+  // When building up the next frame we can check and "move" the caller PC by
+  // signing it again with the correct stack pointer.
+  Address signed_pc = PointerAuthentication::SignAndCheckPC(
+      isolate(), pc, output_frame->GetTop());
+  output_frame->SetPc(signed_pc);
+
+  // Sign the previous frame's PC.
   if (is_bottommost) {
-    for (uint32_t i = 1; i <= parameter_stack_slots; ++i) {
-      input_offset -= kSystemPointerSize;
-      intptr_t value = input_->GetFrameSlot(input_offset);
-      output_offset -= kSystemPointerSize;
-      output_frame->SetFrameSlot(output_offset, value);
-    }
-  } else {
-    // Zero out the incoming parameter slots. This will make sure that tagged
-    // values are safely ignored by the gc.
-    // Note that zero is clearly not the correct value. Still, liftoff copies
-    // all parameters into "its own" stack slots at the beginning and always
-    // uses these slots to restore parameters from the stack.
-    for (uint32_t i = 0; i < parameter_stack_slots; ++i) {
-      output_offset -= kSystemPointerSize;
-      output_frame->SetFrameSlot(output_offset, 0);
-    }
+    Address old_context =
+        caller_frame_top_ - input_->parameter_count() * kSystemPointerSize;
+    Address new_context =
+        caller_frame_top_ - parameter_stack_slots * kSystemPointerSize;
+    caller_pc_ = PointerAuthentication::MoveSignedPC(isolate(), caller_pc_,
+                                                     new_context, old_context);
+  } else if (parameter_stack_slots != 0) {
+    // The previous frame's PC is stored at a different stack slot, so we need
+    // to re-sign the PC for the new context (stack pointer).
+    FrameDescription* previous_frame = output_[frame_index - 1];
+    Address pc = previous_frame->GetPc();
+    Address old_context = previous_frame->GetTop();
+    Address new_context =
+        old_context - parameter_stack_slots * kSystemPointerSize;
+    Address signed_pc = PointerAuthentication::MoveSignedPC(
+        isolate(), pc, new_context, old_context);
+    previous_frame->SetPc(signed_pc);
   }
 
   // Store the caller PC.
@@ -952,11 +991,22 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
 
   DCHECK_GE(translated_state_.frames().size(), 1);
   auto liftoff_iter = liftoff_description->var_state.begin();
-  DCHECK_EQ(liftoff_description->var_state.size(), frame.GetValueCount());
+  if constexpr (Is64()) {
+    // On 32 bit platforms int64s are represented as 2 values on Turbofan.
+    // Liftoff on the other hand treats them as 1 value (a register pair).
+    DCHECK_EQ(liftoff_description->var_state.size(), frame.GetValueCount());
+  }
+
+  bool int64_lowering_is_low = true;
 
   for (const TranslatedValue& value : frame) {
+    bool skip_increase_liftoff_iter = false;
     switch (liftoff_iter->loc()) {
       case wasm::LiftoffVarState::kIntConst:
+        if (!Is64() && liftoff_iter->kind() == wasm::ValueKind::kI64) {
+          if (int64_lowering_is_low) skip_increase_liftoff_iter = true;
+          int64_lowering_is_low = !int64_lowering_is_low;
+        }
         break;  // Nothing to be done for constants in liftoff frame.
       case wasm::LiftoffVarState::kRegister:
         if (liftoff_iter->is_gp_reg()) {
@@ -977,31 +1027,60 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
           }
           output_frame->SetRegister(liftoff_iter->reg().gp().code(), reg_value);
         } else if (liftoff_iter->is_fp_reg()) {
-          // TODO(mliedtke): These cases don't cover the cases where a double
-          // might be a word64 in Turboshaft due to optimizations etc.
-          Simd128 simd_value;
           switch (value.kind()) {
-            case TranslatedValue::Kind::kDouble: {
-              Float64 double_value = value.double_value();
-              std::memcpy(&simd_value, &double_value, sizeof(double_value));
+            case TranslatedValue::Kind::kDouble:
+              output_frame->SetDoubleRegister(liftoff_iter->reg().fp().code(),
+                                              value.double_value());
               break;
-            }
-            case TranslatedValue::Kind::kFloat: {
-              Float32 float_value = value.float_value();
-              std::memcpy(&simd_value, &float_value, sizeof(float_value));
+            case TranslatedValue::Kind::kFloat:
+              // Liftoff doesn't have a concept of floating point registers.
+              // This is an important distinction as e.g. on arm s1 and d1 are
+              // two completely distinct registers.
+              static_assert(std::is_same_v<decltype(liftoff_iter->reg().fp()),
+                                           DoubleRegister>);
+              output_frame->SetDoubleRegister(
+                  liftoff_iter->reg().fp().code(),
+                  Float64::FromBits(value.float_value().get_bits()));
               break;
-            }
             case TranslatedValue::Kind::kSimd128:
-              simd_value = value.simd_value();
+              output_frame->SetSimd128Register(liftoff_iter->reg().fp().code(),
+                                               value.simd_value());
               break;
             default:
               UNIMPLEMENTED();
           }
-          output_frame->SetSimd128Register(liftoff_iter->reg().fp().code(),
-                                           simd_value);
+        } else if (!Is64() && liftoff_iter->is_gp_reg_pair()) {
+          intptr_t reg_value = kZapValue;
+          switch (value.kind()) {
+            case TranslatedValue::Kind::kInt32:
+              // Ensure that the upper half is zeroed out.
+              reg_value = static_cast<uint32_t>(value.int32_value());
+              break;
+            case TranslatedValue::Kind::kTagged:
+              reg_value = value.raw_literal().ptr();
+              break;
+            default:
+              UNREACHABLE();
+          }
+          int8_t reg = int64_lowering_is_low
+                           ? liftoff_iter->reg().low_gp().code()
+                           : liftoff_iter->reg().high_gp().code();
+          output_frame->SetRegister(reg, reg_value);
+          if (int64_lowering_is_low) skip_increase_liftoff_iter = true;
+          int64_lowering_is_low = !int64_lowering_is_low;
+        } else if (!Is64() && liftoff_iter->is_fp_reg_pair()) {
+          CHECK_EQ(value.kind(), TranslatedValue::Kind::kSimd128);
+          Simd128 simd_value = value.simd_value();
+          Address val_ptr = reinterpret_cast<Address>(&simd_value);
+          output_frame->SetDoubleRegister(
+              liftoff_iter->reg().low_fp().code(),
+              Float64::FromBits(base::ReadUnalignedValue<uint64_t>(val_ptr)));
+          output_frame->SetDoubleRegister(
+              liftoff_iter->reg().high_fp().code(),
+              Float64::FromBits(base::ReadUnalignedValue<uint64_t>(
+                  val_ptr + sizeof(double))));
         } else {
-          // Register pairs, floating point registers and potentially others.
-          UNIMPLEMENTED();
+          UNREACHABLE();
         }
         break;
       case wasm::LiftoffVarState::kStack:
@@ -1019,10 +1098,27 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
                 value.float_value().get_bits());
             break;
           case wasm::ValueKind::kI64:
-            DCHECK(value.kind() == TranslatedValue::Kind::kInt64 ||
-                   value.kind() == TranslatedValue::Kind::kUint64);
-            output_frame->SetLiftoffFrameSlot64(
-                base_offset - liftoff_iter->offset(), value.int64_value_);
+            if constexpr (Is64()) {
+              DCHECK(value.kind() == TranslatedValue::Kind::kInt64 ||
+                     value.kind() == TranslatedValue::Kind::kUint64);
+              output_frame->SetLiftoffFrameSlot64(
+                  base_offset - liftoff_iter->offset(), value.int64_value_);
+            } else {
+              DCHECK(value.kind() == TranslatedValue::Kind::kInt32 ||
+                     value.kind() == TranslatedValue::Kind::kUint32);
+              // TODO(bigendian): Either the offsets or the default for
+              // int64_lowering_is_low might have to be swapped.
+              if (int64_lowering_is_low) {
+                skip_increase_liftoff_iter = true;
+                output_frame->SetLiftoffFrameSlot32(
+                    base_offset - liftoff_iter->offset(), value.int32_value_);
+              } else {
+                output_frame->SetLiftoffFrameSlot32(
+                    base_offset - liftoff_iter->offset() + sizeof(int32_t),
+                    value.int32_value_);
+              }
+              int64_lowering_is_low = !int64_lowering_is_low;
+            }
             break;
           case wasm::ValueKind::kS128: {
             int64x2 values = value.simd128_value_.to_i64x2();
@@ -1041,7 +1137,7 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
           case wasm::ValueKind::kRef:
           case wasm::ValueKind::kRefNull:
             DCHECK_EQ(value.kind(), TranslatedValue::Kind::kTagged);
-            output_frame->SetLiftoffFrameSlot64(
+            output_frame->SetLiftoffFrameSlotPointer(
                 base_offset - liftoff_iter->offset(), value.raw_literal_.ptr());
             break;
           default:
@@ -1049,7 +1145,10 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
         }
         break;
     }
-    ++liftoff_iter;
+    DCHECK_IMPLIES(skip_increase_liftoff_iter, !Is64());
+    if (!skip_increase_liftoff_iter) {
+      ++liftoff_iter;
+    }
   }
 
   // Store frame kind.
@@ -1084,17 +1183,11 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
     output_frame->SetFrameSlot(feedback_offset, feedback_vector.ptr());
   }
 
-  output_frame->SetPc(wasm_code->instruction_start() +
-                      liftoff_description->pc_offset);
   // Instead of a builtin continuation for wasm the deopt builtin will
   // call a c function to destroy the Deoptimizer object and then directly
   // return to the liftoff code.
   output_frame->SetContinuation(0);
 
-  Address top = is_bottommost ? caller_frame_top_ - total_output_frame_size
-                              : output_[frame_index - 1]->GetTop() -
-                                    total_output_frame_size;
-  output_frame->SetTop(top);
   const intptr_t fp_value = top + output_frame_size;
   output_frame->SetFp(fp_value);
   Register fp_reg = JavaScriptFrame::fp_register();
@@ -1104,6 +1197,7 @@ FrameDescription* Deoptimizer::DoComputeWasmLiftoffFrame(
   output_frame->SetRegister(kPtrComprCageBaseRegister.code(),
                             isolate()->cage_base());
 #endif
+
   return output_frame;
 }
 
@@ -1192,7 +1286,7 @@ void Deoptimizer::DoComputeOutputFramesWasmImpl() {
 
   {
     // Mark the cached feedback result produced by the
-    // TransitiveFeedbackProcessor as outdated.
+    // TransitiveTypeFeedbackProcessor as outdated.
     // This is required to prevent deopt loops as new feedback is ignored
     // otherwise.
     wasm::TypeFeedbackStorage& feedback =
@@ -1205,13 +1299,21 @@ void Deoptimizer::DoComputeOutputFramesWasmImpl() {
         iter->second.needs_reprocessing_after_deopt = true;
       }
     }
+    // Reset tierup priority. This is important as the tierup trigger will only
+    // be taken into account if the tierup_priority is a power of two (to
+    // prevent a hot function being enqueued too many times into the compilation
+    // queue.)
+    feedback.feedback_for_function[code->index()].tierup_priority = 0;
+    // Add sample for how many times this function was deopted.
+    isolate()->counters()->wasm_deopts_per_function()->AddSample(
+        ++feedback.deopt_count_for_function[code->index()]);
   }
 
   // Reset tiering budget of the function that triggered the deopt.
   int declared_func_index =
       wasm::declared_function_index(native_module->module(), code->index());
-  wasm_trusted_instance->tiering_budget_array()[declared_func_index] =
-      v8_flags.wasm_tiering_budget;
+  wasm_trusted_instance->tiering_budget_array()[declared_func_index].store(
+      v8_flags.wasm_tiering_budget, std::memory_order_relaxed);
 
   isolate()->counters()->wasm_deopts_executed()->AddSample(
       wasm::GetWasmEngine()->IncrementDeoptsExecutedCount());
@@ -1219,6 +1321,30 @@ void Deoptimizer::DoComputeOutputFramesWasmImpl() {
   if (verbose_tracing_enabled()) {
     TraceDeoptEnd(timer.Elapsed().InMillisecondsF());
   }
+}
+
+void Deoptimizer::GetWasmStackSlotsCounts(const wasm::FunctionSig* sig,
+                                          int* parameter_stack_slots,
+                                          int* return_stack_slots) {
+  class DummyResultCollector {
+   public:
+    void AddParamAt(size_t index, LinkageLocation location) {}
+    void AddReturnAt(size_t index, LinkageLocation location) {}
+  } result_collector;
+
+  // On 32 bits we need to perform the int64 lowering for the signature.
+#if V8_TARGET_ARCH_32_BIT
+  if (!alloc_) {
+    DCHECK(!zone_);
+    alloc_.emplace();
+    zone_.emplace(&*alloc_, "deoptimizer i32sig lowering");
+  }
+  sig = GetI32Sig(&*zone_, sig);
+#endif
+  int untagged_slots, untagged_return_slots;  // Unused.
+  wasm::IterateSignatureImpl(sig, false, result_collector, &untagged_slots,
+                             parameter_stack_slots, &untagged_return_slots,
+                             return_stack_slots);
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -1507,7 +1633,7 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
   TranslatedFrame::iterator function_iterator = value_iterator++;
 
   Tagged<BytecodeArray> bytecode_array;
-  base::Optional<Tagged<DebugInfo>> debug_info =
+  std::optional<Tagged<DebugInfo>> debug_info =
       shared->TryGetDebugInfo(isolate());
   if (debug_info.has_value() && debug_info.value()->HasBreakInfo()) {
     bytecode_array = debug_info.value()->DebugBytecodeArray(isolate());
@@ -2186,7 +2312,7 @@ Builtin Deoptimizer::TrampolineForBuiltinContinuation(
 
 #if V8_ENABLE_WEBASSEMBLY
 TranslatedValue Deoptimizer::TranslatedValueForWasmReturnKind(
-    base::Optional<wasm::ValueKind> wasm_call_return_kind) {
+    std::optional<wasm::ValueKind> wasm_call_return_kind) {
   if (wasm_call_return_kind) {
     switch (wasm_call_return_kind.value()) {
       case wasm::kI32:

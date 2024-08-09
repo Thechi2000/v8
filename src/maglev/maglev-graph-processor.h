@@ -108,6 +108,7 @@ class GraphProcessor {
     process_constants(graph->uint32());
     process_constants(graph->float64());
     process_constants(graph->external_references());
+    process_constants(graph->trusted_constants());
 
     for (block_it_ = graph->begin(); block_it_ != graph->end(); ++block_it_) {
       BasicBlock* block = *block_it_;
@@ -130,6 +131,8 @@ class GraphProcessor {
           }
         }
       }
+
+      node_processor_.PostPhiProcessing();
 
       for (node_it_ = block->nodes().begin();
            node_it_ != block->nodes().end();) {
@@ -199,9 +202,11 @@ class NodeMultiProcessor<> {
   void PreProcessGraph(Graph* graph) {}
   void PostProcessGraph(Graph* graph) {}
   void PreProcessBasicBlock(BasicBlock* block) {}
-  ProcessResult Process(NodeBase* node, const ProcessingState& state) {
+  V8_INLINE ProcessResult Process(NodeBase* node,
+                                  const ProcessingState& state) {
     return ProcessResult::kContinue;
   }
+  void PostPhiProcessing() {}
 };
 
 template <typename Processor, typename... Processors>
@@ -238,6 +243,10 @@ class NodeMultiProcessor<Processor, Processors...>
   void PreProcessBasicBlock(BasicBlock* block) {
     processor_.PreProcessBasicBlock(block);
     Base::PreProcessBasicBlock(block);
+  }
+  void PostPhiProcessing() {
+    processor_.PostPhiProcessing();
+    Base::PostPhiProcessing();
   }
 
  private:

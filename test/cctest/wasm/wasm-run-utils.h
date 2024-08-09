@@ -39,9 +39,16 @@
 #include "test/common/value-helper.h"
 #include "test/common/wasm/flag-utils.h"
 
+#if V8_ENABLE_DRUMBRAKE
+#include "src/wasm/interpreter/wasm-interpreter.h"
+#endif  // V8_ENABLE_DRUMBRAKE
+
 namespace v8::internal::wasm {
 
 enum class TestExecutionTier : int8_t {
+#if V8_ENABLE_DRUMBRAKE
+  kInterpreter = static_cast<int8_t>(ExecutionTier::kInterpreter),
+#endif  // V8_ENABLE_DRUMBRAKE
   kLiftoff = static_cast<int8_t>(ExecutionTier::kLiftoff),
   kTurbofan = static_cast<int8_t>(ExecutionTier::kTurbofan),
   kLiftoffForFuzzing
@@ -92,6 +99,7 @@ struct ManuallyImportedJSFunction {
 };
 
 // Helper Functions.
+bool IsSameNan(uint16_t expected, uint16_t actual);
 bool IsSameNan(float expected, float actual);
 bool IsSameNan(double expected, double actual);
 
@@ -130,8 +138,6 @@ class TestingModuleBuilder {
     test_module_->AddSignatureForTesting(sig, kNoSuperType, is_final,
                                          is_shared);
     GetTypeCanonicalizer()->AddRecursiveGroup(test_module_.get(), 1);
-    trusted_instance_data_->set_isorecursive_canonical_types(
-        test_module_->isorecursive_canonical_type_ids.data());
     size_t size = test_module_->types.size();
     CHECK_GT(127, size);
     return static_cast<uint8_t>(size - 1);
@@ -243,6 +249,7 @@ class TestingModuleBuilder {
 
   void SwitchToDebug() {
     SetDebugState();
+    WasmCodeRefScope ref_scope;
     native_module_->RemoveCompiledCode(
         NativeModule::RemoveFilter::kRemoveNonDebugCode);
   }
@@ -251,6 +258,10 @@ class TestingModuleBuilder {
 
   ExecutionTier execution_tier() const {
     switch (execution_tier_) {
+#if V8_ENABLE_DRUMBRAKE
+      case TestExecutionTier::kInterpreter:
+        return ExecutionTier::kInterpreter;
+#endif  // V8_ENABLE_DRUMBRAKE
       case TestExecutionTier::kTurbofan:
         return ExecutionTier::kTurbofan;
       case TestExecutionTier::kLiftoff:
@@ -582,12 +593,24 @@ class WasmRunner : public WasmRunnerBase {
 };
 
 // A macro to define tests that run in different engine configurations.
+#if V8_ENABLE_DRUMBRAKE
+#define TEST_IF_DRUMBRAKE(name)                      \
+  TEST(RunWasmInterpreter_##name) {                  \
+    FLAG_SCOPE(wasm_jitless);                        \
+    WasmInterpreterThread::Initialize();             \
+    RunWasm_##name(TestExecutionTier::kInterpreter); \
+    WasmInterpreterThread::Terminate();              \
+  }
+#else
+#define TEST_IF_DRUMBRAKE(name)
+#endif  // V8_ENABLE_DRUMBRAKE
 #define WASM_EXEC_TEST(name)                                                   \
   void RunWasm_##name(TestExecutionTier execution_tier);                       \
   TEST(RunWasmTurbofan_##name) {                                               \
     RunWasm_##name(TestExecutionTier::kTurbofan);                              \
   }                                                                            \
   TEST(RunWasmLiftoff_##name) { RunWasm_##name(TestExecutionTier::kLiftoff); } \
+  TEST_IF_DRUMBRAKE(name)                                                      \
   void RunWasm_##name(TestExecutionTier execution_tier)
 
 #define UNINITIALIZED_WASM_EXEC_TEST(name)               \

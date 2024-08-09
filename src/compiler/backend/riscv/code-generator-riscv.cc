@@ -1191,12 +1191,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                        i.InputOperand(1), kScratchReg);
       break;
     case kRiscvDiv32: {
+      DCHECK_NE(i.OutputRegister(), i.InputRegister(1));
       __ Div32(i.OutputRegister(), i.InputOrZeroRegister(0), i.InputOperand(1));
       // Set ouput to zero if divisor == 0
       __ LoadZeroIfConditionZero(i.OutputRegister(), i.InputRegister(1));
       break;
     }
     case kRiscvDivU32: {
+      DCHECK_NE(i.OutputRegister(), i.InputRegister(1));
       __ Divu32(i.OutputRegister(), i.InputOrZeroRegister(0),
                 i.InputOperand(1));
       // Set ouput to zero if divisor == 0
@@ -1214,12 +1216,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Mul64(i.OutputRegister(), i.InputOrZeroRegister(0), i.InputOperand(1));
       break;
     case kRiscvDiv64: {
+      DCHECK_NE(i.OutputRegister(), i.InputRegister(1));
       __ Div64(i.OutputRegister(), i.InputOrZeroRegister(0), i.InputOperand(1));
       // Set ouput to zero if divisor == 0
       __ LoadZeroIfConditionZero(i.OutputRegister(), i.InputRegister(1));
       break;
     }
     case kRiscvDivU64: {
+      DCHECK_NE(i.OutputRegister(), i.InputRegister(1));
       __ Divu64(i.OutputRegister(), i.InputOrZeroRegister(0),
                 i.InputOperand(1));
       // Set ouput to zero if divisor == 0
@@ -1281,24 +1285,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kRiscvOr32:
       __ Or(i.OutputRegister(), i.InputOrZeroRegister(0), i.InputOperand(1));
       __ Sll32(i.OutputRegister(), i.OutputRegister(), 0x0);
-      break;
-    case kRiscvNor:
-      if (instr->InputAt(1)->IsRegister()) {
-        __ Nor(i.OutputRegister(), i.InputOrZeroRegister(0), i.InputOperand(1));
-      } else {
-        DCHECK_EQ(0, i.InputOperand(1).immediate());
-        __ Nor(i.OutputRegister(), i.InputOrZeroRegister(0), zero_reg);
-      }
-      break;
-    case kRiscvNor32:
-      if (instr->InputAt(1)->IsRegister()) {
-        __ Nor(i.OutputRegister(), i.InputOrZeroRegister(0), i.InputOperand(1));
-        __ Sll32(i.OutputRegister(), i.OutputRegister(), 0x0);
-      } else {
-        DCHECK_EQ(0, i.InputOperand(1).immediate());
-        __ Nor(i.OutputRegister(), i.InputOrZeroRegister(0), zero_reg);
-        __ Sll32(i.OutputRegister(), i.OutputRegister(), 0x0);
-      }
       break;
     case kRiscvXor:
       __ Xor(i.OutputRegister(), i.InputOrZeroRegister(0), i.InputOperand(1));
@@ -4751,26 +4737,22 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
           destination->IsRegister() ? g.ToRegister(destination) : kScratchReg;
       switch (src.type()) {
         case Constant::kInt32:
-          if (RelocInfo::IsWasmReference(src.rmode())) {
-            __ li(dst, Operand(src.ToInt32(), src.rmode()));
-          } else if (src.ToInt32() == 0 && destination->IsStackSlot()) {
+          if (src.ToInt32() == 0 && destination->IsStackSlot() &&
+              RelocInfo::IsNoInfo(src.rmode())) {
             dst = zero_reg;
           } else {
-            __ li(dst, Operand(src.ToInt32()));
+            __ li(dst, Operand(src.ToInt32(), src.rmode()));
           }
           break;
         case Constant::kFloat32:
           __ li(dst, Operand::EmbeddedNumber(src.ToFloat32()));
           break;
         case Constant::kInt64:
-          if (RelocInfo::IsWasmReference(src.rmode())) {
-            __ li(dst, Operand(src.ToInt64(), src.rmode()));
+          if (src.ToInt64() == 0 && destination->IsStackSlot() &&
+              RelocInfo::IsNoInfo(src.rmode())) {
+            dst = zero_reg;
           } else {
-            if (src.ToInt64() == 0 && destination->IsStackSlot()) {
-              dst = zero_reg;
-            } else {
-              __ li(dst, Operand(src.ToInt64()));
-            }
+            __ li(dst, Operand(src.ToInt64(), src.rmode()));
           }
           break;
         case Constant::kFloat64:
@@ -4802,8 +4784,9 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
         case Constant::kRpoNumber:
           UNREACHABLE();  // TODO(titzer): loading RPO numbers
       }
-      if (destination->IsStackSlot())
+      if (destination->IsStackSlot()) {
         __ StoreWord(dst, g.ToMemOperand(destination));
+      }
     } else if (src.type() == Constant::kFloat32) {
       if (destination->IsFPStackSlot()) {
         MemOperand dst = g.ToMemOperand(destination);

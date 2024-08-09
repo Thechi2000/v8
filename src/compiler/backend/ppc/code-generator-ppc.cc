@@ -3250,7 +3250,7 @@ void CodeGenerator::AssembleConstructFrame() {
           call_descriptor->IsWasmImportWrapper() ||
           call_descriptor->IsWasmCapiFunction()) {
         // For import wrappers and C-API functions, this stack slot is only used
-        // for printing stack traces in V8. Also, it holds a WasmApiFunctionRef
+        // for printing stack traces in V8. Also, it holds a WasmImportData
         // instead of the instance itself, which is taken care of in the frames
         // accessors.
         __ Push(kWasmInstanceRegister);
@@ -3614,22 +3614,10 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
       Register dst = destination->IsRegister() ? g.ToRegister(destination) : ip;
       switch (src.type()) {
         case Constant::kInt32:
-#if V8_ENABLE_WEBASSEMBLY && !V8_TARGET_ARCH_PPC64
-          if (RelocInfo::IsWasmReference(src.rmode())) {
-            __ mov(dst, Operand(src.ToInt32(), src.rmode()));
-            break;
-          }
-#endif  // V8_ENABLE_WEBASSEMBLY && !V8_TARGET_ARCH_PPC64
-          __ mov(dst, Operand(src.ToInt32()));
+          __ mov(dst, Operand(src.ToInt32(), src.rmode()));
           break;
         case Constant::kInt64:
-#if V8_ENABLE_WEBASSEMBLY && V8_TARGET_ARCH_PPC64
-          if (RelocInfo::IsWasmReference(src.rmode())) {
-            __ mov(dst, Operand(src.ToInt64(), src.rmode()));
-            break;
-          }
-#endif  // V8_ENABLE_WEBASSEMBLY && V8_TARGET_ARCH_PPC64
-          __ mov(dst, Operand(src.ToInt64()));
+          __ mov(dst, Operand(src.ToInt64(), src.rmode()));
           break;
         case Constant::kFloat32:
           __ mov(dst, Operand::EmbeddedNumber(src.ToFloat32()));

@@ -42,7 +42,7 @@ class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
 
   HeapBase& heap() const;
 
-  BaseSpace& space() const { return space_; }
+  BaseSpace& space() const { return *space_; }
 
   bool is_large() const { return type_ == PageType::kLarge; }
 
@@ -102,7 +102,15 @@ class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
     USE(old_marked_bytes);
     DCHECK_GE(old_marked_bytes + value, old_marked_bytes);
   }
-  void ResetMarkedBytes() { marked_bytes_.store(0, std::memory_order_relaxed); }
+  void DecrementMarkedBytes(size_t value) {
+    const size_t old_marked_bytes =
+        marked_bytes_.fetch_sub(value, std::memory_order_relaxed);
+    USE(old_marked_bytes);
+    DCHECK_LE(old_marked_bytes - value, old_marked_bytes);
+  }
+  void ResetMarkedBytes(size_t new_value = 0) {
+    marked_bytes_.store(new_value, std::memory_order_relaxed);
+  }
   size_t marked_bytes() const {
     return marked_bytes_.load(std::memory_order_relaxed);
   }
@@ -118,6 +126,8 @@ class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
   void ResetSlotSet();
 #endif  // defined(CPPGC_YOUNG_GENERATION)
 
+  void ChangeOwner(BaseSpace&);
+
  protected:
   enum class PageType : uint8_t { kNormal, kLarge };
   BasePage(HeapBase&, BaseSpace&, PageType);
@@ -129,7 +139,7 @@ class V8_EXPORT_PRIVATE BasePage : public BasePageHandle {
   };
   void AllocateSlotSet();
 
-  BaseSpace& space_;
+  BaseSpace* space_;
   PageType type_;
   bool contains_young_objects_ = false;
 #if defined(CPPGC_YOUNG_GENERATION)

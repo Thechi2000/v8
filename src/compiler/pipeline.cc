@@ -7,9 +7,9 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <sstream>
 
-#include "src/base/optional.h"
 #include "src/builtins/builtins.h"
 #include "src/builtins/profile-data-reader.h"
 #include "src/codegen/assembler-inl.h"
@@ -478,7 +478,7 @@ TurbofanPipelineStatistics* CreatePipelineStatistics(
     base::Vector<const uint8_t> function_bytes{compilation_data.func_body.start,
                                                compilation_data.body_size()};
     base::Vector<const uint8_t> module_bytes{nullptr, 0};
-    base::Optional<wasm::ModuleWireBytes> maybe_wire_bytes =
+    std::optional<wasm::ModuleWireBytes> maybe_wire_bytes =
         compilation_data.wire_bytes_storage->GetModuleBytes();
     if (maybe_wire_bytes) module_bytes = maybe_wire_bytes->module_bytes();
 
@@ -587,7 +587,8 @@ PipelineCompilationJob::PipelineCompilationJob(
       data_(&zone_stats_, isolate, compilation_info(),
             pipeline_statistics_.get()),
       turboshaft_data_(&zone_stats_, turboshaft::TurboshaftPipelineKind::kJS,
-                       isolate, compilation_info()),
+                       isolate, compilation_info(),
+                       AssemblerOptions::Default(isolate)),
       pipeline_(&data_),
       linkage_(nullptr) {
   turboshaft_data_.set_pipeline_statistics(pipeline_statistics_.get());
@@ -1815,8 +1816,8 @@ struct RevectorizePhase {
 struct InstructionSelectionPhase {
   DECL_PIPELINE_PHASE_CONSTANTS(SelectInstructions)
 
-  base::Optional<BailoutReason> Run(TFPipelineData* data, Zone* temp_zone,
-                                    Linkage* linkage) {
+  std::optional<BailoutReason> Run(TFPipelineData* data, Zone* temp_zone,
+                                   Linkage* linkage) {
     InstructionSelector selector = InstructionSelector::ForTurbofan(
         temp_zone, data->graph()->NodeCount(), linkage, data->sequence(),
         data->schedule(), data->source_positions(), data->frame(),
@@ -1839,7 +1840,7 @@ struct InstructionSelectionPhase {
         data->info()->trace_turbo_json()
             ? InstructionSelector::kEnableTraceTurboJson
             : InstructionSelector::kDisableTraceTurboJson);
-    if (base::Optional<BailoutReason> bailout = selector.SelectInstructions()) {
+    if (std::optional<BailoutReason> bailout = selector.SelectInstructions()) {
       return bailout;
     }
     if (data->info()->trace_turbo_json()) {
@@ -1850,7 +1851,7 @@ struct InstructionSelectionPhase {
                                          &selector.instr_origins()}
               << "},\n";
     }
-    return base::nullopt;
+    return std::nullopt;
   }
 };
 
@@ -2177,7 +2178,7 @@ class WasmTurboshaftWrapperCompilationJob final
             wrapper_info_.code_kind == CodeKind::JS_TO_WASM_FUNCTION
                 ? turboshaft::TurboshaftPipelineKind::kJSToWasm
                 : turboshaft::TurboshaftPipelineKind::kWasm,
-            isolate, &info_, kNoSourcePosition, options),
+            isolate, &info_, options),
         data_(&zone_stats_, &info_, isolate, wasm::GetWasmEngine()->allocator(),
               nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, options,
               nullptr),
@@ -2658,8 +2659,25 @@ bool PipelineImpl::OptimizeTurbofanGraph(Linkage* linkage) {
 namespace {
 
 int HashGraphForPGO(const turboshaft::Graph* graph) {
-  // TODO(nicohartmann): Implement some kind of hashing.
-  return 42;
+  size_t hash = 0;
+  for (const turboshaft::Operation& op : graph->AllOperations()) {
+    VisitOperation(op, [&hash, &graph](const auto& derived) {
+      const auto op_hash =
+          derived.hash_value(turboshaft::HashingStrategy::kMakeSnapshotStable);
+      hash = turboshaft::fast_hash_combine(hash, op_hash);
+      // Use for tracing while developing:
+      constexpr bool kTraceHashing = false;
+      if constexpr (kTraceHashing) {
+        std::cout << "[" << std::setw(3) << graph->Index(derived)
+                  << "] Type: " << std::setw(30)
+                  << turboshaft::OpcodeName(
+                         turboshaft::operation_to_opcode_v<decltype(derived)>);
+        std::cout << " + 0x" << std::setw(20) << std::left << std::hex
+                  << op_hash << " => 0x" << hash << std::dec << std::endl;
+      }
+    });
+  }
+  return Tagged<Smi>(IntToSmi(static_cast<int>(hash))).value();
 }
 
 // Compute a hash of the given graph, in a way that should provide the same
@@ -2853,7 +2871,7 @@ MaybeHandle<Code> Pipeline::GenerateCodeForCodeStub(
 
     turboshaft::PipelineData turboshaft_data(
         data.zone_stats(), turboshaft::TurboshaftPipelineKind::kCSA,
-        data.isolate(), data.info(), data.start_source_position(), options);
+        data.isolate(), data.info(), options, data.start_source_position());
 
     turboshaft::BuiltinPipeline turboshaft_pipeline(&turboshaft_data);
     Linkage linkage(call_descriptor);
@@ -2924,6 +2942,14 @@ MaybeHandle<Code> Pipeline::GenerateCodeForTurboshaftBuiltin(
   DCHECK_EQ(builtin, turboshaft_data->info()->builtin());
   Isolate* isolate = turboshaft_data->isolate();
 
+// TODO(nicohartmann): Use during development and remove afterwards.
+#if 0
+#ifdef DEBUG
+  std::cout << "=== Generating Builtin '" << debug_name
+            << "' with Turboshaft ===" << std::endl;
+#endif
+#endif
+
   // Initialize JumpOptimizationInfo if required.
   JumpOptimizationInfo jump_opt;
   bool should_optimize_jumps =
@@ -2940,7 +2966,16 @@ MaybeHandle<Code> Pipeline::GenerateCodeForTurboshaftBuiltin(
       CreatePipelineStatistics(Handle<Script>::null(), turboshaft_data->info(),
                                isolate, turboshaft_data->zone_stats()));
 
-  // TODO(nicohartmann): Trace initial graph (if requested).
+  turboshaft::BuiltinPipeline turboshaft_pipeline(turboshaft_data);
+  OptimizedCompilationInfo* info = turboshaft_data->info();
+  if (info->trace_turbo_graph() || info->trace_turbo_json()) {
+    turboshaft::ZoneWithName<turboshaft::kTempZoneName> print_zone(
+        turboshaft_data->zone_stats(), turboshaft::kTempZoneName);
+    std::vector<char> name_buffer(strlen("TSA: ") + strlen(debug_name) + 1);
+    memcpy(name_buffer.data(), "TSA: ", 5);
+    memcpy(name_buffer.data() + 5, debug_name, strlen(debug_name));
+    turboshaft_pipeline.PrintGraph(print_zone, name_buffer.data());
+  }
 
   // Validate pgo profile.
   const int initial_graph_hash =
@@ -2948,7 +2983,6 @@ MaybeHandle<Code> Pipeline::GenerateCodeForTurboshaftBuiltin(
   profile_data =
       ValidateProfileData(profile_data, initial_graph_hash, debug_name);
 
-  turboshaft::BuiltinPipeline turboshaft_pipeline(turboshaft_data);
   turboshaft_pipeline.OptimizeBuiltin();
   Linkage linkage(call_descriptor);
   return turboshaft_pipeline.GenerateCode(&linkage, {}, jump_optimization_info,
@@ -3096,7 +3130,7 @@ Pipeline::GenerateCodeForWasmNativeStubFromTurboshaft(
   {
     turboshaft::PipelineData turboshaft_data(
         &zone_stats, turboshaft::TurboshaftPipelineKind::kWasm, nullptr, &info,
-        kNoSourcePosition, options);
+        options);
     turboshaft_data.SetIsWasm(module, sig, false);
     AccountingAllocator allocator;
     turboshaft_data.InitializeGraphComponent(source_positions);
@@ -3467,7 +3501,7 @@ bool Pipeline::GenerateWasmCodeFromTurboshaftGraph(
 
   turboshaft::PipelineData turboshaft_data(
       &zone_stats, turboshaft::TurboshaftPipelineKind::kWasm, nullptr, info,
-      kNoSourcePosition, options);
+      options);
   turboshaft_data.set_pipeline_statistics(pipeline_statistics.get());
   turboshaft_data.SetIsWasm(env->module, compilation_data.func_body.sig,
                             compilation_data.func_body.is_shared);
@@ -3661,7 +3695,8 @@ MaybeHandle<Code> Pipeline::GenerateCodeForTesting(
 
   TFPipelineData data(&zone_stats, isolate, info, pipeline_statistics.get());
   turboshaft::PipelineData turboshaft_data(
-      &zone_stats, turboshaft::TurboshaftPipelineKind::kJS, isolate, info);
+      &zone_stats, turboshaft::TurboshaftPipelineKind::kJS, isolate, info,
+      AssemblerOptions::Default(isolate));
   turboshaft_data.set_pipeline_statistics(pipeline_statistics.get());
   PipelineJobScope scope(&data, isolate->counters()->runtime_call_stats());
   PipelineImpl pipeline(&data);
@@ -3921,7 +3956,7 @@ bool PipelineImpl::SelectInstructions(Linkage* linkage) {
     data->InitializeFrameData(call_descriptor);
   }
   // Select and schedule instructions covering the scheduled graph.
-  if (base::Optional<BailoutReason> bailout =
+  if (std::optional<BailoutReason> bailout =
           Run<InstructionSelectionPhase>(linkage)) {
     info()->AbortOptimization(*bailout);
     data->EndPhaseKind();

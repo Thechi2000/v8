@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <cmath>
+#include <optional>
 
 #include "src/api/api-inl.h"
 #include "src/base/strings.h"
@@ -2181,19 +2182,19 @@ TEST(PopAndReturnConstant) {
   using Descriptor = JSTrampolineDescriptor;
   CodeAssemblerTester asm_tester(isolate, Descriptor());
 
-  const int kNumParams = 4 + kJSArgcReceiverSlots;
+  const int kFormalParams = 0;
+  const int kActualParams = 4 + kJSArgcReceiverSlots;
   {
     CodeStubAssembler m(asm_tester.state());
     TNode<Int32T> argc =
         m.UncheckedParameter<Int32T>(Descriptor::kActualArgumentsCount);
-    CSA_CHECK(&m, m.Word32Equal(argc, m.Int32Constant(kNumParams)));
+    CSA_CHECK(&m, m.Word32Equal(argc, m.Int32Constant(kActualParams)));
 
-    int pop_count = kNumParams;
+    int pop_count = kActualParams;
     m.PopAndReturn(m.IntPtrConstant(pop_count), m.SmiConstant(1234));
   }
 
-  FunctionTester ft(asm_tester.GenerateCode(), 0);
-  ft.function->shared()->DontAdaptArguments();
+  FunctionTester ft(asm_tester.GenerateCode(), kFormalParams);
 
   // Now call this function multiple time also checking that the stack pointer
   // didn't change after the calls.
@@ -2201,7 +2202,7 @@ TEST(PopAndReturnConstant) {
   Handle<Smi> expected_result(Smi::FromInt(1234), isolate);
   CallFunctionWithStackPointerChecks(isolate, expected_result, ft.function,
                                      receiver,
-                                     // Pass kNumParams arguments.
+                                     // Pass kActualParams arguments.
                                      Handle<Smi>(Smi::FromInt(1), isolate),
                                      Handle<Smi>(Smi::FromInt(2), isolate),
                                      Handle<Smi>(Smi::FromInt(3), isolate),
@@ -2215,19 +2216,19 @@ TEST(PopAndReturnVariable) {
   using Descriptor = JSTrampolineDescriptor;
   CodeAssemblerTester asm_tester(isolate, Descriptor());
 
-  const int kNumParams = 4 + kJSArgcReceiverSlots;
+  const int kFormalParams = 0;
+  const int kActualParams = 4 + kJSArgcReceiverSlots;
   {
     CodeStubAssembler m(asm_tester.state());
     TNode<Int32T> argc =
         m.UncheckedParameter<Int32T>(Descriptor::kActualArgumentsCount);
-    CSA_CHECK(&m, m.Word32Equal(argc, m.Int32Constant(kNumParams)));
+    CSA_CHECK(&m, m.Word32Equal(argc, m.Int32Constant(kActualParams)));
 
-    int pop_count = kNumParams;
+    int pop_count = kActualParams;
     m.PopAndReturn(m.IntPtrConstant(pop_count), m.SmiConstant(1234));
   }
 
-  FunctionTester ft(asm_tester.GenerateCode(), 0);
-  ft.function->shared()->DontAdaptArguments();
+  FunctionTester ft(asm_tester.GenerateCode(), kFormalParams);
 
   // Now call this function multiple time also checking that the stack pointer
   // didn't change after the calls.
@@ -2235,7 +2236,7 @@ TEST(PopAndReturnVariable) {
   Handle<Smi> expected_result(Smi::FromInt(1234), isolate);
   CallFunctionWithStackPointerChecks(isolate, expected_result, ft.function,
                                      receiver,
-                                     // Pass kNumParams arguments.
+                                     // Pass kActualParams arguments.
                                      Handle<Smi>(Smi::FromInt(1), isolate),
                                      Handle<Smi>(Smi::FromInt(2), isolate),
                                      Handle<Smi>(Smi::FromInt(3), isolate),
@@ -2395,7 +2396,6 @@ TEST(Arguments) {
   }
 
   FunctionTester ft(asm_tester.GenerateCode(), 0);
-  ft.function->shared()->DontAdaptArguments();
 
   Handle<Object> result;
   result = ft.Call(Handle<Smi>(Smi::FromInt(12), isolate),
@@ -2452,7 +2452,6 @@ TEST(ArgumentsForEach) {
   }
 
   FunctionTester ft(asm_tester.GenerateCode(), 0);
-  ft.function->shared()->DontAdaptArguments();
 
   Handle<Object> result;
   result = ft.Call(Handle<Smi>(Smi::FromInt(12), isolate),
@@ -3632,10 +3631,10 @@ TEST(ExtractFixedArrayCOWForceCopy) {
     CodeStubAssembler m(asm_tester.state());
     CodeStubAssembler::ExtractFixedArrayFlags flags;
     flags |= CodeStubAssembler::ExtractFixedArrayFlag::kAllFixedArrays;
-    base::Optional<TNode<Smi>> constant(m.SmiConstant(0));
+    std::optional<TNode<Smi>> constant(m.SmiConstant(0));
     m.Return(m.ExtractFixedArray(m.Parameter<FixedArrayBase>(1), constant,
-                                 base::Optional<TNode<Smi>>(base::nullopt),
-                                 base::Optional<TNode<Smi>>(base::nullopt),
+                                 std::optional<TNode<Smi>>(std::nullopt),
+                                 std::optional<TNode<Smi>>(std::nullopt),
                                  flags));
   }
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
@@ -3663,11 +3662,11 @@ TEST(ExtractFixedArraySimple) {
     CodeStubAssembler::ExtractFixedArrayFlags flags;
     flags |= CodeStubAssembler::ExtractFixedArrayFlag::kAllFixedArrays;
     flags |= CodeStubAssembler::ExtractFixedArrayFlag::kDontCopyCOW;
-    base::Optional<TNode<IntPtrT>> p1_untagged(m.SmiUntag(m.Parameter<Smi>(2)));
-    base::Optional<TNode<IntPtrT>> p2_untagged(m.SmiUntag(m.Parameter<Smi>(3)));
+    std::optional<TNode<IntPtrT>> p1_untagged(m.SmiUntag(m.Parameter<Smi>(2)));
+    std::optional<TNode<IntPtrT>> p2_untagged(m.SmiUntag(m.Parameter<Smi>(3)));
     m.Return(m.ExtractFixedArray(
         m.Parameter<FixedArrayBase>(1), p1_untagged, p2_untagged,
-        base::Optional<TNode<IntPtrT>>(base::nullopt), flags));
+        std::optional<TNode<IntPtrT>>(std::nullopt), flags));
   }
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
 
@@ -3692,11 +3691,11 @@ TEST(ExtractFixedArraySimpleSmiConstant) {
     CodeStubAssembler::ExtractFixedArrayFlags flags;
     flags |= CodeStubAssembler::ExtractFixedArrayFlag::kAllFixedArrays;
     flags |= CodeStubAssembler::ExtractFixedArrayFlag::kDontCopyCOW;
-    base::Optional<TNode<Smi>> constant_1(m.SmiConstant(1));
-    base::Optional<TNode<Smi>> constant_2(m.SmiConstant(2));
+    std::optional<TNode<Smi>> constant_1(m.SmiConstant(1));
+    std::optional<TNode<Smi>> constant_2(m.SmiConstant(2));
     m.Return(m.ExtractFixedArray(
         m.Parameter<FixedArrayBase>(1), constant_1, constant_2,
-        base::Optional<TNode<Smi>>(base::nullopt), flags));
+        std::optional<TNode<Smi>>(std::nullopt), flags));
   }
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
 
@@ -3718,11 +3717,11 @@ TEST(ExtractFixedArraySimpleIntPtrConstant) {
     CodeStubAssembler::ExtractFixedArrayFlags flags;
     flags |= CodeStubAssembler::ExtractFixedArrayFlag::kAllFixedArrays;
     flags |= CodeStubAssembler::ExtractFixedArrayFlag::kDontCopyCOW;
-    base::Optional<TNode<IntPtrT>> constant_1(m.IntPtrConstant(1));
-    base::Optional<TNode<IntPtrT>> constant_2(m.IntPtrConstant(2));
+    std::optional<TNode<IntPtrT>> constant_1(m.IntPtrConstant(1));
+    std::optional<TNode<IntPtrT>> constant_2(m.IntPtrConstant(2));
     m.Return(m.ExtractFixedArray(
         m.Parameter<FixedArrayBase>(1), constant_1, constant_2,
-        base::Optional<TNode<IntPtrT>>(base::nullopt), flags));
+        std::optional<TNode<IntPtrT>>(std::nullopt), flags));
   }
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
 
@@ -3741,11 +3740,11 @@ TEST(ExtractFixedArraySimpleIntPtrConstantNoDoubles) {
   CodeAssemblerTester asm_tester(isolate, JSParameterCount(kNumParams));
   {
     CodeStubAssembler m(asm_tester.state());
-    base::Optional<TNode<IntPtrT>> constant_1(m.IntPtrConstant(1));
-    base::Optional<TNode<IntPtrT>> constant_2(m.IntPtrConstant(2));
+    std::optional<TNode<IntPtrT>> constant_1(m.IntPtrConstant(1));
+    std::optional<TNode<IntPtrT>> constant_2(m.IntPtrConstant(2));
     m.Return(m.ExtractFixedArray(
         m.Parameter<FixedArrayBase>(1), constant_1, constant_2,
-        base::Optional<TNode<IntPtrT>>(base::nullopt),
+        std::optional<TNode<IntPtrT>>(std::nullopt),
         CodeStubAssembler::ExtractFixedArrayFlag::kFixedArrays));
   }
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
@@ -3765,8 +3764,8 @@ TEST(ExtractFixedArraySimpleIntPtrParameters) {
   CodeAssemblerTester asm_tester(isolate, JSParameterCount(kNumParams));
   {
     CodeStubAssembler m(asm_tester.state());
-    base::Optional<TNode<IntPtrT>> p1_untagged(m.SmiUntag(m.Parameter<Smi>(2)));
-    base::Optional<TNode<IntPtrT>> p2_untagged(m.SmiUntag(m.Parameter<Smi>(3)));
+    std::optional<TNode<IntPtrT>> p1_untagged(m.SmiUntag(m.Parameter<Smi>(2)));
+    std::optional<TNode<IntPtrT>> p2_untagged(m.SmiUntag(m.Parameter<Smi>(3)));
     m.Return(m.ExtractFixedArray(m.Parameter<FixedArrayBase>(1), p1_untagged,
                                  p2_untagged));
   }
@@ -4031,7 +4030,7 @@ TEST(InstructionSchedulingCallerSavedRegisters) {
     TNode<IntPtrT> x = m.SmiUntag(m.Parameter<Smi>(1));
     TNode<WordT> y = m.WordOr(m.WordShr(x, 1), m.IntPtrConstant(1));
     TNode<ExternalReference> isolate_ptr =
-        m.ExternalConstant(ExternalReference::isolate_address(isolate));
+        m.ExternalConstant(ExternalReference::isolate_address());
     m.CallCFunctionWithCallerSavedRegisters(
         m.ExternalConstant(
             ExternalReference::smi_lexicographic_compare_function()),

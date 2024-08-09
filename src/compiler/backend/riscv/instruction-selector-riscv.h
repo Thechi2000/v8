@@ -4,8 +4,11 @@
 #ifndef V8_COMPILER_BACKEND_RISCV_INSTRUCTION_SELECTOR_RISCV_H_
 #define V8_COMPILER_BACKEND_RISCV_INSTRUCTION_SELECTOR_RISCV_H_
 
+#include <optional>
+
 #include "src/base/bits.h"
 #include "src/compiler/backend/instruction-selector-impl.h"
+#include "src/compiler/backend/instruction-selector.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/turboshaft/operations.h"
@@ -44,8 +47,7 @@ class RiscvOperandGeneratorT final : public OperandGeneratorT<Adapter> {
       auto constant = selector()->constant_view(node);
       if ((IsIntegerConstant(constant) &&
            GetIntegerConstantValue(constant) == 0) ||
-          (constant.is_float() &&
-           (base::bit_cast<int64_t>(constant.float_value()) == 0))) {
+          constant.is_float_zero()) {
         return UseImmediate(node);
       }
     }
@@ -70,7 +72,7 @@ class RiscvOperandGeneratorT final : public OperandGeneratorT<Adapter> {
     return constant.int64_value();
   }
 
-  base::Optional<int64_t> GetOptionalIntegerConstant(
+  std::optional<int64_t> GetOptionalIntegerConstant(
       InstructionSelectorT<TurboshaftAdapter>* selector,
       turboshaft::OpIndex operation) {
     if (!this->is_constant(operation)) return {};
@@ -96,8 +98,7 @@ class RiscvOperandGeneratorT final : public OperandGeneratorT<Adapter> {
       auto constant = selector()->constant_view(node);
       if ((IsIntegerConstant(constant) &&
            GetIntegerConstantValue(constant) == 0) ||
-          (constant.is_float() &&
-           (base::bit_cast<int64_t>(constant.float_value()) == 0))) {
+          constant.is_float_zero()) {
         return true;
       }
     }
@@ -207,11 +208,13 @@ static void VisitRRIR(InstructionSelectorT<Adapter>* selector,
 
 template <typename Adapter>
 void VisitRRR(InstructionSelectorT<Adapter>* selector, InstructionCode opcode,
-              typename Adapter::node_t node) {
+              typename Adapter::node_t node,
+              typename OperandGeneratorT<Adapter>::RegisterUseKind kind =
+                  OperandGeneratorT<Adapter>::RegisterUseKind::kUseRegister) {
   RiscvOperandGeneratorT<Adapter> g(selector);
   selector->Emit(opcode, g.DefineAsRegister(node),
                  g.UseRegister(selector->input_at(node, 0)),
-                 g.UseRegister(selector->input_at(node, 1)));
+                 g.UseRegister(selector->input_at(node, 1), kind));
 }
 
 void VisitRRR(InstructionSelectorT<TurbofanAdapter>* selector,

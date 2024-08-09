@@ -1460,8 +1460,9 @@ MaybeHandle<JSNumberFormat> JSNumberFormat::New(Isolate* isolate,
 
   DirectHandle<Managed<icu::number::LocalizedNumberFormatter>>
       managed_number_formatter =
-          Managed<icu::number::LocalizedNumberFormatter>::FromRawPtr(
-              isolate, 0, new icu::number::LocalizedNumberFormatter(fmt));
+          Managed<icu::number::LocalizedNumberFormatter>::From(
+              isolate, 0,
+              std::make_shared<icu::number::LocalizedNumberFormatter>(fmt));
 
   // Now all properties are ready, so we can allocate the result object.
   Handle<JSNumberFormat> number_format = Cast<JSNumberFormat>(
@@ -1724,8 +1725,8 @@ Maybe<IntlMathematicalValue> IntlMathematicalValue::From(Isolate* isolate,
     uint16_t ch = string->Get(1);
     if (ch == 'b' || ch == 'B' || ch == 'o' || ch == 'O' || ch == 'x' ||
         ch == 'X') {
-      result.approx_ = StringToDouble(
-          isolate, string, ALLOW_HEX | ALLOW_OCTAL | ALLOW_BINARY, 0);
+      result.approx_ =
+          StringToDouble(isolate, string, ALLOW_NON_DECIMAL_PREFIX, 0);
       // If approx is within the precision, just return as Number.
       if (result.approx_ < kMaxSafeInteger) {
         result.value_ = isolate->factory()->NewNumber(result.approx_);
@@ -1745,7 +1746,7 @@ Maybe<IntlMathematicalValue> IntlMathematicalValue::From(Isolate* isolate,
   }
   // If it does not fit StrDecimalLiteral StrWhiteSpace_opt, StringToDouble will
   // parse it as NaN, in that case, return NaN.
-  result.approx_ = StringToDouble(isolate, string, NO_CONVERSION_FLAGS, 0);
+  result.approx_ = StringToDouble(isolate, string, NO_CONVERSION_FLAG, 0);
   if (std::isnan(result.approx_)) {
     result.value_ = factory->nan_value();
     return Just(result);

@@ -153,8 +153,8 @@ class WasmLoweringReducer : public Next {
 
     // Convert HeapNumber to SMI if possible.
     BIND(heap_number_label);
-    V<Float64> float_value = __ template LoadField<Float64>(
-        object, AccessBuilder::ForHeapNumberValue());
+    V<Float64> float_value =
+        __ LoadHeapNumberValue(V<HeapNumber>::Cast(object));
     // Check range of float value.
     GOTO_IF(__ Float64LessThan(float_value, __ Float64Constant(kInt31MinValue)),
             end_label, object);
@@ -372,8 +372,8 @@ class WasmLoweringReducer : public Next {
     return result_value;
   }
 
-  OpIndex REDUCE(StringAsWtf16)(OpIndex string) {
-    Label<Object> done(&Asm());
+  V<String> REDUCE(StringAsWtf16)(V<String> string) {
+    Label<String> done(&Asm());
     V<Word32> instance_type = __ LoadInstanceTypeField(__ LoadMapField(string));
     V<Word32> string_representation = __ Word32BitwiseAnd(
         instance_type, __ Word32Constant(kStringRepresentationMask));
@@ -517,6 +517,8 @@ class WasmLoweringReducer : public Next {
       case wasm::kI64:
         return is_signed ? MemoryRepresentation::Int64()
                          : MemoryRepresentation::Uint64();
+      case wasm::kF16:
+        return MemoryRepresentation::Float16();
       case wasm::kF32:
         return MemoryRepresentation::Float32();
       case wasm::kF64:
@@ -745,13 +747,12 @@ class WasmLoweringReducer : public Next {
       // supertype array.
       if (static_cast<uint32_t>(rtt_depth) >=
           wasm::kMinimumSupertypeArraySize) {
-        V<WordPtr> supertypes_length = ChangeSmiToWordPtr(
+        V<Word32> supertypes_length = __ UntagSmi(
             __ Load(type_info, LoadOp::Kind::TaggedBase().Immutable(),
                     MemoryRepresentation::TaggedSigned(),
                     WasmTypeInfo::kSupertypesLengthOffset));
-        __ TrapIfNot(
-            __ UintPtrLessThan(__ IntPtrConstant(rtt_depth), supertypes_length),
-            TrapId::kTrapIllegalCast);
+        __ TrapIfNot(__ Uint32LessThan(rtt_depth, supertypes_length),
+                     TrapId::kTrapIllegalCast);
       }
 
       V<Object> maybe_match =
@@ -815,14 +816,11 @@ class WasmLoweringReducer : public Next {
       // supertype array.
       if (static_cast<uint32_t>(rtt_depth) >=
           wasm::kMinimumSupertypeArraySize) {
-        // TODO(mliedtke): Why do we convert to word size and not just do a 32
-        // bit operation? (The same applies for WasmTypeCast below.)
-        V<WordPtr> supertypes_length = ChangeSmiToWordPtr(
+        V<Word32> supertypes_length = __ UntagSmi(
             __ Load(type_info, LoadOp::Kind::TaggedBase().Immutable(),
                     MemoryRepresentation::TaggedSigned(),
                     WasmTypeInfo::kSupertypesLengthOffset));
-        GOTO_IF_NOT(LIKELY(__ UintPtrLessThan(__ IntPtrConstant(rtt_depth),
-                                              supertypes_length)),
+        GOTO_IF_NOT(LIKELY(__ Uint32LessThan(rtt_depth, supertypes_length)),
                     end_label, __ Word32Constant(0));
       }
 
@@ -943,10 +941,6 @@ class WasmLoweringReducer : public Next {
                    MemoryRepresentation::TaggedPointer(),
                    IsolateData::root_slot_offset(index));
 #endif
-  }
-
-  V<WordPtr> ChangeSmiToWordPtr(V<Smi> smi) {
-    return __ ChangeInt32ToIntPtr(__ UntagSmi(smi));
   }
 
   V<Word32> IsDataRefMap(V<Map> map) {

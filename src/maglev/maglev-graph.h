@@ -39,9 +39,11 @@ class Graph final : public ZoneObject {
         float_(zone),
         external_references_(zone),
         parameters_(zone),
-        allocations_(zone),
+        allocations_escape_map_(zone),
+        allocations_elide_map_(zone),
         register_inputs_(),
         constants_(zone),
+        trusted_constants_(zone),
         inlined_functions_(zone),
         is_osr_(is_osr),
         scope_infos_(zone) {}
@@ -60,6 +62,8 @@ class Graph final : public ZoneObject {
   BasicBlock* last_block() const { return blocks_.back(); }
 
   void Add(BasicBlock* block) { blocks_.push_back(block); }
+
+  void set_blocks(ZoneVector<BasicBlock*> blocks) { blocks_ = blocks; }
 
   uint32_t tagged_stack_slots() const { return tagged_stack_slots_; }
   uint32_t untagged_stack_slots() const { return untagged_stack_slots_; }
@@ -104,16 +108,31 @@ class Graph final : public ZoneObject {
     return external_references_;
   }
   ZoneVector<InitialValue*>& parameters() { return parameters_; }
+
   // Running JS2, 99.99% of the cases, we have less than 2 dependencies.
-  using AllocationDependencies = SmallZoneVector<InlinedAllocation*, 2>;
-  ZoneMap<InlinedAllocation*, AllocationDependencies>& allocations() {
-    return allocations_;
+  using SmallAllocationVector = SmallZoneVector<InlinedAllocation*, 2>;
+
+  // If the key K of the map escape, all the set allocations_escape_map[K] must
+  // also escape.
+  ZoneMap<InlinedAllocation*, SmallAllocationVector>& allocations_escape_map() {
+    return allocations_escape_map_;
+  }
+  // The K of the map can be elided if it hasn't escaped and all the set
+  // allocations_elide_map[K] can also be elided.
+  ZoneMap<InlinedAllocation*, SmallAllocationVector>& allocations_elide_map() {
+    return allocations_elide_map_;
   }
 
   RegList& register_inputs() { return register_inputs_; }
   compiler::ZoneRefMap<compiler::ObjectRef, Constant*>& constants() {
     return constants_;
   }
+
+  compiler::ZoneRefMap<compiler::HeapObjectRef, TrustedConstant*>&
+  trusted_constants() {
+    return trusted_constants_;
+  }
+
   ZoneVector<OptimizedCompilationInfo::InlinedFunctionHolder>&
   inlined_functions() {
     return inlined_functions_;
@@ -130,7 +149,10 @@ class Graph final : public ZoneObject {
     return osr_values().back()->stack_slot() + 1;
   }
 
-  int NewObjectId() { return object_ids_++; }
+  uint32_t NewObjectId() { return object_ids_++; }
+
+  void set_has_resumable_generator() { has_resumable_generator_ = true; }
+  bool has_resumable_generator() const { return has_resumable_generator_; }
 
   // Resolve the scope info of a context value.
   // An empty result means we don't statically know the context's scope.
@@ -204,15 +226,19 @@ class Graph final : public ZoneObject {
   ZoneMap<uint64_t, Float64Constant*> float_;
   ZoneMap<Address, ExternalConstant*> external_references_;
   ZoneVector<InitialValue*> parameters_;
-  ZoneMap<InlinedAllocation*, AllocationDependencies> allocations_;
+  ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_escape_map_;
+  ZoneMap<InlinedAllocation*, SmallAllocationVector> allocations_elide_map_;
   RegList register_inputs_;
   compiler::ZoneRefMap<compiler::ObjectRef, Constant*> constants_;
+  compiler::ZoneRefMap<compiler::HeapObjectRef, TrustedConstant*>
+      trusted_constants_;
   ZoneVector<OptimizedCompilationInfo::InlinedFunctionHolder>
       inlined_functions_;
   bool has_recursive_calls_ = false;
   int total_inlined_bytecode_size_ = 0;
   bool is_osr_ = false;
-  int object_ids_ = 0;
+  uint32_t object_ids_ = 0;
+  bool has_resumable_generator_ = false;
   ZoneUnorderedMap<ValueNode*, compiler::OptionalScopeInfoRef> scope_infos_;
 };
 

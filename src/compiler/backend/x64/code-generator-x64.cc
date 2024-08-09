@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 #include <limits>
+#include <optional>
 
 #include "src/base/logging.h"
-#include "src/base/optional.h"
 #include "src/base/overflowing-math.h"
 #include "src/builtins/builtins.h"
 #include "src/codegen/assembler.h"
@@ -32,9 +32,7 @@
 #include "src/wasm/wasm-objects.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-namespace v8 {
-namespace internal {
-namespace compiler {
+namespace v8::internal::compiler {
 
 #define __ masm()->
 
@@ -153,10 +151,7 @@ class X64OperandConverter : public InstructionOperandConverter {
       DCHECK_EQ(0, constant.ToFloat64().AsUint64());
       return Immediate(0);
     }
-    if (RelocInfo::IsWasmReference(constant.rmode())) {
-      return Immediate(constant.ToInt32(), constant.rmode());
-    }
-    return Immediate(constant.ToInt32());
+    return Immediate(constant.ToInt32(), constant.rmode());
   }
 
   Operand ToOperand(InstructionOperand* op, int extra = 0) {
@@ -2707,6 +2702,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       VectorLength vec_len = VectorLengthField::decode(opcode);
       if (vec_len == kV128) {
         switch (lane_size) {
+          case kL16: {
+            // F16x8Abs
+            CpuFeatureScope avx_scope(masm(), AVX);
+            __ Absph(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                     kScratchRegister);
+            break;
+          }
           case kL32: {
             // F32x4Abs
             __ Absps(i.OutputSimd128Register(), i.InputSimd128Register(0),
@@ -2763,6 +2765,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       VectorLength vec_len = VectorLengthField::decode(opcode);
       if (vec_len == kV128) {
         switch (lane_size) {
+          case kL16: {
+            // F16x8Neg
+            CpuFeatureScope avx_scope(masm(), AVX);
+            __ Negph(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                     kScratchRegister);
+            break;
+          }
           case kL32: {
             // F32x4Neg
             __ Negps(i.OutputSimd128Register(), i.InputSimd128Register(0),
@@ -3254,6 +3263,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       VectorLength vec_len = VectorLengthField::decode(opcode);
       if (vec_len == kV128) {
         switch (lane_size) {
+          case kL16: {
+            CpuFeatureScope f16c_scope(masm(), F16C);
+            CpuFeatureScope avx2_scope(masm(), AVX2);
+            __ vcvtps2ph(i.OutputDoubleRegister(0), i.InputDoubleRegister(0),
+                         0);
+            __ vpbroadcastw(i.OutputSimd128Register(),
+                            i.OutputDoubleRegister(0));
+            break;
+          }
           case kL32: {
             // F32x4Splat
             __ F32x4Splat(i.OutputSimd128Register(), i.InputDoubleRegister(0));
@@ -3298,6 +3316,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       VectorLength vec_len = VectorLengthField::decode(opcode);
       if (vec_len == kV128) {
         switch (lane_size) {
+          case kL16: {
+            // F16x8ExtractLane
+            CpuFeatureScope f16c_scope(masm(), F16C);
+            CpuFeatureScope avx_scope(masm(), AVX);
+            __ Pextrw(kScratchRegister, i.InputSimd128Register(0),
+                      i.InputUint8(1));
+            __ vmovd(i.OutputFloatRegister(), kScratchRegister);
+            __ vcvtph2ps(i.OutputFloatRegister(), i.OutputFloatRegister());
+            break;
+          }
           case kL32: {
             // F32x4ExtractLane
             __ F32x4ExtractLane(i.OutputFloatRegister(),
@@ -3324,6 +3352,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       VectorLength vec_len = VectorLengthField::decode(opcode);
       if (vec_len == kV128) {
         switch (lane_size) {
+          case kL16: {
+            // F16x8ReplaceLane
+            CpuFeatureScope f16c_scope(masm(), F16C);
+            CpuFeatureScope avx_scope(masm(), AVX);
+            __ vcvtps2ph(kScratchDoubleReg, i.InputDoubleRegister(2), 0);
+            __ vmovd(kScratchRegister, kScratchDoubleReg);
+            __ vpinsrw(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                       kScratchRegister, i.InputInt8(1));
+            break;
+          }
           case kL32: {
             // F32x4ReplaceLane
             // The insertps instruction uses imm8[5:4] to indicate the lane
@@ -3360,6 +3398,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         XMMRegister dst = i.OutputSimd128Register();
         XMMRegister src = i.InputSimd128Register(0);
         switch (lane_size) {
+          case kL16: {
+            // F16x8Sqrt
+            CpuFeatureScope f16c_scope(masm(), F16C);
+            CpuFeatureScope avx_scope(masm(), AVX);
+
+            __ vcvtph2ps(kScratchSimd256Reg, src);
+            __ vsqrtps(kScratchSimd256Reg, kScratchSimd256Reg);
+            __ vcvtps2ph(dst, kScratchSimd256Reg, 0);
+            break;
+          }
           case kL32: {
             // F32x4Sqrt
             __ Sqrtps(dst, src);
@@ -3975,6 +4023,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       RoundingMode const mode =
           static_cast<RoundingMode>(MiscField::decode(instr->opcode()));
       __ Roundps(i.OutputSimd128Register(), i.InputSimd128Register(0), mode);
+      break;
+    }
+    case kX64F16x8Round: {
+      CpuFeatureScope f16c_scope(masm(), F16C);
+      CpuFeatureScope avx_scope(masm(), AVX);
+      RoundingMode const mode =
+          static_cast<RoundingMode>(MiscField::decode(instr->opcode()));
+      __ vcvtph2ps(kScratchSimd256Reg, i.InputSimd128Register(0));
+      __ vroundps(kScratchSimd256Reg, kScratchSimd256Reg, mode);
+      __ vcvtps2ph(i.OutputSimd128Register(), kScratchSimd256Reg, 0);
       break;
     }
     case kX64F64x2Round: {
@@ -7011,28 +7069,61 @@ void CodeGenerator::AssembleArchDeoptBranch(Instruction* instr,
     __ j(FlagsConditionToCondition(branch->condition), tlabel);
   }
 
-  // TODO(42204618): Support this test mode in wasm in an isolate-independent
-  // way.
-  if (v8_flags.deopt_every_n_times > 0 && isolate() != nullptr) {
-    ExternalReference counter =
-        ExternalReference::stress_deopt_count(isolate());
+  if (v8_flags.deopt_every_n_times > 0) {
+    if (isolate() != nullptr) {
+      ExternalReference counter =
+          ExternalReference::stress_deopt_count(isolate());
 
-    __ pushfq();
-    __ pushq(rax);
-    __ load_rax(counter);
-    __ decl(rax);
-    __ j(not_zero, &nodeopt, Label::kNear);
+      __ pushfq();
+      __ pushq(rax);
+      __ load_rax(counter);
+      __ decl(rax);
+      __ j(not_zero, &nodeopt, Label::kNear);
 
-    __ Move(rax, v8_flags.deopt_every_n_times);
-    __ store_rax(counter);
-    __ popq(rax);
-    __ popfq();
-    __ jmp(tlabel);
+      __ Move(rax, v8_flags.deopt_every_n_times);
+      __ store_rax(counter);
+      __ popq(rax);
+      __ popfq();
+      __ jmp(tlabel);
 
-    __ bind(&nodeopt);
-    __ store_rax(counter);
-    __ popq(rax);
-    __ popfq();
+      __ bind(&nodeopt);
+      __ store_rax(counter);
+      __ popq(rax);
+      __ popfq();
+    } else {
+#if V8_ENABLE_WEBASSEMBLY
+      CHECK(v8_flags.wasm_deopt);
+      CHECK(IsWasm());
+      __ pushfq();
+      __ pushq(rax);
+      __ pushq(rbx);
+      // Load the address of the counter into rbx.
+      __ movq(rbx, Operand(rbp, WasmFrameConstants::kWasmInstanceOffset));
+      __ movq(
+          rbx,
+          Operand(rbx, WasmTrustedInstanceData::kStressDeoptCounterOffset - 1));
+      // Load the counter into rax and decrement it.
+      __ movq(rax, Operand(rbx, 0));
+      __ decl(rax);
+      __ j(not_zero, &nodeopt, Label::kNear);
+      // The counter is zero, reset counter.
+      __ Move(rax, v8_flags.deopt_every_n_times);
+      __ movq(Operand(rbx, 0), rax);
+      // Restore registers and jump to deopt label.
+      __ popq(rbx);
+      __ popq(rax);
+      __ popfq();
+      __ jmp(tlabel);
+      // Write back counter and restore registers.
+      __ bind(&nodeopt);
+      __ movq(Operand(rbx, 0), rax);
+      __ popq(rbx);
+      __ popq(rax);
+      __ popfq();
+#else
+      UNREACHABLE();
+#endif
+    }
   }
 
   if (!branch->fallthru) {
@@ -7104,7 +7195,7 @@ void CodeGenerator::AssembleArchConditionalBranch(Instruction* instr,
 
 void CodeGenerator::AssembleArchBinarySearchSwitchRange(
     Register input, RpoNumber def_block, std::pair<int32_t, Label*>* begin,
-    std::pair<int32_t, Label*>* end, base::Optional<int32_t>& last_cmp_value) {
+    std::pair<int32_t, Label*>* end, std::optional<int32_t>& last_cmp_value) {
   if (end - begin < kBinarySearchSwitchMinimalCases) {
     if (last_cmp_value && *last_cmp_value == begin->first) {
       // No need to do another repeat cmp.
@@ -7137,7 +7228,7 @@ void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
   for (size_t index = 2; index < instr->InputCount(); index += 2) {
     cases.push_back({i.InputInt32(index + 0), GetLabel(i.InputRpo(index + 1))});
   }
-  base::Optional<int32_t> last_cmp_value;
+  std::optional<int32_t> last_cmp_value;
   AssembleArchBinarySearchSwitchRange(input, i.InputRpo(1), cases.data(),
                                       cases.data() + cases.size(),
                                       last_cmp_value);
@@ -7269,7 +7360,7 @@ void CodeGenerator::AssembleConstructFrame() {
           call_descriptor->IsWasmImportWrapper() ||
           call_descriptor->IsWasmCapiFunction()) {
         // For import wrappers and C-API functions, this stack slot is only used
-        // for printing stack traces in V8. Also, it holds a WasmApiFunctionRef
+        // for printing stack traces in V8. Also, it holds a WasmImportData
         // instead of the instance itself, which is taken care of in the frames
         // accessors.
         __ pushq(kWasmInstanceRegister);
@@ -7629,7 +7720,7 @@ void CodeGenerator::SetPendingMove(MoveOperands* move) {
     X64OperandConverter g(this, nullptr);
     Constant src = g.ToConstant(&move->source());
     if (move->destination().IsStackSlot() &&
-        (RelocInfo::IsWasmReference(src.rmode()) ||
+        (!RelocInfo::IsNoInfo(src.rmode()) ||
          (src.type() != Constant::kInt32 && src.type() != Constant::kInt64))) {
       move_cycle_.pending_scratch_register_use = true;
     }
@@ -7675,23 +7766,19 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
   auto MoveConstantToRegister = [&](Register dst, Constant src) {
     switch (src.type()) {
       case Constant::kInt32: {
-        if (RelocInfo::IsWasmReference(src.rmode())) {
-          __ movq(dst, Immediate64(src.ToInt64(), src.rmode()));
+        int32_t value = src.ToInt32();
+        if (value == 0 && RelocInfo::IsNoInfo(src.rmode())) {
+          __ xorl(dst, dst);
         } else {
-          int32_t value = src.ToInt32();
-          if (value == 0) {
-            __ xorl(dst, dst);
-          } else {
-            __ movl(dst, Immediate(value));
-          }
+          __ movl(dst, Immediate(value, src.rmode()));
         }
         break;
       }
       case Constant::kInt64:
-        if (RelocInfo::IsWasmReference(src.rmode())) {
-          __ movq(dst, Immediate64(src.ToInt64(), src.rmode()));
-        } else {
+        if (RelocInfo::IsNoInfo(src.rmode())) {
           __ Move(dst, src.ToInt64());
+        } else {
+          __ movq(dst, Immediate64(src.ToInt64(), src.rmode()));
         }
         break;
       case Constant::kFloat32:
@@ -7729,7 +7816,7 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
   };
   // Helper function to write the given constant to the stack.
   auto MoveConstantToSlot = [&](Operand dst, Constant src) {
-    if (!RelocInfo::IsWasmReference(src.rmode())) {
+    if (RelocInfo::IsNoInfo(src.rmode())) {
       switch (src.type()) {
         case Constant::kInt32:
           __ Move(dst, src.ToInt32());
@@ -8067,6 +8154,4 @@ void CodeGenerator::AssembleJumpTable(Label** targets, size_t target_count) {
 
 #undef __
 
-}  // namespace compiler
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::compiler
