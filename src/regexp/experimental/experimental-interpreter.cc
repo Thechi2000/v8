@@ -962,7 +962,8 @@ class NfaInterpreter {
           break;
 
         case RegExpInstruction::CLEAR_REGISTER:
-          SBXCHECK_BOUNDS(inst.payload.register_index, register_count_per_match_);
+          SBXCHECK_BOUNDS(inst.payload.register_index,
+                          register_count_per_match_);
           GetRegisterArray(t)[inst.payload.register_index] =
               kUndefinedRegisterValue;
           ++t.pc;
@@ -1035,7 +1036,7 @@ class NfaInterpreter {
           // ensures that all the relevant lookarounds has already been run.
 
           if (!only_captureless_lookbehinds_) {
-            SBXCHECK_BOUNDS(inst.payload.lookaround_id,
+            SBXCHECK_BOUNDS(inst.payload.read_lookaround.lookaround_index(),
                             lookaround_table_->size());
 
             if ((*lookaround_table_)[inst.payload.read_lookaround
