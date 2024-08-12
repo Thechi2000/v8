@@ -384,13 +384,13 @@ class NfaInterpreter {
 
         // Stores the partial information for a lookaround. The rest will be
         // determined upon reaching a `WRITE_LOOKAROUND_TABLE` instruction.
-        lookaround_index = inst.payload.start_lookaround.lookaround_index();
-        lookaround =
-            Lookaround{.match_pc = i,
-                       .capture_pc = -1,
-                       .is_ahead = inst.payload.start_lookaround.is_ahead()};
+        lookaround_index = inst.payload.lookaround.index();
+        lookaround = Lookaround{.match_pc = i,
+                                .capture_pc = -1,
+                                .type = inst.payload.lookaround.type()};
 
-        if (inst.payload.start_lookaround.is_ahead()) {
+        if (inst.payload.lookaround.type() ==
+            RegExpLookaround::Type::LOOKAHEAD) {
           only_captureless_lookbehinds_ = false;
         }
       }
@@ -409,7 +409,7 @@ class NfaInterpreter {
         // Since the lookarounds are not in order in the `lookarounds_` array,
         // we first fill it until it has the correct size.
         while (lookarounds_.length() <= lookaround_index) {
-          lookarounds_.Add({-1, -1, false}, zone_);
+          lookarounds_.Add({-1, -1, RegExpLookaround::Type::LOOKBEHIND}, zone_);
         }
         lookarounds_.Set(lookaround_index, *lookaround);
         lookaround = {};
@@ -594,7 +594,7 @@ class NfaInterpreter {
       active_threads_.Rewind(0);
 
       current_lookaround_ = i;
-      reverse_ = lookarounds_.at(i).is_ahead;
+      reverse_ = lookarounds_.at(i).type == RegExpLookaround::Type::LOOKAHEAD;
       input_index_ = reverse_ ? input_.length() : 0;
 
       active_threads_.Add(NewEmptyThread(lookarounds_.at(i).match_pc), zone_);
@@ -644,7 +644,7 @@ class NfaInterpreter {
 
       best_match_thread_ = std::nullopt;
 
-      reverse_ = !lookaround.is_ahead;
+      reverse_ = lookaround.type == RegExpLookaround::Type::LOOKBEHIND;
       input_index_ = GetLookaroundMatchIndexArray(main_thread)[i];
 
       // We reuse the same thread as initial thread, to avoid having to merge
@@ -1036,35 +1036,34 @@ class NfaInterpreter {
           // ensures that all the relevant lookarounds has already been run.
 
           if (!only_captureless_lookbehinds_) {
-            SBXCHECK_BOUNDS(inst.payload.read_lookaround.lookaround_index(),
+            SBXCHECK_BOUNDS(inst.payload.lookaround.index(),
                             lookaround_table_->size());
 
-            if ((*lookaround_table_)[inst.payload.read_lookaround
-                                         .lookaround_index()][input_index_] !=
-                inst.payload.read_lookaround.is_positive()) {
+            if ((*lookaround_table_)[inst.payload.lookaround.index()]
+                                    [input_index_] !=
+                inst.payload.lookaround.is_positive()) {
               DestroyThread(t);
               return RegExp::kInternalRegExpSuccess;
             }
 
             // Store the match informations for positive lookarounds.
-            if (inst.payload.read_lookaround.is_positive() &&
+            if (inst.payload.lookaround.is_positive() &&
                 !only_captureless_lookbehinds_) {
               GetLookaroundClockArray(
-                  t)[inst.payload.read_lookaround.lookaround_index()] = clock;
+                  t)[inst.payload.lookaround.index()] = clock;
               GetLookaroundMatchIndexArray(
-                  t)[inst.payload.read_lookaround.lookaround_index()] =
-                  input_index_;
+                  t)[inst.payload.lookaround.index()] = input_index_;
             }
 
             ++t.pc;
             break;
           } else {
             const int32_t lookbehind_index =
-                inst.payload.read_lookaround.lookaround_index();
+                inst.payload.lookaround.index();
             SBXCHECK_BOUNDS(lookbehind_index, lookbehind_table_->length());
 
             if (lookbehind_table_->at(lookbehind_index) !=
-                inst.payload.read_lookaround.is_positive()) {
+                inst.payload.lookaround.is_positive()) {
               DestroyThread(t);
               return RegExp::kInternalRegExpSuccess;
             }
@@ -1455,7 +1454,7 @@ class NfaInterpreter {
   struct Lookaround {
     int match_pc;
     int capture_pc;
-    bool is_ahead;
+    RegExpLookaround::Type type;
   };
 
   // Stores the match pc, capture pc and direction of each lookaround,

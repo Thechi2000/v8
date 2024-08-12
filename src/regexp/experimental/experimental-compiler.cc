@@ -297,9 +297,11 @@ class BytecodeAssembler {
 
   void EndLoop() { code_.Add(RegExpInstruction::EndLoop(), zone_); }
 
-  void StartLookaround(int lookaround_index, bool is_ahead) {
-    code_.Add(RegExpInstruction::StartLookaround(lookaround_index, is_ahead),
-              zone_);
+  void StartLookaround(int lookaround_index, bool is_positive,
+                       RegExpLookaround::Type type) {
+    code_.Add(
+        RegExpInstruction::StartLookaround(lookaround_index, is_positive, type),
+        zone_);
   }
 
   void EndLookaround() { code_.Add(RegExpInstruction::EndLookaround(), zone_); }
@@ -308,8 +310,10 @@ class BytecodeAssembler {
     code_.Add(RegExpInstruction::WriteLookTable(index), zone_);
   }
 
-  void ReadLookaroundTable(int index, bool is_positive) {
-    code_.Add(RegExpInstruction::ReadLookTable(index, is_positive), zone_);
+  void ReadLookaroundTable(int index, bool is_positive,
+                           RegExpLookaround::Type type) {
+    code_.Add(RegExpInstruction::ReadLookTable(index, is_positive, type),
+              zone_);
   }
 
   void SetQuantifierToClock(int32_t quantifier_id) {
@@ -625,9 +629,8 @@ class CompileVisitor : private RegExpVisitor {
   // Generate all the instructions to match and capture a lookaround.
   void CompileLookaround(RegExpLookaround* lookaround) {
     // Generate the first section, reversed in the case of a lookahead.
-    assembler_.StartLookaround(
-        RemapLookaround(lookaround->index()),
-        lookaround->type() == RegExpLookaround::LOOKAHEAD);
+    assembler_.StartLookaround(RemapLookaround(lookaround->index()),
+                               lookaround->is_positive(), lookaround->type());
 
     // If the lookaround is not anchored, we add a /.*?/ at its start, such
     // that the resulting automaton will run over the whole input.
@@ -1126,7 +1129,7 @@ class CompileVisitor : private RegExpVisitor {
 
   void* VisitLookaround(RegExpLookaround* node, void*) override {
     assembler_.ReadLookaroundTable(RemapLookaround(node->index()),
-                                   node->is_positive());
+                                   node->is_positive(), node->type());
 
     // Add the lookbehind to the queue of lookbehinds to be compiled.
     if (!ignore_lookarounds_) {

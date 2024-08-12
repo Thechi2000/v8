@@ -5,8 +5,6 @@
 #ifndef V8_REGEXP_EXPERIMENTAL_EXPERIMENTAL_BYTECODE_H_
 #define V8_REGEXP_EXPERIMENTAL_EXPERIMENTAL_BYTECODE_H_
 
-#include <ios>
-
 #include "src/base/bit-field.h"
 #include "src/base/strings.h"
 #include "src/base/vector.h"
@@ -119,39 +117,27 @@ struct RegExpInstruction {
     base::uc16 max;  // Inclusive.
   };
 
-  class ReadLookaroundTablePayload {
+  class LookaroundPayload {
    public:
-    ReadLookaroundTablePayload() = default;
-    ReadLookaroundTablePayload(uint32_t lookaround_index, bool is_positive)
-        : payload_(IsPositive::update(LookaroundIndex::encode(lookaround_index),
-                                      is_positive)) {}
+    LookaroundPayload() = default;
+    LookaroundPayload(uint32_t lookaround_index, bool is_positive,
+                      RegExpLookaround::Type type)
+        : payload_(Type::update(
+              IsPositive::update(LookaroundIndex::encode(lookaround_index),
+                                 is_positive),
+              type)) {}
 
-    uint32_t lookaround_index() const {
+    uint32_t index() const {
       return LookaroundIndex::decode(payload_);
     }
     bool is_positive() const { return IsPositive::decode(payload_); }
+    RegExpLookaround::Type type() const { return Type::decode(payload_); }
 
    private:
     using IsPositive = base::BitField<bool, 0, 1>;
-    using LookaroundIndex = IsPositive::Next<uint32_t, 31>;
-    uint32_t payload_;
-  };
+    using Type = IsPositive::Next<RegExpLookaround::Type, 1>;
+    using LookaroundIndex = Type::Next<uint32_t, 30>;
 
-  class StartLookaroundPayload {
-   public:
-    StartLookaroundPayload() = default;
-    StartLookaroundPayload(uint32_t lookaround_index, bool is_ahead)
-        : payload_(IsAhead::update(LookaroundIndex::encode(lookaround_index),
-                                   is_ahead)) {}
-
-    uint32_t lookaround_index() const {
-      return LookaroundIndex::decode(payload_);
-    }
-    bool is_ahead() const { return IsAhead::decode(payload_); }
-
-   private:
-    using IsAhead = base::BitField<bool, 0, 1>;
-    using LookaroundIndex = IsAhead::Next<uint32_t, 31>;
     uint32_t payload_;
   };
 
@@ -261,11 +247,12 @@ struct RegExpInstruction {
   }
 
   static RegExpInstruction StartLookaround(int lookaround_index,
-                                           bool is_ahead) {
+                                           bool is_positive,
+                                           RegExpLookaround::Type type) {
     RegExpInstruction result;
     result.opcode = START_LOOKAROUND;
-    result.payload.start_lookaround =
-        StartLookaroundPayload(lookaround_index, is_ahead);
+    result.payload.lookaround =
+        LookaroundPayload(lookaround_index, is_positive, type);
     return result;
   }
 
@@ -282,12 +269,11 @@ struct RegExpInstruction {
     return result;
   }
 
-  static RegExpInstruction ReadLookTable(int32_t index, bool is_positive) {
+  static RegExpInstruction ReadLookTable(int32_t index, bool is_positive,
+                                         RegExpLookaround::Type type) {
     RegExpInstruction result;
     result.opcode = READ_LOOKAROUND_TABLE;
-
-    result.payload.read_lookaround =
-        ReadLookaroundTablePayload(index, is_positive);
+    result.payload.lookaround = LookaroundPayload(index, is_positive, type);
     return result;
   }
 
@@ -316,10 +302,8 @@ struct RegExpInstruction {
     int32_t group_id;
     // Payload of WRITE_LOOKAROUND_TABLE and FILTER_LOOKAROUND:
     int32_t lookaround_id;
-    // Payload of READ_LOOKAROUND_TABLE:
-    ReadLookaroundTablePayload read_lookaround;
-    // Payload of START_LOOKAROUND:
-    StartLookaroundPayload start_lookaround;
+    // Payload of READ_LOOKAROUND_TABLE and START_LOOKAROUND:
+    LookaroundPayload lookaround;
   } payload;
   static_assert(sizeof(payload) == 4);
 };
