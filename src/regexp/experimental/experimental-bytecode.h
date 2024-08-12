@@ -118,38 +118,40 @@ struct RegExpInstruction {
     base::uc16 min;  // Inclusive.
     base::uc16 max;  // Inclusive.
   };
+
   class ReadLookaroundTablePayload {
    public:
     ReadLookaroundTablePayload() = default;
-    ReadLookaroundTablePayload(int32_t LOOKAROUND_index, bool is_positive)
-        : payload_(IsPositive::update(LookaroundIndex::encode(LOOKAROUND_index),
+    ReadLookaroundTablePayload(uint32_t lookaround_index, bool is_positive)
+        : payload_(IsPositive::update(LookaroundIndex::encode(lookaround_index),
                                       is_positive)) {}
 
-    int32_t lookaround_index() const {
+    uint32_t lookaround_index() const {
       return LookaroundIndex::decode(payload_);
     }
     bool is_positive() const { return IsPositive::decode(payload_); }
 
    private:
     using IsPositive = base::BitField<bool, 0, 1>;
-    using LookaroundIndex = base::BitField<int32_t, 1, 31>;
+    using LookaroundIndex = IsPositive::Next<uint32_t, 31>;
     uint32_t payload_;
   };
+
   class StartLookaroundPayload {
    public:
     StartLookaroundPayload() = default;
-    StartLookaroundPayload(int32_t LOOKAROUND_index, bool is_ahead)
-        : payload_(IsAhead::update(LookaroundIndex::encode(LOOKAROUND_index),
+    StartLookaroundPayload(uint32_t lookaround_index, bool is_ahead)
+        : payload_(IsAhead::update(LookaroundIndex::encode(lookaround_index),
                                    is_ahead)) {}
 
-    int32_t lookaround_index() const {
+    uint32_t lookaround_index() const {
       return LookaroundIndex::decode(payload_);
     }
     bool is_ahead() const { return IsAhead::decode(payload_); }
 
    private:
     using IsAhead = base::BitField<bool, 0, 1>;
-    using LookaroundIndex = base::BitField<int32_t, 1, 31>;
+    using LookaroundIndex = IsAhead::Next<uint32_t, 31>;
     uint32_t payload_;
   };
 

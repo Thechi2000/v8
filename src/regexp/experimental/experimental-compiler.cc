@@ -187,9 +187,9 @@ class CanBeHandledVisitor final : private RegExpVisitor {
 
     // If `experimental_regexp_engine_capture_group_opt` is false, reject all
     // lookaheads or capturing lookbehinds.
-    if ((node->type() == RegExpLookaround::LOOKAHEAD ||
-         node->capture_count() > 0) &&
-        !v8_flags.experimental_regexp_engine_capture_group_opt) {
+    if (!v8_flags.experimental_regexp_engine_capture_group_opt &&
+        (node->type() == RegExpLookaround::LOOKAHEAD ||
+         node->capture_count() > 0)) {
       result_ = false;
       return nullptr;
     }
@@ -579,8 +579,8 @@ class CompileVisitor : private RegExpVisitor {
     //
     // See the comment on `NfaInterpreter` in experimental-interpreter.cc for
     // detailed explanation on the reversal's reasons. The sections are
-    // delimited by the `START_LOOKAROUND` and `END_LOOKAROUND`, and the
-    // separation occurs right after the `WRITE_LOOKAROUND_TABLE`.
+    // delimited by `START_LOOKAROUND` and `END_LOOKAROUND`, and the separation
+    // occurs right after `WRITE_LOOKAROUND_TABLE`.
     //
     // If another lookaround is encountered during this phase, it is added
     // at the back of the queue.
@@ -629,7 +629,7 @@ class CompileVisitor : private RegExpVisitor {
         RemapLookaround(lookaround->index()),
         lookaround->type() == RegExpLookaround::LOOKAHEAD);
 
-    // If the lookaround is not anchored, we add a /.*/ at its start, such
+    // If the lookaround is not anchored, we add a /.*?/ at its start, such
     // that the resulting automaton will run over the whole input.
     if ((lookaround->type() == RegExpLookaround::LOOKAHEAD &&
          !lookaround->body()->IsAnchoredAtEnd()) ||
@@ -715,13 +715,14 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   void* VisitAlternative(RegExpAlternative* node, void*) override {
-    if (!reverse_) {
-      for (RegExpTree* child : *node->nodes()) {
-        child->Accept(this, nullptr);
+    if (reverse_) {
+      ZoneList<RegExpTree*>* children = node->nodes();
+      for (int i = children->length() - 1; i >= 0; --i) {
+        children->at(i)->Accept(this, nullptr);
       }
     } else {
-      for (int i = node->nodes()->length() - 1; i >= 0; --i) {
-        node->nodes()->at(i)->Accept(this, nullptr);
+      for (RegExpTree* child : *node->nodes()) {
+        child->Accept(this, nullptr);
       }
     }
     return nullptr;
@@ -783,13 +784,14 @@ class CompileVisitor : private RegExpVisitor {
   }
 
   void* VisitAtom(RegExpAtom* node, void*) override {
-    if (!reverse_) {
-      for (base::uc16 c : node->data()) {
-        assembler_.ConsumeRange(c, c);
+    if (reverse_) {
+      base::Vector<const base::uc16> data = node->data();
+      for (int i = data.length() - 1; i >= 0; --i) {
+        assembler_.ConsumeRange(data.at(i), data.at(i));
       }
     } else {
-      for (int i = node->data().length() - 1; i >= 0; --i) {
-        assembler_.ConsumeRange(node->data().at(i), node->data().at(i));
+      for (base::uc16 c : node->data()) {
+        assembler_.ConsumeRange(c, c);
       }
     }
     return nullptr;
@@ -1141,13 +1143,14 @@ class CompileVisitor : private RegExpVisitor {
   void* VisitEmpty(RegExpEmpty* node, void*) override { return nullptr; }
 
   void* VisitText(RegExpText* node, void*) override {
-    if (!reverse_) {
-      for (TextElement& text_el : *node->elements()) {
-        text_el.tree()->Accept(this, nullptr);
+    if (reverse_) {
+      ZoneList<TextElement>* elements = node->elements();
+      for (int i = elements->length() - 1; i >= 0; --i) {
+        elements->at(i).tree()->Accept(this, nullptr);
       }
     } else {
-      for (int i = node->elements()->length() - 1; i >= 0; --i) {
-        node->elements()->at(i).tree()->Accept(this, nullptr);
+      for (TextElement& text_el : *node->elements()) {
+        text_el.tree()->Accept(this, nullptr);
       }
     }
     return nullptr;
