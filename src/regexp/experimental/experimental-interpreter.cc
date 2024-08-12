@@ -1049,17 +1049,16 @@ class NfaInterpreter {
             // Store the match informations for positive lookarounds.
             if (inst.payload.lookaround.is_positive() &&
                 !only_captureless_lookbehinds_) {
-              GetLookaroundClockArray(
-                  t)[inst.payload.lookaround.index()] = clock;
-              GetLookaroundMatchIndexArray(
-                  t)[inst.payload.lookaround.index()] = input_index_;
+              GetLookaroundClockArray(t)[inst.payload.lookaround.index()] =
+                  clock;
+              GetLookaroundMatchIndexArray(t)[inst.payload.lookaround.index()] =
+                  input_index_;
             }
 
             ++t.pc;
             break;
           } else {
-            const int32_t lookbehind_index =
-                inst.payload.lookaround.index();
+            const int32_t lookbehind_index = inst.payload.lookaround.index();
             SBXCHECK_BOUNDS(lookbehind_index, lookbehind_table_->length());
 
             if (lookbehind_table_->at(lookbehind_index) !=

@@ -127,9 +127,7 @@ struct RegExpInstruction {
                                  is_positive),
               type)) {}
 
-    uint32_t index() const {
-      return LookaroundIndex::decode(payload_);
-    }
+    uint32_t index() const { return LookaroundIndex::decode(payload_); }
     bool is_positive() const { return IsPositive::decode(payload_); }
     RegExpLookaround::Type type() const { return Type::decode(payload_); }
 

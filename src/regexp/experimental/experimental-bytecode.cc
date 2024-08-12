@@ -105,8 +105,7 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
       os << "WRITE_LOOKAROUND_TABLE " << inst.payload.lookaround_id;
       break;
     case RegExpInstruction::READ_LOOKAROUND_TABLE:
-      os << "READ_LOOKAROUND_TABLE "
-         << inst.payload.lookaround.index()
+      os << "READ_LOOKAROUND_TABLE " << inst.payload.lookaround.index()
          << (inst.payload.lookaround.is_positive() ? " (positive)"
                                                    : " (negative)");
       break;
