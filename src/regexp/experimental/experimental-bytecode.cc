@@ -93,10 +93,13 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
       os << "END_LOOP";
       break;
     case RegExpInstruction::START_LOOKAROUND:
-      os << "START_LOOKAROUND " << inst.payload.lookaround.index()
+      os << "START_LOOKAROUND " << inst.payload.lookaround.index() << " ("
          << (inst.payload.lookaround.type() == RegExpLookaround::Type::LOOKAHEAD
-                 ? " (ahead)"
-                 : " (behind)");
+                 ? "ahead"
+                 : "behind")
+         << ", "
+         << (inst.payload.lookaround.is_positive() ? "positive" : "negative")
+         << ")";
       break;
     case RegExpInstruction::END_LOOKAROUND:
       os << "END_LOOKAROUND";
@@ -105,9 +108,14 @@ std::ostream& operator<<(std::ostream& os, const RegExpInstruction& inst) {
       os << "WRITE_LOOKAROUND_TABLE " << inst.payload.lookaround_id;
       break;
     case RegExpInstruction::READ_LOOKAROUND_TABLE:
-      os << "READ_LOOKAROUND_TABLE " << inst.payload.lookaround.index()
-         << (inst.payload.lookaround.is_positive() ? " (positive)"
-                                                   : " (negative)");
+      os << "READ_LOOKAROUND_TABLE " << inst.payload.lookaround.index() << " ("
+         << (inst.payload.lookaround.type() == RegExpLookaround::Type::LOOKAHEAD
+                 ? "ahead"
+                 : "behind")
+         << ", "
+         << (inst.payload.lookaround.is_positive() ? "positive" : "negative")
+         << ")";
+      break;
       break;
   }
   return os;
